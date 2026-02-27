@@ -1,9 +1,11 @@
 """
-MelodicCap Retargeter v1.0
+MelodicCap Retargeter v1.1
 ==========================
 Clean retargeter combining:
 - v4's proven delta-from-reference IK approach (mathematically correct)
-- AntiGrav V3's V2R (Vector-to-Rotation) FK method (simpler, more reliable)
+- AntiGrav V3's V2R (Vector-to-Rotation) FK method
+- Pole targets for correct elbow/knee direction (from Keemap/AntiGrav approach)
+- IK target rotation for wrist/foot orientation
 - Ground clamping (feet can't go through floor)
 - Smart foot pinning (reduces sliding when feet should be planted)
 - 4-segment spine animation via virtual midpoints
@@ -15,13 +17,14 @@ KEY DESIGN DECISIONS:
 - L/R mirroring is handled ONLY in the bone mapping table
 - Data is already in Blender coordinates from the capture script
 - IK targets use delta-from-reference (includes hip movement naturally)
-- FK rotations use V2R rotation_difference (simpler than parent-chain decomposition)
+- Pole targets use 3-point projection (Keemap algorithm) with delta-from-reference
+- FK rotations use V2R with per-bone rest axes from JaxRigify (not generic +Y)
 """
 
 bl_info = {
     "name": "MelodicCap Retargeter",
     "author": "Karsten / MelodicCap Studio",
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap motion capture data to JaxRigify armature",
@@ -73,6 +76,25 @@ FK_CHAINS = {
     'shin_fk.L':      (26, 28),   # right knee -> right ankle
 }
 
+# Pole targets for IK elbow/knee direction (3-point: root, mid, end)
+# Uses same L↔R mirroring as IK_TARGETS
+# Bone names verified from JaxRigify diagnostic dump
+POLE_TARGETS = {
+    'upper_arm_ik_target.R': (11, 13, 15),  # Person's L shoulder→elbow→wrist
+    'upper_arm_ik_target.L': (12, 14, 16),  # Person's R shoulder→elbow→wrist
+    'thigh_ik_target.R': (23, 25, 27),       # Person's L hip→knee→ankle
+    'thigh_ik_target.L': (24, 26, 28),       # Person's R hip→knee→ankle
+}
+
+# IK target rotation mapping (for wrist/foot orientation)
+# (start_landmark, end_landmark, rest_axis_for_that_ik_bone)
+IK_ROTATION = {
+    'hand_ik.R': (13, 15, Vector((0, 1, 0))),   # L forearm dir → hands point +Y at rest
+    'hand_ik.L': (14, 16, Vector((0, 1, 0))),   # R forearm dir
+    'foot_ik.R': (25, 27, Vector((0, 0, 1))),   # L shin dir → feet point +Z at rest
+    'foot_ik.L': (26, 28, Vector((0, 0, 1))),   # R shin dir
+}
+
 # Spine V2R using virtual midpoints (4-segment spine)
 SPINE_CHAINS = {
     'spine_fk':      ('hip_mid', 'spine_low'),
@@ -89,8 +111,20 @@ IK_FK_SWITCHES = {
     'thigh_parent.R': 'IK_FK',
 }
 
-# Rest axis for V2R: limbs point +Y, spine points +Z in Rigify
+# Rest axes for V2R FK rotations (verified from JaxRigify bone structure)
+# These are the bone rest directions in ARMATURE SPACE for each FK bone.
 BONE_REST_AXES = {
+    # Arms point outward from body
+    'upper_arm_fk.L': Vector((1, 0, 0)),
+    'forearm_fk.L': Vector((1, 0, 0)),
+    'upper_arm_fk.R': Vector((-1, 0, 0)),
+    'forearm_fk.R': Vector((-1, 0, 0)),
+    # Legs point down
+    'thigh_fk.L': Vector((0, 0, -1)),
+    'shin_fk.L': Vector((0, 0, -1)),
+    'thigh_fk.R': Vector((0, 0, -1)),
+    'shin_fk.R': Vector((0, 0, -1)),
+    # Spine points up
     'spine_fk': Vector((0, 0, 1)),
     'spine_fk.001': Vector((0, 0, 1)),
     'spine_fk.002': Vector((0, 0, 1)),
@@ -118,6 +152,37 @@ def get_mid(landmarks, i1, i2):
     if p1 and p2:
         return (p1 + p2) / 2
     return None
+
+def compute_pole_position(v_root, v_mid, v_end, offset=0.3):
+    """Compute IK pole target position from a 3-joint chain.
+
+    Uses the Keemap algorithm: project the mid-joint perpendicular to the
+    root→end line and place the pole target along that perpendicular direction.
+    Returns the pole position in mocap world space, or None if the limb is
+    too straight to determine a bend direction.
+
+    Args:
+        v_root: Start of chain (shoulder/hip) as Vector
+        v_mid: Mid-joint (elbow/knee) as Vector
+        v_end: End of chain (wrist/ankle) as Vector
+        offset: Distance to place pole target from mid-joint (meters)
+    """
+    line = v_end - v_root
+    if line.length < 0.001:
+        return None
+
+    line_norm = line.normalized()
+    # Project mid-joint onto the root→end line
+    proj_length = (v_mid - v_root).dot(line_norm)
+    proj_point = v_root + line_norm * proj_length
+
+    # Perpendicular from projected point to actual mid-joint = pole direction
+    pole_dir = v_mid - proj_point
+    if pole_dir.length < 0.005:
+        return None  # Limb too straight; pole direction undefined
+
+    return v_mid + pole_dir.normalized() * offset
+
 
 def compute_virtual_spine(landmarks):
     """Calculate virtual midpoints for 4-segment spine animation.
@@ -169,6 +234,9 @@ class MelodicCapImporter:
 
         # IK target rest positions (world space)
         self.ik_rest_positions = {}
+
+        # Reference pole positions (mocap world space, for delta computation)
+        self.ref_pole_positions = {}
 
         # Stats
         self.stats = {'frames': 0, 'keys': 0, 'bones': set()}
@@ -266,6 +334,20 @@ class MelodicCapImporter:
                 name = LANDMARKS.get(idx, str(idx))
                 log(f"    [{idx:2d}] {name:15s}: ({rel.x:7.3f}, {rel.y:7.3f}, {rel.z:7.3f})")
 
+        # --- Reference pole target positions ---
+        log(f"\n  Reference pole positions:")
+        for pole_bone, (lm_root, lm_mid, lm_end) in POLE_TARGETS.items():
+            v_root = get_lm(self.ref_landmarks, lm_root)
+            v_mid = get_lm(self.ref_landmarks, lm_mid)
+            v_end = get_lm(self.ref_landmarks, lm_end)
+            if v_root and v_mid and v_end:
+                pole_pos = compute_pole_position(v_root, v_mid, v_end)
+                if pole_pos:
+                    self.ref_pole_positions[pole_bone] = pole_pos
+                    log(f"    {pole_bone}: ({pole_pos.x:.3f}, {pole_pos.y:.3f}, {pole_pos.z:.3f})")
+                else:
+                    log(f"    {pole_bone}: limb too straight, skipping")
+
         return True
 
     def set_ik_fk_mode(self, use_ik=True):
@@ -285,7 +367,9 @@ class MelodicCapImporter:
         """Apply animation using hybrid approach:
         - Torso: delta from reference hip (root motion)
         - IK targets: delta from reference positions (hands/feet)
-        - FK rotations: V2R rotation_difference (limb orientation)
+        - IK rotation: wrist/foot orientation from forearm/shin direction
+        - Pole targets: 3-point projection for elbow/knee bend direction
+        - FK rotations: V2R with per-bone rest axes (visible in FK mode only)
         - Spine: V2R with virtual midpoints (body twist/bend)
         """
         log("\n" + "=" * 60)
@@ -299,6 +383,8 @@ class MelodicCapImporter:
         animate_fk = self.settings.get('animate_fk', True)
         animate_spine = self.settings.get('animate_spine', True)
         ground_clamp = self.settings.get('ground_clamp', True)
+        animate_poles = self.settings.get('animate_poles', True)
+        animate_ik_rot = self.settings.get('animate_ik_rot', True)
 
         # Force IK mode
         self.set_ik_fk_mode(use_ik=True)
@@ -328,10 +414,23 @@ class MelodicCapImporter:
                 if bone in pose_bones:
                     avail_spine[bone] = (s, e)
 
+        avail_poles = {}
+        if animate_poles:
+            for bone, (lm_root, lm_mid, lm_end) in POLE_TARGETS.items():
+                if bone in pose_bones and bone in self.ref_pole_positions:
+                    avail_poles[bone] = (lm_root, lm_mid, lm_end)
+
+        avail_ik_rot = {}
+        if animate_ik_rot:
+            for bone, (lm_start, lm_end, rest_ax) in IK_ROTATION.items():
+                if bone in pose_bones:
+                    avail_ik_rot[bone] = (lm_start, lm_end, rest_ax)
+
         has_torso = 'torso' in pose_bones
 
-        log(f"  Available: {len(avail_ik)} IK targets, {len(avail_fk)} FK chains, "
-            f"{len(avail_spine)} spine segments, torso={'yes' if has_torso else 'no'}")
+        log(f"  Available: {len(avail_ik)} IK targets, {len(avail_poles)} pole targets, "
+            f"{len(avail_fk)} FK chains, {len(avail_spine)} spine segments, "
+            f"{len(avail_ik_rot)} IK rotations, torso={'yes' if has_torso else 'no'}")
 
         # Smart pinning state (for feet)
         prev_deltas = {}
@@ -383,19 +482,20 @@ class MelodicCapImporter:
                 if not ref_pos:
                     continue
 
-                # Delta from reference, scaled
+                # Delta from reference, scaled (still in world/mocap space)
                 mocap_delta = (pos - ref_pos) * self.scale
 
-                # Convert to armature-local space
-                local_delta = world_inv.to_3x3() @ mocap_delta
-
                 # Ground clamp for feet: prevent going below floor
+                # (done in world space BEFORE converting to local, for correctness)
                 if ground_clamp and 'foot' in ik_bone:
                     rest_pos = self.ik_rest_positions.get(ik_bone)
                     if rest_pos:
-                        world_z = rest_pos.z + local_delta.z
+                        world_z = rest_pos.z + mocap_delta.z
                         if world_z < 0:
-                            local_delta.z = -rest_pos.z
+                            mocap_delta.z = -rest_pos.z
+
+                # Convert to armature-local space
+                local_delta = world_inv.to_3x3() @ mocap_delta
 
                 # Smart pinning for feet: reduce sliding
                 if 'foot' in ik_bone and pin_threshold > 0:
@@ -416,11 +516,69 @@ class MelodicCapImporter:
                     log(f"    Frame 0 {ik_bone}: ({local_delta.x:.4f}, {local_delta.y:.4f}, {local_delta.z:.4f})")
 
             # =================================================================
+            # IK TARGET ROTATION (WRIST/FOOT ORIENTATION)
+            # Orient hands along forearm direction and feet along shin direction.
+            # This gives proper wrist angle and foot tilt.
+            # =================================================================
+            for ik_bone, (lm_start, lm_end, rest_ax) in avail_ik_rot.items():
+                p1 = get_lm(lms, lm_start)
+                p2 = get_lm(lms, lm_end)
+                if not p1 or not p2:
+                    continue
+
+                limb_dir = (p2 - p1).normalized()
+                # Transform direction to armature-local space
+                dir_local = world_inv.to_quaternion() @ limb_dir
+
+                quat = rest_ax.rotation_difference(dir_local)
+
+                pb = pose_bones[ik_bone]
+                pb.rotation_mode = 'QUATERNION'
+                pb.rotation_quaternion = quat
+                pb.keyframe_insert(data_path="rotation_quaternion", frame=bf)
+
+                self.stats['keys'] += 1
+
+            # =================================================================
+            # POLE TARGETS (ELBOW/KNEE DIRECTION FOR IK SOLVER)
+            # Uses 3-point projection (Keemap algorithm) to compute where the
+            # elbow/knee should point, then applies as delta-from-reference.
+            # Without pole targets, the IK solver guesses bend direction.
+            # =================================================================
+            for pole_bone, (lm_root, lm_mid, lm_end) in avail_poles.items():
+                v_root = get_lm(lms, lm_root)
+                v_mid = get_lm(lms, lm_mid)
+                v_end = get_lm(lms, lm_end)
+                if not all([v_root, v_mid, v_end]):
+                    continue
+
+                pole_pos = compute_pole_position(v_root, v_mid, v_end)
+                if not pole_pos:
+                    continue  # Limb too straight; skip this frame
+
+                ref_pole = self.ref_pole_positions.get(pole_bone)
+                if not ref_pole:
+                    continue
+
+                # Delta from reference, scaled
+                pole_delta = (pole_pos - ref_pole) * self.scale
+                local_delta = world_inv.to_3x3() @ pole_delta
+
+                pb = pose_bones[pole_bone]
+                pb.location = local_delta
+                pb.keyframe_insert(data_path="location", frame=bf)
+
+                self.stats['keys'] += 1
+                self.stats['bones'].add(pole_bone)
+
+            # =================================================================
             # FK ROTATIONS (V2R METHOD)
             # For each bone: compute direction from start->end landmark,
             # transform to armature-local, then rotation_difference from
             # rest axis to target direction.
-            # Limbs point +Y at rest, spine points +Z at rest.
+            # NOTE: FK rotations are invisible in IK mode (IK_FK=0.0).
+            # They are keyframed so the user can switch to FK mode later.
+            # Rest axes are per-bone from JaxRigify bone structure.
             # =================================================================
             if animate_fk:
                 for fk_bone, (i1, i2) in avail_fk.items():
@@ -433,8 +591,10 @@ class MelodicCapImporter:
                     # Transform direction to armature-local space
                     target_dir_local = world_inv.to_quaternion() @ target_dir
 
-                    # Rest axis: limbs point +Y
-                    rest_axis = BONE_REST_AXES.get(fk_bone, Vector((0, 1, 0)))
+                    # Per-bone rest axis from JaxRigify bone structure
+                    rest_axis = BONE_REST_AXES.get(fk_bone)
+                    if not rest_axis:
+                        continue  # Skip bones without known rest axes
 
                     # Rotation from rest to target
                     quat = rest_axis.rotation_difference(target_dir_local)
@@ -538,6 +698,8 @@ class MELODICCAP_OT_import(bpy.types.Operator, ImportHelper):
             'start_frame': context.scene.melodiccap_start_frame,
             'animate_fk': context.scene.melodiccap_animate_fk,
             'animate_spine': context.scene.melodiccap_animate_spine,
+            'animate_poles': context.scene.melodiccap_animate_poles,
+            'animate_ik_rot': context.scene.melodiccap_animate_ik_rot,
             'ground_clamp': context.scene.melodiccap_ground_clamp,
             'pin_threshold': context.scene.melodiccap_pin_threshold,
         }
@@ -655,6 +817,8 @@ class MELODICCAP_PT_panel(bpy.types.Panel):
         box.prop(context.scene, "melodiccap_start_frame")
         box.prop(context.scene, "melodiccap_pin_threshold")
         box.separator()
+        box.prop(context.scene, "melodiccap_animate_poles")
+        box.prop(context.scene, "melodiccap_animate_ik_rot")
         box.prop(context.scene, "melodiccap_animate_fk")
         box.prop(context.scene, "melodiccap_animate_spine")
         box.prop(context.scene, "melodiccap_ground_clamp")
@@ -693,10 +857,20 @@ def register():
         min=1,
         description="Frame to start animation"
     )
+    bpy.types.Scene.melodiccap_animate_poles = BoolProperty(
+        name="Pole Targets",
+        default=True,
+        description="Animate elbow/knee pole targets for correct bend direction (CRITICAL)"
+    )
+    bpy.types.Scene.melodiccap_animate_ik_rot = BoolProperty(
+        name="IK Rotation",
+        default=True,
+        description="Animate wrist/foot orientation based on forearm/shin direction"
+    )
     bpy.types.Scene.melodiccap_animate_fk = BoolProperty(
         name="FK Rotations",
         default=True,
-        description="Animate FK bone rotations for limb orientation (V2R method)"
+        description="Animate FK bone rotations (invisible in IK mode; available if you switch to FK)"
     )
     bpy.types.Scene.melodiccap_animate_spine = BoolProperty(
         name="Spine Animation",
@@ -716,13 +890,15 @@ def register():
         description="Higher = stickier feet (reduces sliding). 0 = disabled"
     )
 
-    log("MelodicCap Retargeter v1.0 registered")
+    log("MelodicCap Retargeter v1.1 registered")
 
 def unregister():
     for c in reversed(classes):
         bpy.utils.unregister_class(c)
 
     del bpy.types.Scene.melodiccap_start_frame
+    del bpy.types.Scene.melodiccap_animate_poles
+    del bpy.types.Scene.melodiccap_animate_ik_rot
     del bpy.types.Scene.melodiccap_animate_fk
     del bpy.types.Scene.melodiccap_animate_spine
     del bpy.types.Scene.melodiccap_ground_clamp
