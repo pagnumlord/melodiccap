@@ -1,5 +1,5 @@
 """
-MelodicCap Retargeter v1.3
+MelodicCap Retargeter v1.4
 ==========================
 Clean retargeter combining:
 - v4's proven delta-from-reference IK approach (mathematically correct)
@@ -9,6 +9,7 @@ Clean retargeter combining:
 - Ground clamping (feet can't go through floor)
 - Smart foot pinning (reduces sliding when feet should be planted)
 - 4-segment spine animation via virtual midpoints
+- Outlier filtering (catches MediaPipe landmark spikes)
 
 For Blender 4.4+ with JaxRigify armature.
 
@@ -21,6 +22,15 @@ KEY DESIGN DECISIONS:
 - Pole targets use 3-point projection (Keemap algorithm) with delta-from-reference
 - FK rest axes from ACTUAL JaxRigify bone dump (A-pose: arms hang DOWN, not T-pose)
 - IK rotation rest axes from actual bone directions (hand_ik=-Z, foot_ik=+Y)
+
+v1.4 OUTLIER FILTERING:
+- Velocity-based pre-filter on raw landmarks before animation.
+  MediaPipe sometimes outputs garbage positions (landmarks jumping 30-80m in a
+  single frame). The pre-filter scans all frames, tracks per-landmark velocity,
+  and replaces outlier positions with the last known good position.
+  Threshold: configurable max velocity (default 10 m/s) adapted to capture FPS.
+  Fixes IK targets, pole targets, FK rotations, and spine all at once since
+  they all derive from the same landmark data.
 
 v1.3 CRITICAL FIXES (from Rigify property diagnostics):
 - IK_parent set to 0 (root space) during import. Default IK_parent=1 makes IK
@@ -35,7 +45,7 @@ v1.3 CRITICAL FIXES (from Rigify property diagnostics):
 bl_info = {
     "name": "MelodicCap Retargeter",
     "author": "Karsten / MelodicCap Studio",
-    "version": (1, 3, 0),
+    "version": (1, 4, 0),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap motion capture data to JaxRigify armature",
@@ -323,7 +333,7 @@ class MelodicCapImporter:
     def analyze(self):
         """Analyze character and mocap data, compute scale factor."""
         log("=" * 60)
-        log("MELODICCAP RETARGETER v1.3 - ANALYSIS")
+        log("MELODICCAP RETARGETER v1.4 - ANALYSIS")
         log("=" * 60)
 
         # --- Armature scale check ---
@@ -437,6 +447,103 @@ class MelodicCapImporter:
 
         return True
 
+    def prefilter_landmarks(self):
+        """Pre-filter landmark data to remove outlier spikes.
+
+        Uses velocity-based filtering: if a landmark moves faster than
+        max_velocity m/s between consecutive frames, the frame is replaced
+        with the last known good position. This catches MediaPipe tracking
+        glitches where landmarks jump to absurd positions (e.g. 75m in one frame).
+
+        Modifies the frame landmark data in-place so all downstream consumers
+        (IK targets, pole targets, FK rotations, spine) benefit automatically.
+        """
+        frames = self.take_data.get('frames', [])
+        if len(frames) < 2:
+            return
+
+        max_velocity = self.settings.get('outlier_velocity', 10.0)
+
+        # Compute frame duration from capture metadata
+        duration = self.take_data.get('duration_seconds', len(frames) / 10.0)
+        fps = len(frames) / max(duration, 0.1)
+        max_jump = max_velocity / fps  # meters per frame
+
+        log(f"\n  Outlier filter: max_velocity={max_velocity:.0f} m/s, "
+            f"capture fps={fps:.1f}, max_jump={max_jump:.3f}m/frame")
+
+        # Collect all landmark indices used by any mapping
+        used_landmarks = set()
+        for lm_idx in IK_TARGETS.values():
+            used_landmarks.add(lm_idx)
+        for i1, i2 in FK_CHAINS.values():
+            used_landmarks.add(i1)
+            used_landmarks.add(i2)
+        for lm_root, lm_mid, lm_end in POLE_TARGETS.values():
+            used_landmarks.add(lm_root)
+            used_landmarks.add(lm_mid)
+            used_landmarks.add(lm_end)
+        for lm_start, lm_end, _ in IK_ROTATION.values():
+            used_landmarks.add(lm_start)
+            used_landmarks.add(lm_end)
+        used_landmarks.update([0, 11, 12, 23, 24])  # spine/height landmarks
+
+        # Track state per landmark
+        prev_good = {}       # lm_idx -> Vector (last accepted position)
+        filter_counts = {}   # lm_idx -> total filtered frames
+        consecutive = {}     # lm_idx -> current consecutive hold count
+        max_consecutive = {} # lm_idx -> worst consecutive hold run
+
+        for fidx, fdata in enumerate(frames):
+            lms = fdata.get('landmarks', {})
+
+            for lm_idx in used_landmarks:
+                pos = get_lm(lms, lm_idx)
+                if pos is None:
+                    continue
+
+                # Determine the actual key type used in this dict
+                key = str(lm_idx) if str(lm_idx) in lms else lm_idx
+
+                if lm_idx in prev_good:
+                    displacement = (pos - prev_good[lm_idx]).length
+                    if displacement > max_jump:
+                        # Outlier — replace with last good position
+                        good = prev_good[lm_idx]
+                        lms[key] = [good.x, good.y, good.z]
+                        filter_counts[lm_idx] = filter_counts.get(lm_idx, 0) + 1
+                        consecutive[lm_idx] = consecutive.get(lm_idx, 0) + 1
+                        mc = max_consecutive.get(lm_idx, 0)
+                        if consecutive[lm_idx] > mc:
+                            max_consecutive[lm_idx] = consecutive[lm_idx]
+                    else:
+                        # Good frame — update baseline
+                        prev_good[lm_idx] = pos
+                        consecutive[lm_idx] = 0
+                else:
+                    # First frame — set baseline
+                    prev_good[lm_idx] = pos
+                    consecutive[lm_idx] = 0
+
+        # Log results
+        if filter_counts:
+            total = sum(filter_counts.values())
+            log(f"  Outlier filter: {total} landmark values replaced "
+                f"across {len(filter_counts)} landmarks:")
+            for lm_idx in sorted(filter_counts.keys()):
+                name = LANDMARKS.get(lm_idx, f"landmark_{lm_idx}")
+                count = filter_counts[lm_idx]
+                pct = count / len(frames) * 100
+                mc = max_consecutive.get(lm_idx, 0)
+                log(f"    [{lm_idx:2d}] {name:15s}: {count:4d} frames ({pct:5.1f}%), "
+                    f"max consecutive hold={mc}")
+                if mc > fps * 2:  # More than 2 seconds of sustained holds
+                    log(f"         WARNING: {mc} consecutive holds ({mc/fps:.1f}s) — "
+                        f"possible sustained tracking loss", "WARN")
+        else:
+            log(f"  Outlier filter: no outliers detected "
+                f"(all motion within {max_jump:.3f}m/frame)")
+
     def set_ik_fk_mode(self, use_ik=True):
         """Set IK/FK switches on the rig. 0.0=IK, 1.0=FK."""
         target_value = 0.0 if use_ik else 1.0
@@ -472,6 +579,10 @@ class MelodicCapImporter:
         ground_clamp = self.settings.get('ground_clamp', True)
         animate_poles = self.settings.get('animate_poles', True)
         animate_ik_rot = self.settings.get('animate_ik_rot', True)
+
+        # Pre-filter outlier landmarks (modifies frame data in-place)
+        if self.settings.get('filter_outliers', True):
+            self.prefilter_landmarks()
 
         # Force IK mode
         self.set_ik_fk_mode(use_ik=True)
@@ -868,6 +979,8 @@ class MELODICCAP_OT_import(bpy.types.Operator, ImportHelper):
             'animate_ik_rot': context.scene.melodiccap_animate_ik_rot,
             'ground_clamp': context.scene.melodiccap_ground_clamp,
             'pin_threshold': context.scene.melodiccap_pin_threshold,
+            'filter_outliers': context.scene.melodiccap_filter_outliers,
+            'outlier_velocity': context.scene.melodiccap_outlier_velocity,
         }
 
         log(f"\n  Settings:")
@@ -1088,6 +1201,10 @@ class MELODICCAP_PT_panel(bpy.types.Panel):
         box.prop(context.scene, "melodiccap_start_frame")
         box.prop(context.scene, "melodiccap_pin_threshold")
         box.separator()
+        box.prop(context.scene, "melodiccap_filter_outliers")
+        if context.scene.melodiccap_filter_outliers:
+            box.prop(context.scene, "melodiccap_outlier_velocity")
+        box.separator()
         box.prop(context.scene, "melodiccap_animate_poles")
         box.prop(context.scene, "melodiccap_animate_ik_rot")
         box.prop(context.scene, "melodiccap_animate_fk")
@@ -1152,6 +1269,18 @@ def register():
         default=True,
         description="Animate spine using virtual midpoints (4-segment V2R)"
     )
+    bpy.types.Scene.melodiccap_filter_outliers = BoolProperty(
+        name="Filter Outliers",
+        default=True,
+        description="Remove landmark spikes caused by MediaPipe tracking glitches"
+    )
+    bpy.types.Scene.melodiccap_outlier_velocity = FloatProperty(
+        name="Max Landmark Speed (m/s)",
+        default=10.0,
+        min=1.0,
+        max=50.0,
+        description="Maximum plausible landmark velocity. Faster movement is treated as an outlier"
+    )
     bpy.types.Scene.melodiccap_ground_clamp = BoolProperty(
         name="Ground Clamp Feet",
         default=True,
@@ -1165,13 +1294,15 @@ def register():
         description="Higher = stickier feet (reduces sliding). 0 = disabled"
     )
 
-    log("MelodicCap Retargeter v1.3 registered")
+    log("MelodicCap Retargeter v1.4 registered")
 
 def unregister():
     for c in reversed(classes):
         bpy.utils.unregister_class(c)
 
     del bpy.types.Scene.melodiccap_start_frame
+    del bpy.types.Scene.melodiccap_filter_outliers
+    del bpy.types.Scene.melodiccap_outlier_velocity
     del bpy.types.Scene.melodiccap_animate_poles
     del bpy.types.Scene.melodiccap_animate_ik_rot
     del bpy.types.Scene.melodiccap_animate_fk
