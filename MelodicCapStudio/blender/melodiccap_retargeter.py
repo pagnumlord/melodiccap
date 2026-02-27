@@ -1,5 +1,5 @@
 """
-MelodicCap Retargeter v1.2
+MelodicCap Retargeter v1.3
 ==========================
 Clean retargeter combining:
 - v4's proven delta-from-reference IK approach (mathematically correct)
@@ -12,22 +12,30 @@ Clean retargeter combining:
 
 For Blender 4.4+ with JaxRigify armature.
 
-KEY DESIGN DECISIONS (v1.2 corrections from live bone data):
+KEY DESIGN DECISIONS:
 - NO mirroring: Person's LEFT = Character's LEFT (both at +X in capture/Blender coords)
   Person faces camera (-Y), character's .L bones are at +X — same side.
-  v4's LEFT→RIGHT mapping was WRONG. v1/AntiGrav's LEFT→LEFT was correct.
 - NO X-axis negation (v5/v12.1 proved this double-mirrors)
 - Data is already in Blender coordinates from the capture script
 - IK targets use delta-from-reference (includes hip movement naturally)
 - Pole targets use 3-point projection (Keemap algorithm) with delta-from-reference
 - FK rest axes from ACTUAL JaxRigify bone dump (A-pose: arms hang DOWN, not T-pose)
 - IK rotation rest axes from actual bone directions (hand_ik=-Z, foot_ik=+Y)
+
+v1.3 CRITICAL FIXES (from Rigify property diagnostics):
+- IK_parent set to 0 (root space) during import. Default IK_parent=1 makes IK
+  targets follow torso via parent chain, but our delta already includes hip
+  displacement → double root motion (arms fly off during walking).
+  Root space (0) means IK targets are independent of torso movement.
+- pole_vector enabled (True) during import. Default is False, which means the
+  IK solver ignores pole target bone positions entirely.
+- pole_parent set to 0 (root space) for same reason as IK_parent.
 """
 
 bl_info = {
     "name": "MelodicCap Retargeter",
     "author": "Karsten / MelodicCap Studio",
-    "version": (1, 2, 0),
+    "version": (1, 3, 0),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap motion capture data to JaxRigify armature",
@@ -250,7 +258,7 @@ class MelodicCapImporter:
     def analyze(self):
         """Analyze character and mocap data, compute scale factor."""
         log("=" * 60)
-        log("MELODICCAP RETARGETER v1.2 - ANALYSIS")
+        log("MELODICCAP RETARGETER v1.3 - ANALYSIS")
         log("=" * 60)
 
         # --- Armature scale check ---
@@ -283,15 +291,23 @@ class MelodicCapImporter:
                 log(f"    {ik_bone}: ({head_world.x:.3f}, {head_world.y:.3f}, {head_world.z:.3f})")
 
         # --- IK/FK switch status ---
-        log(f"\n  IK/FK switch status:")
+        log(f"\n  IK/FK switch status (BEFORE import configuration):")
         pose_bones = self.armature.pose.bones
         for switch_bone, prop_name in IK_FK_SWITCHES.items():
             if switch_bone in pose_bones:
                 pb = pose_bones[switch_bone]
+                props = []
                 if prop_name in pb:
                     val = pb[prop_name]
                     mode = "FK" if val > 0.5 else "IK"
-                    log(f"    {switch_bone}['{prop_name}'] = {val:.2f} ({mode} mode)")
+                    props.append(f"IK_FK={val:.1f}({mode})")
+                if 'IK_parent' in pb:
+                    props.append(f"IK_parent={pb['IK_parent']}")
+                if 'pole_vector' in pb:
+                    props.append(f"pole_vector={pb['pole_vector']}")
+                if 'pole_parent' in pb:
+                    props.append(f"pole_parent={pb['pole_parent']}")
+                log(f"    {switch_bone}: {', '.join(props)}")
 
         # --- Mocap data ---
         frames = self.take_data.get('frames', [])
@@ -394,6 +410,37 @@ class MelodicCapImporter:
 
         # Force IK mode
         self.set_ik_fk_mode(use_ik=True)
+
+        # Configure Rigify properties for correct mocap retargeting
+        log("  Configuring Rigify properties:")
+        for switch_bone in IK_FK_SWITCHES:
+            if switch_bone in pose_bones:
+                pb = pose_bones[switch_bone]
+                # IK_parent=0 (root space): CRITICAL for delta-from-reference.
+                # Default IK_parent=1 makes IK targets follow torso via parent
+                # chain, but our delta already includes hip displacement.
+                # That causes double root motion (arms fly off during walking).
+                # Root space (0) makes IK targets independent of torso.
+                if 'IK_parent' in pb:
+                    old = pb['IK_parent']
+                    pb['IK_parent'] = 0
+                    if old != 0:
+                        log(f"    {switch_bone}: IK_parent {old}->0 (root space)")
+                # pole_vector=True: enables pole target bones so our elbow/knee
+                # direction animation actually affects the IK solver.
+                # Default False means pole targets are ignored entirely.
+                if 'pole_vector' in pb:
+                    old = pb['pole_vector']
+                    pb['pole_vector'] = True
+                    if not old:
+                        log(f"    {switch_bone}: pole_vector False->True")
+                # pole_parent=0 (root space): same reasoning as IK_parent.
+                # Prevents double-motion on pole target positions.
+                if 'pole_parent' in pb:
+                    old = pb['pole_parent']
+                    pb['pole_parent'] = 0
+                    if old != 0:
+                        log(f"    {switch_bone}: pole_parent {old}->0 (root space)")
 
         # Set quaternion rotation mode on all FK bones
         for pb in pose_bones:
@@ -896,7 +943,7 @@ def register():
         description="Higher = stickier feet (reduces sliding). 0 = disabled"
     )
 
-    log("MelodicCap Retargeter v1.2 registered")
+    log("MelodicCap Retargeter v1.3 registered")
 
 def unregister():
     for c in reversed(classes):
