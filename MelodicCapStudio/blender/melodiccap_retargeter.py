@@ -44,6 +44,9 @@ bl_info = {
 
 import bpy
 import json
+import os
+import datetime
+from pathlib import Path
 from mathutils import Vector, Matrix, Quaternion
 from bpy.props import StringProperty, FloatProperty, BoolProperty, IntProperty
 from bpy_extras.io_utils import ImportHelper
@@ -146,11 +149,70 @@ BONE_REST_AXES = {
 }
 
 # =============================================================================
+# LOGGING — writes to both Blender console AND a log file
+# =============================================================================
+
+_log_file = None
+_log_path = None
+
+def log_init(tag="import"):
+    """Open a log file in the logs/ directory next to this addon."""
+    global _log_file, _log_path
+    log_close()  # Close any previous log
+
+    # Find a writable logs directory
+    # Try addon directory first, fall back to temp
+    addon_dir = Path(__file__).parent.parent  # MelodicCapStudio/
+    logs_dir = addon_dir / "logs"
+    try:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        logs_dir = Path(bpy.app.tempdir) / "melodiccap_logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    _log_path = logs_dir / f"melodiccap_{tag}_{ts}.log"
+    _log_file = open(_log_path, 'w', encoding='utf-8')
+    log(f"Log file: {_log_path}")
+
+def log_close():
+    """Close the log file."""
+    global _log_file, _log_path
+    if _log_file:
+        _log_file.close()
+        _log_file = None
+
+def log(msg, level="INFO"):
+    """Log to both Blender console and file."""
+    line = f"[{level}] MelodicCap: {msg}"
+    print(line)
+    if _log_file:
+        _log_file.write(line + "\n")
+        _log_file.flush()  # Flush immediately so we never lose data
+
+def log_get_path():
+    """Return the current log file path."""
+    return _log_path
+
+# =============================================================================
 # UTILITIES
 # =============================================================================
 
-def log(msg, level="INFO"):
-    print(f"[{level}] MelodicCap: {msg}")
+def track_range(ranges, bone_name, value, value_type='loc'):
+    """Track min/max range for a bone's animated values."""
+    if bone_name not in ranges:
+        ranges[bone_name] = {
+            'min': [float('inf')] * 3,
+            'max': [float('-inf')] * 3,
+            'type': value_type,
+        }
+    r = ranges[bone_name]
+    for i in range(3):
+        v = value[i]
+        if v < r['min'][i]:
+            r['min'][i] = v
+        if v > r['max'][i]:
+            r['max'][i] = v
 
 def get_lm(landmarks, idx):
     """Get landmark as Vector. Handles both string and int keys."""
@@ -254,6 +316,9 @@ class MelodicCapImporter:
 
         # Stats
         self.stats = {'frames': 0, 'keys': 0, 'bones': set()}
+
+        # Per-bone range tracking for diagnostics
+        self.ranges = {}  # bone_name -> {'min': Vector, 'max': Vector, 'type': 'loc'|'rot'}
 
     def analyze(self):
         """Analyze character and mocap data, compute scale factor."""
@@ -488,23 +553,33 @@ class MelodicCapImporter:
         # Smart pinning state (for feet)
         prev_deltas = {}
 
+        # How many frames get full detailed logging (first N)
+        DETAIL_FRAMES = 5
+
         # Process each frame
-        log(f"  Processing {len(frames)} frames...")
+        log(f"  Processing {len(frames)} frames (detailed log for first {DETAIL_FRAMES})...")
 
         for fidx, fdata in enumerate(frames):
             bf = start + fidx
             bpy.context.scene.frame_set(bf)
+            detail = fidx < DETAIL_FRAMES  # Verbose logging for early frames
 
             lms = fdata.get('landmarks', {})
             hip = get_mid(lms, 23, 24)
 
             if not hip:
+                if detail:
+                    log(f"    Frame {fidx}: SKIPPED (no hip landmarks)")
                 continue
+
+            if detail:
+                log(f"\n    --- Frame {fidx} (Blender frame {bf}) ---")
+                log(f"    Hip center: ({hip.x:.4f}, {hip.y:.4f}, {hip.z:.4f})")
+                log(f"    Hip delta from ref: ({hip.x - self.ref_hip.x:.4f}, "
+                    f"{hip.y - self.ref_hip.y:.4f}, {hip.z - self.ref_hip.z:.4f})")
 
             # =================================================================
             # ROOT MOTION (TORSO)
-            # Delta from reference hip, scaled, in armature-local space.
-            # Frame 0 delta = (0,0,0) so character starts at rest position.
             # =================================================================
             if has_torso:
                 delta = (hip - self.ref_hip) * self.scale
@@ -514,17 +589,15 @@ class MelodicCapImporter:
                 torso.location = local_delta
                 torso.keyframe_insert(data_path="location", frame=bf)
 
+                track_range(self.ranges, 'torso', local_delta, 'loc')
                 self.stats['keys'] += 1
                 self.stats['bones'].add('torso')
 
-                if fidx == 0:
-                    log(f"    Frame 0 torso delta: ({local_delta.x:.4f}, {local_delta.y:.4f}, {local_delta.z:.4f})")
+                if detail:
+                    log(f"    TORSO loc: ({local_delta.x:.4f}, {local_delta.y:.4f}, {local_delta.z:.4f})")
 
             # =================================================================
             # IK TARGETS (HANDS AND FEET)
-            # Delta from reference position, scaled.
-            # This naturally includes hip movement because the delta captures
-            # the total displacement from reference, not just local limb motion.
             # =================================================================
             for ik_bone, lm_idx in avail_ik.items():
                 pos = get_lm(lms, lm_idx)
@@ -535,43 +608,50 @@ class MelodicCapImporter:
                 if not ref_pos:
                     continue
 
-                # Delta from reference, scaled (still in world/mocap space)
                 mocap_delta = (pos - ref_pos) * self.scale
 
-                # Ground clamp for feet: prevent going below floor
-                # (done in world space BEFORE converting to local, for correctness)
+                # Ground clamp
+                clamped = False
                 if ground_clamp and 'foot' in ik_bone:
                     rest_pos = self.ik_rest_positions.get(ik_bone)
                     if rest_pos:
                         world_z = rest_pos.z + mocap_delta.z
                         if world_z < 0:
                             mocap_delta.z = -rest_pos.z
+                            clamped = True
 
-                # Convert to armature-local space
                 local_delta = world_inv.to_3x3() @ mocap_delta
 
-                # Smart pinning for feet: reduce sliding
+                # Smart pinning
+                pinned = False
                 if 'foot' in ik_bone and pin_threshold > 0:
                     prev = prev_deltas.get(ik_bone)
                     if prev is not None:
                         if (local_delta - prev).length < pin_threshold:
                             local_delta = prev.copy()
+                            pinned = True
                     prev_deltas[ik_bone] = local_delta.copy()
 
                 pb = pose_bones[ik_bone]
                 pb.location = local_delta
                 pb.keyframe_insert(data_path="location", frame=bf)
 
+                track_range(self.ranges, ik_bone, local_delta, 'loc')
                 self.stats['keys'] += 1
                 self.stats['bones'].add(ik_bone)
 
-                if fidx == 0:
-                    log(f"    Frame 0 {ik_bone}: ({local_delta.x:.4f}, {local_delta.y:.4f}, {local_delta.z:.4f})")
+                if detail:
+                    flags = ""
+                    if clamped:
+                        flags += " [CLAMPED]"
+                    if pinned:
+                        flags += " [PINNED]"
+                    lm_name = LANDMARKS.get(lm_idx, str(lm_idx))
+                    log(f"    {ik_bone} loc: ({local_delta.x:.4f}, {local_delta.y:.4f}, {local_delta.z:.4f})"
+                        f"  lm{lm_idx}({lm_name}){flags}")
 
             # =================================================================
-            # IK TARGET ROTATION (WRIST/FOOT ORIENTATION)
-            # Orient hands along forearm direction and feet along shin direction.
-            # This gives proper wrist angle and foot tilt.
+            # IK TARGET ROTATION
             # =================================================================
             for ik_bone, (lm_start, lm_end, rest_ax) in avail_ik_rot.items():
                 p1 = get_lm(lms, lm_start)
@@ -580,9 +660,7 @@ class MelodicCapImporter:
                     continue
 
                 limb_dir = (p2 - p1).normalized()
-                # Transform direction to armature-local space
                 dir_local = world_inv.to_quaternion() @ limb_dir
-
                 quat = rest_ax.rotation_difference(dir_local)
 
                 pb = pose_bones[ik_bone]
@@ -590,13 +668,15 @@ class MelodicCapImporter:
                 pb.rotation_quaternion = quat
                 pb.keyframe_insert(data_path="rotation_quaternion", frame=bf)
 
+                track_range(self.ranges, ik_bone + '_rot', [quat.w, quat.x, quat.y], 'rot')
                 self.stats['keys'] += 1
 
+                if detail:
+                    log(f"    {ik_bone} rot: w={quat.w:.3f} ({quat.x:.3f}, {quat.y:.3f}, {quat.z:.3f})"
+                        f"  dir_local=({dir_local.x:.3f}, {dir_local.y:.3f}, {dir_local.z:.3f})")
+
             # =================================================================
-            # POLE TARGETS (ELBOW/KNEE DIRECTION FOR IK SOLVER)
-            # Uses 3-point projection (Keemap algorithm) to compute where the
-            # elbow/knee should point, then applies as delta-from-reference.
-            # Without pole targets, the IK solver guesses bend direction.
+            # POLE TARGETS
             # =================================================================
             for pole_bone, (lm_root, lm_mid, lm_end) in avail_poles.items():
                 v_root = get_lm(lms, lm_root)
@@ -607,13 +687,14 @@ class MelodicCapImporter:
 
                 pole_pos = compute_pole_position(v_root, v_mid, v_end)
                 if not pole_pos:
-                    continue  # Limb too straight; skip this frame
+                    if detail:
+                        log(f"    {pole_bone}: limb too straight, skipped")
+                    continue
 
                 ref_pole = self.ref_pole_positions.get(pole_bone)
                 if not ref_pole:
                     continue
 
-                # Delta from reference, scaled
                 pole_delta = (pole_pos - ref_pole) * self.scale
                 local_delta = world_inv.to_3x3() @ pole_delta
 
@@ -621,17 +702,15 @@ class MelodicCapImporter:
                 pb.location = local_delta
                 pb.keyframe_insert(data_path="location", frame=bf)
 
+                track_range(self.ranges, pole_bone, local_delta, 'loc')
                 self.stats['keys'] += 1
                 self.stats['bones'].add(pole_bone)
 
+                if detail:
+                    log(f"    {pole_bone} loc: ({local_delta.x:.4f}, {local_delta.y:.4f}, {local_delta.z:.4f})")
+
             # =================================================================
             # FK ROTATIONS (V2R METHOD)
-            # For each bone: compute direction from start->end landmark,
-            # transform to armature-local, then rotation_difference from
-            # rest axis to target direction.
-            # NOTE: FK rotations are invisible in IK mode (IK_FK=0.0).
-            # They are keyframed so the user can switch to FK mode later.
-            # Rest axes are per-bone from JaxRigify bone structure.
             # =================================================================
             if animate_fk:
                 for fk_bone, (i1, i2) in avail_fk.items():
@@ -640,29 +719,28 @@ class MelodicCapImporter:
                         continue
 
                     target_dir = (p2 - p1).normalized()
-
-                    # Transform direction to armature-local space
                     target_dir_local = world_inv.to_quaternion() @ target_dir
 
-                    # Per-bone rest axis from JaxRigify bone structure
                     rest_axis = BONE_REST_AXES.get(fk_bone)
                     if not rest_axis:
-                        continue  # Skip bones without known rest axes
+                        continue
 
-                    # Rotation from rest to target
                     quat = rest_axis.rotation_difference(target_dir_local)
 
                     pb = pose_bones[fk_bone]
                     pb.rotation_quaternion = quat
                     pb.keyframe_insert(data_path="rotation_quaternion", frame=bf)
 
+                    track_range(self.ranges, fk_bone, [quat.w, quat.x, quat.y], 'rot')
                     self.stats['keys'] += 1
                     self.stats['bones'].add(fk_bone)
 
+                    if detail:
+                        log(f"    {fk_bone} rot: w={quat.w:.3f} ({quat.x:.3f}, {quat.y:.3f}, {quat.z:.3f})"
+                            f"  dir=({target_dir_local.x:.3f}, {target_dir_local.y:.3f}, {target_dir_local.z:.3f})")
+
             # =================================================================
             # SPINE ANIMATION (V2R with virtual midpoints)
-            # Creates 5 virtual points along the torso from hips to shoulders,
-            # then applies V2R rotation to each spine segment.
             # =================================================================
             if animate_spine and avail_spine:
                 spine_pts = compute_virtual_spine(lms)
@@ -676,7 +754,6 @@ class MelodicCapImporter:
                         target_dir = (e_pos - s_pos).normalized()
                         target_dir_local = world_inv.to_quaternion() @ target_dir
 
-                        # Per-bone rest axis from actual JaxRigify bone dump
                         rest_axis = BONE_REST_AXES.get(bone_name, Vector((0, 0, 1)))
                         quat = rest_axis.rotation_difference(target_dir_local)
 
@@ -684,18 +761,23 @@ class MelodicCapImporter:
                         pb.rotation_quaternion = quat
                         pb.keyframe_insert(data_path="rotation_quaternion", frame=bf)
 
+                        track_range(self.ranges, bone_name, [quat.w, quat.x, quat.y], 'rot')
                         self.stats['keys'] += 1
                         self.stats['bones'].add(bone_name)
 
+                        if detail:
+                            log(f"    {bone_name} rot: w={quat.w:.3f} ({quat.x:.3f}, {quat.y:.3f}, {quat.z:.3f})"
+                                f"  dir=({target_dir_local.x:.3f}, {target_dir_local.y:.3f}, {target_dir_local.z:.3f})")
+
             self.stats['frames'] += 1
 
-            if fidx % 50 == 0:
+            if fidx % 50 == 0 and fidx >= DETAIL_FRAMES:
                 log(f"    Frame {fidx}/{len(frames)}")
 
         return True
 
     def summary(self):
-        """Print import summary."""
+        """Print import summary with range diagnostics."""
         log("\n" + "=" * 60)
         log("IMPORT SUMMARY")
         log("=" * 60)
@@ -717,6 +799,33 @@ class MelodicCapImporter:
         if spine_bones:
             log(f"    Spine: {spine_bones}")
 
+        # === RANGE DIAGNOSTICS ===
+        log("\n" + "=" * 60)
+        log("RANGE DIAGNOSTICS (min → max per axis)")
+        log("=" * 60)
+        log("  Location ranges (meters from rest position):")
+        for bone_name in sorted(self.ranges.keys()):
+            r = self.ranges[bone_name]
+            if r['type'] != 'loc':
+                continue
+            mn, mx = r['min'], r['max']
+            log(f"    {bone_name:35s}  X:[{mn[0]:+.3f} → {mx[0]:+.3f}]  "
+                f"Y:[{mn[1]:+.3f} → {mx[1]:+.3f}]  Z:[{mn[2]:+.3f} → {mx[2]:+.3f}]")
+            # Flag suspicious ranges
+            for i, axis in enumerate(['X', 'Y', 'Z']):
+                span = mx[i] - mn[i]
+                if span > 2.0:
+                    log(f"      WARNING: {axis} span = {span:.3f}m (>2m — possible outlier?)", "WARN")
+
+        log("\n  Rotation ranges (quaternion w,x,y components):")
+        for bone_name in sorted(self.ranges.keys()):
+            r = self.ranges[bone_name]
+            if r['type'] != 'rot':
+                continue
+            mn, mx = r['min'], r['max']
+            log(f"    {bone_name:35s}  w:[{mn[0]:+.3f}→{mx[0]:+.3f}]  "
+                f"x:[{mn[1]:+.3f}→{mx[1]:+.3f}]  y:[{mn[2]:+.3f}→{mx[2]:+.3f}]")
+
 
 # =============================================================================
 # OPERATORS
@@ -737,6 +846,9 @@ class MELODICCAP_OT_import(bpy.types.Operator, ImportHelper):
             self.report({'ERROR'}, "Select an armature first!")
             return {'CANCELLED'}
 
+        # Initialize file logging
+        log_init("import")
+
         log(f"\n  File: {self.filepath}")
         log(f"  Armature: {arm.name}")
 
@@ -745,6 +857,7 @@ class MELODICCAP_OT_import(bpy.types.Operator, ImportHelper):
                 data = json.load(f)
         except Exception as e:
             self.report({'ERROR'}, f"Failed to load JSON: {e}")
+            log_close()
             return {'CANCELLED'}
 
         settings = {
@@ -757,17 +870,28 @@ class MELODICCAP_OT_import(bpy.types.Operator, ImportHelper):
             'pin_threshold': context.scene.melodiccap_pin_threshold,
         }
 
+        log(f"\n  Settings:")
+        for k, v in settings.items():
+            log(f"    {k}: {v}")
+
         imp = MelodicCapImporter(arm, data, settings)
 
         if not imp.analyze():
             self.report({'ERROR'}, "Analysis failed - check console")
+            log_close()
             return {'CANCELLED'}
 
         bpy.ops.object.mode_set(mode='POSE')
         imp.apply_animation()
         imp.summary()
 
-        self.report({'INFO'}, f"Imported {imp.stats['frames']} frames, {len(imp.stats['bones'])} bones animated")
+        log_path = log_get_path()
+        log_close()
+
+        msg = f"Imported {imp.stats['frames']} frames, {len(imp.stats['bones'])} bones"
+        if log_path:
+            msg += f" | Log: {log_path}"
+        self.report({'INFO'}, msg)
         return {'FINISHED'}
 
 
@@ -839,6 +963,100 @@ class MELODICCAP_OT_set_fk_mode(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class MELODICCAP_OT_diagnostic(bpy.types.Operator):
+    """Dump complete rig diagnostic to log file"""
+    bl_idname = "melodiccap.diagnostic"
+    bl_label = "Diagnostic Dump"
+
+    def execute(self, context):
+        arm = context.active_object
+        if not arm or arm.type != 'ARMATURE':
+            self.report({'ERROR'}, "Select an armature!")
+            return {'CANCELLED'}
+
+        log_init("diagnostic")
+        log("=" * 60)
+        log("RIG DIAGNOSTIC DUMP")
+        log("=" * 60)
+
+        # Armature info
+        log(f"  Armature: {arm.name}")
+        log(f"  Location: ({arm.location.x:.4f}, {arm.location.y:.4f}, {arm.location.z:.4f})")
+        log(f"  Scale: ({arm.scale.x:.4f}, {arm.scale.y:.4f}, {arm.scale.z:.4f})")
+        log(f"  Rotation: ({arm.rotation_euler.x:.4f}, {arm.rotation_euler.y:.4f}, {arm.rotation_euler.z:.4f})")
+
+        world = arm.matrix_world
+        log(f"\n  World matrix:")
+        for r in range(4):
+            log(f"    [{world[r][0]:+.4f}  {world[r][1]:+.4f}  {world[r][2]:+.4f}  {world[r][3]:+.4f}]")
+
+        # IK/FK switch state
+        log(f"\n  IK/FK Switch Properties:")
+        pose_bones = arm.pose.bones
+        for switch_bone, prop_name in IK_FK_SWITCHES.items():
+            if switch_bone in pose_bones:
+                pb = pose_bones[switch_bone]
+                props = {k: pb[k] for k in pb.keys() if not k.startswith('_')}
+                log(f"    {switch_bone}: {props}")
+
+        # All bones we care about — current pose state
+        log(f"\n  Bone Pose State (current frame {context.scene.frame_current}):")
+        all_bones = (
+            list(IK_TARGETS.keys()) +
+            list(POLE_TARGETS.keys()) +
+            list(FK_CHAINS.keys()) +
+            list(SPINE_CHAINS.keys()) +
+            ['torso']
+        )
+        for bone_name in sorted(set(all_bones)):
+            if bone_name not in pose_bones:
+                log(f"    {bone_name:35s}  MISSING")
+                continue
+            pb = pose_bones[bone_name]
+            loc = pb.location
+            rot = pb.rotation_quaternion
+            parent = pb.parent.name if pb.parent else "None"
+            log(f"    {bone_name:35s}  loc=({loc.x:+.4f}, {loc.y:+.4f}, {loc.z:+.4f})  "
+                f"rot=w{rot.w:+.3f}({rot.x:+.3f},{rot.y:+.3f},{rot.z:+.3f})  parent={parent}")
+
+        # Bone rest positions
+        log(f"\n  Bone Rest Positions (world space):")
+        bones = arm.data.bones
+        for bone_name in sorted(set(all_bones)):
+            if bone_name not in bones:
+                continue
+            bone = bones[bone_name]
+            head_world = world @ bone.head_local
+            tail_world = world @ bone.tail_local
+            direction = (tail_world - head_world).normalized()
+            length = (tail_world - head_world).length
+            log(f"    {bone_name:35s}  head=({head_world.x:+.4f},{head_world.y:+.4f},{head_world.z:+.4f})  "
+                f"dir=({direction.x:+.3f},{direction.y:+.3f},{direction.z:+.3f})  len={length:.4f}")
+
+        # Animation data
+        log(f"\n  Animation Data:")
+        if arm.animation_data and arm.animation_data.action:
+            action = arm.animation_data.action
+            log(f"    Action: {action.name}")
+            log(f"    Frame range: {action.frame_range[0]:.0f} - {action.frame_range[1]:.0f}")
+            log(f"    FCurves: {len(action.fcurves)}")
+            # List unique bone data paths
+            bone_paths = set()
+            for fc in action.fcurves:
+                parts = fc.data_path.split('"')
+                if len(parts) >= 2:
+                    bone_paths.add(parts[1])
+            log(f"    Animated bones ({len(bone_paths)}): {sorted(bone_paths)}")
+        else:
+            log(f"    No animation data")
+
+        path = log_get_path()
+        log_close()
+
+        self.report({'INFO'}, f"Diagnostic saved: {path}")
+        return {'FINISHED'}
+
+
 # =============================================================================
 # PANEL
 # =============================================================================
@@ -887,6 +1105,9 @@ class MELODICCAP_PT_panel(bpy.types.Panel):
 
         box.operator("melodiccap.clear", icon='X')
 
+        box.separator()
+        box.operator("melodiccap.diagnostic", icon='FILE_TEXT')
+
 
 # =============================================================================
 # REGISTRATION
@@ -897,6 +1118,7 @@ classes = [
     MELODICCAP_OT_clear,
     MELODICCAP_OT_set_ik_mode,
     MELODICCAP_OT_set_fk_mode,
+    MELODICCAP_OT_diagnostic,
     MELODICCAP_PT_panel,
 ]
 
