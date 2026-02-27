@@ -1,0 +1,24 @@
+# Motion Capture to Rigify System Requirements
+# Install with: pip install -r requirements.txt --break-system-packages
+
+# Core motion capture
+opencv-python>=4.8.0
+mediapipe>=0.10.0
+numpy>=1.24.0
+
+# Optional: Enhanced functionality
+scipy>=1.11.0  # For signal smoothing and filtering
+matplotlib>=3.7.0  # For visualization and debugging
+
+# Optional: Advanced 3D reconstruction
+# opencv-contrib-python>=4.8.0  # For camera calibration
+
+# Optional: FreeMoCap (alternative system)
+# freemocap>=0.3.0  # Uncomment to use FreeMoCap instead
+
+# Blender addon requirements (no installation needed, uses Blender's Python)
+# - bpy (included with Blender)
+# - mathutils (included with Blender)
+
+# Note: Some systems require --break-system-packages flag:
+# pip install -r requirements.txt --break-system-packages

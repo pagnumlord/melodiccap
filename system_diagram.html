@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mocap to Rigify System Diagram</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 40px;
+            font-size: 1.2em;
+        }
+        
+        .workflow {
+            display: flex;
+            flex-direction: column;
+            gap: 30px;
+        }
+        
+        .stage {
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            border-radius: 15px;
+            padding: 30px;
+            position: relative;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            transition: transform 0.3s, box-shadow 0.3s;
+            cursor: pointer;
+        }
+        
+        .stage:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 40px rgba(0,0,0,0.2);
+        }
+        
+        .stage-number {
+            position: absolute;
+            top: -15px;
+            left: 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5em;
+            font-weight: bold;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+        
+        .stage-title {
+            font-size: 1.8em;
+            color: #333;
+            margin-bottom: 15px;
+            padding-left: 40px;
+        }
+        
+        .stage-file {
+            background: rgba(255,255,255,0.5);
+            padding: 10px 15px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            color: #764ba2;
+            margin-bottom: 15px;
+            font-weight: bold;
+        }
+        
+        .stage-description {
+            color: #555;
+            line-height: 1.8;
+            margin-bottom: 15px;
+        }
+        
+        .stage-details {
+            background: rgba(255,255,255,0.7);
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 15px;
+        }
+        
+        .stage-details ul {
+            list-style-position: inside;
+            color: #666;
+        }
+        
+        .stage-details li {
+            margin: 8px 0;
+            padding-left: 10px;
+        }
+        
+        .stage-output {
+            background: linear-gradient(135deg, #84fab0 0%, #8fd3f4 100%);
+            padding: 12px 20px;
+            border-radius: 8px;
+            margin-top: 15px;
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .arrow {
+            text-align: center;
+            font-size: 3em;
+            color: #764ba2;
+            margin: -10px 0;
+            animation: bounce 2s infinite;
+        }
+        
+        @keyframes bounce {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-10px); }
+        }
+        
+        .legend {
+            margin-top: 40px;
+            padding: 20px;
+            background: #f5f7fa;
+            border-radius: 10px;
+        }
+        
+        .legend h3 {
+            color: #333;
+            margin-bottom: 15px;
+        }
+        
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin: 10px 0;
+        }
+        
+        .legend-color {
+            width: 30px;
+            height: 30px;
+            border-radius: 5px;
+            margin-right: 15px;
+        }
+        
+        .color-capture { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); }
+        .color-import { background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); }
+        .color-retarget { background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%); }
+        .color-refine { background: linear-gradient(135deg, #fa709a 0%, #fee140 100%); }
+        
+        .key-concepts {
+            margin-top: 40px;
+            padding: 30px;
+            background: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%);
+            border-radius: 15px;
+        }
+        
+        .key-concepts h2 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        
+        .concept {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 15px 0;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        
+        .concept h3 {
+            color: #764ba2;
+            margin-bottom: 10px;
+        }
+        
+        .rigify-layers {
+            margin-top: 30px;
+            padding: 25px;
+            background: linear-gradient(135deg, #d299c2 0%, #fef9d7 100%);
+            border-radius: 15px;
+        }
+        
+        .rigify-layers h2 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        
+        .layer {
+            background: white;
+            padding: 15px;
+            margin: 15px 0;
+            border-left: 5px solid #764ba2;
+            border-radius: 5px;
+        }
+        
+        .layer-title {
+            font-weight: bold;
+            color: #764ba2;
+            font-size: 1.2em;
+            margin-bottom: 10px;
+        }
+        
+        .layer-example {
+            font-family: 'Courier New', monospace;
+            color: #666;
+            margin-top: 5px;
+        }
+        
+        @media (max-width: 768px) {
+            .container {
+                padding: 20px;
+            }
+            
+            h1 {
+                font-size: 2em;
+            }
+            
+            .stage-title {
+                font-size: 1.4em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎬 Motion Capture to Rigify Pipeline</h1>
+        <p class="subtitle">Complete Workflow for Melodic Justice</p>
+        
+        <div class="workflow">
+            <!-- Stage 0 -->
+            <div class="stage">
+                <div class="stage-number">0</div>
+                <h2 class="stage-title">Real World Performance</h2>
+                <p class="stage-description">
+                    Actor performs the movement/action in front of two cameras positioned 45-90° apart.
+                </p>
+                <div class="stage-details">
+                    <strong>Setup Requirements:</strong>
+                    <ul>
+                        <li>2 USB webcams (720p minimum, 1080p recommended)</li>
+                        <li>Good even lighting, no harsh shadows</li>
+                        <li>Plain background contrasting with actor</li>
+                        <li>Fitted clothing (not baggy or reflective)</li>
+                        <li>Full body visible in BOTH cameras</li>
+                    </ul>
+                </div>
+                <div class="stage-output">
+                    📹 Output: Real-time video feeds from Camera 0 and Camera 1
+                </div>
+            </div>
+            
+            <div class="arrow">↓</div>
+            
+            <!-- Stage 1 -->
+            <div class="stage">
+                <div class="stage-number">1</div>
+                <h2 class="stage-title">Capture Motion Data</h2>
+                <div class="stage-file">mocap_recorder.py</div>
+                <p class="stage-description">
+                    Python application records from both cameras simultaneously. MediaPipe detects 33 body landmarks 
+                    per camera. System triangulates 3D positions from the two 2D views, creating true 3D motion data.
+                </p>
+                <div class="stage-details">
+                    <strong>Process:</strong>
+                    <ul>
+                        <li>Run: <code>python mocap_recorder.py</code></li>
+                        <li>Position yourself visible in both camera windows</li>
+                        <li>Press SPACE to start recording (red dot appears)</li>
+                        <li>Perform your action</li>
+                        <li>Press SPACE to stop recording</li>
+                        <li>Data automatically saved with timestamp</li>
+                    </ul>
+                </div>
+                <div class="stage-output">
+                    💾 Output: take_YYYYMMDD_HHMMSS.json + .bvh files
+                </div>
+            </div>
+            
+            <div class="arrow">↓</div>
+            
+            <!-- Stage 2 -->
+            <div class="stage">
+                <div class="stage-number">2</div>
+                <h2 class="stage-title">Import to Blender</h2>
+                <div class="stage-file">mocap_rigify_retarget.py (Blender Addon)</div>
+                <p class="stage-description">
+                    Blender addon reads the mocap JSON data and creates an intermediate armature. The mocap skeleton 
+                    structure is built from MediaPipe landmarks, and all frame data is applied as keyframed animation.
+                </p>
+                <div class="stage-details">
+                    <strong>Process:</strong>
+                    <ul>
+                        <li>In Blender: File → Import → Mocap JSON</li>
+                        <li>Select your take_*.json file</li>
+                        <li>Addon creates "MocapArmature" with animation</li>
+                        <li>Timeline shows frame range</li>
+                        <li>Press SPACE to preview motion</li>
+                    </ul>
+                </div>
+                <div class="stage-output">
+                    🦴 Output: Animated mocap armature in Blender scene
+                </div>
+            </div>
+            
+            <div class="arrow">↓</div>
+            
+            <!-- Stage 3 -->
+            <div class="stage">
+                <div class="stage-number">3</div>
+                <h2 class="stage-title">Retarget to Rigify</h2>
+                <div class="stage-file">rigify_constraint_retarget.py</div>
+                <p class="stage-description">
+                    Maps mocap skeleton bones to JaxRigify CONTROL bones (not deformation bones!). Uses bone constraints 
+                    for stable, preview-able retargeting. Once verified, bakes to keyframes and removes constraints.
+                </p>
+                <div class="stage-details">
+                    <strong>Process:</strong>
+                    <ul>
+                        <li>Open script in Blender Text Editor</li>
+                        <li>Edit armature names (lines 133-134)</li>
+                        <li>Run script → sets up constraints</li>
+                        <li>Preview animation (press SPACE)</li>
+                        <li>Run: <code>bake_animation()</code> to freeze</li>
+                        <li>Run: <code>remove_constraints()</code> to clean up</li>
+                    </ul>
+                </div>
+                <div class="stage-output">
+                    ✨ Output: JaxRigify with baked animation on control bones
+                </div>
+            </div>
+            
+            <div class="arrow">↓</div>
+            
+            <!-- Stage 4 -->
+            <div class="stage">
+                <div class="stage-number">4</div>
+                <h2 class="stage-title">Refine Animation</h2>
+                <div class="stage-file">Manual work in Blender</div>
+                <p class="stage-description">
+                    Polish the mocap-driven animation. Adjust timing in Graph Editor, add facial animation manually 
+                    (jaw, eyes, brows), refine hand poses, lock feet to ground, and add secondary motion for life.
+                </p>
+                <div class="stage-details">
+                    <strong>Refinement Tasks:</strong>
+                    <ul>
+                        <li><strong>Timing:</strong> Speed up/slow down sections, add ease in/out</li>
+                        <li><strong>Face:</strong> Animate jaw, eyes, eyebrows (mocap doesn't capture these)</li>
+                        <li><strong>Hands:</strong> Key finger poses at important moments</li>
+                        <li><strong>Feet:</strong> Add Floor constraints to prevent sliding</li>
+                        <li><strong>Secondary:</strong> Add shoulder overlap, spine settle, weight shifts</li>
+                    </ul>
+                </div>
+                <div class="stage-output">
+                    🎭 Output: Final polished animation ready for rendering!
+                </div>
+            </div>
+        </div>
+        
+        <!-- Rigify Structure -->
+        <div class="rigify-layers">
+            <h2>🦴 Understanding Rigify Structure</h2>
+            <p style="margin-bottom: 20px; color: #555;">
+                <strong>Critical:</strong> Rigify has THREE layers of bones. You must animate the CONTROL bones, 
+                not the deformation bones!
+            </p>
+            
+            <div class="layer">
+                <div class="layer-title">Layer 1: CONTROL BONES (What You Animate)</div>
+                <p>These are the bones you see and manipulate. They have widgets (shapes) you can select.</p>
+                <div class="layer-example">
+                    Examples: torso, chest, head, hand_ik.L, hand_ik.R, foot_ik.L, foot_ik.R, 
+                    upper_arm_fk.L, forearm_fk.L, etc.
+                </div>
+            </div>
+            
+            <div class="layer">
+                <div class="layer-title">Layer 2: MECHANISM BONES (Automatic, Hidden)</div>
+                <p>Hidden bones (MCH-*) that handle IK solving and constraint systems. 
+                   Driven by control bones through constraints.</p>
+                <div class="layer-example">
+                    Examples: MCH-upper_arm_ik_target.L, MCH-thigh_parent.L, etc.
+                </div>
+            </div>
+            
+            <div class="layer">
+                <div class="layer-title">Layer 3: DEFORMATION BONES (What Moves The Mesh)</div>
+                <p>These bones (DEF-*) actually deform the JaxBody5 mesh. 
+                   They're driven by mechanism bones. Never animate these directly!</p>
+                <div class="layer-example">
+                    Examples: DEF-spine, DEF-spine.001, DEF-upper_arm.L, DEF-forearm.L, etc.
+                </div>
+            </div>
+            
+            <div style="margin-top: 20px; padding: 15px; background: rgba(255,255,255,0.5); border-radius: 8px;">
+                <strong>⚠️ Common Mistake:</strong> Trying to retarget to DEF- bones directly. 
+                This breaks the rig! Always target control bones instead.
+            </div>
+        </div>
+        
+        <!-- Key Concepts -->
+        <div class="key-concepts">
+            <h2>💡 Key Concepts</h2>
+            
+            <div class="concept">
+                <h3>Why Dual Cameras?</h3>
+                <p>
+                    A single camera only captures 2D positions (x, y). Adding a second camera at an angle 
+                    allows triangulation - mathematically calculating the true 3D position (x, y, z) by 
+                    comparing where the same point appears in both camera views. This is essential for 
+                    accurate depth (Z-axis) and rotation data.
+                </p>
+            </div>
+            
+            <div class="concept">
+                <h3>IK vs FK - Which to Use?</h3>
+                <p>
+                    <strong>IK (Inverse Kinematics):</strong> You move the hand, and the arm follows automatically. 
+                    Best for mocap because you're controlling endpoints (hand/foot positions).
+                    <br><br>
+                    <strong>FK (Forward Kinematics):</strong> You rotate each joint individually (shoulder, elbow, wrist). 
+                    Better for stylized animation where you want precise rotation control.
+                    <br><br>
+                    <strong>For mocap:</strong> Use IK mode (set IK/FK switches to 1.0 on JaxRigify).
+                </p>
+            </div>
+            
+            <div class="concept">
+                <h3>Why Constraints Instead of Direct Keyframing?</h3>
+                <p>
+                    Constraints allow you to preview the retargeting in real-time before committing. 
+                    If something looks wrong, you can adjust the constraint settings and immediately see the result. 
+                    Once you're happy, you "bake" the animation to keyframes. This is much more stable and 
+                    flexible than trying to copy keyframes frame-by-frame.
+                </p>
+            </div>
+            
+            <div class="concept">
+                <h3>Why Previous Attempts Failed</h3>
+                <p>
+                    <strong>Flat triangulation:</strong> Improper coordinate system conversion made dual-camera 
+                    data look 2D from certain angles.
+                    <br><br>
+                    <strong>Retargeting failures:</strong> You were likely targeting DEF- bones (deformation) 
+                    instead of control bones, or using wrong coordinate spaces in constraints.
+                    <br><br>
+                    <strong>Single camera issues:</strong> Without depth data, torso rotation was just guessed 
+                    by MediaPipe, leading to incorrect rotations.
+                </p>
+            </div>
+        </div>
+        
+        <!-- Legend -->
+        <div class="legend">
+            <h3>📁 File Purposes</h3>
+            <div class="legend-item">
+                <div class="legend-color color-capture"></div>
+                <div>
+                    <strong>mocap_recorder.py</strong> - Standalone Python app for recording dual-camera mocap
+                </div>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color color-import"></div>
+                <div>
+                    <strong>mocap_rigify_retarget.py</strong> - Blender addon for importing JSON mocap data
+                </div>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color color-retarget"></div>
+                <div>
+                    <strong>rigify_constraint_retarget.py</strong> - Advanced constraint-based retargeting script
+                </div>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color color-refine"></div>
+                <div>
+                    <strong>WORKFLOW_GUIDE.md</strong> - Complete documentation and troubleshooting
+                </div>
+            </div>
+        </div>
+        
+        <div style="margin-top: 40px; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                    border-radius: 15px; color: white; text-align: center;">
+            <h2 style="margin-bottom: 15px;">🎬 Ready to Start?</h2>
+            <p style="font-size: 1.1em; line-height: 1.6;">
+                1. Run <code style="background: rgba(255,255,255,0.2); padding: 3px 8px; border-radius: 3px;">
+                python quick_start_test.py</code> to verify your setup<br>
+                2. Read <strong>WORKFLOW_GUIDE.md</strong> for detailed instructions<br>
+                3. Record your first take and bring Jax to life!
+            </p>
+        </div>
+    </div>
+</body>
+</html>

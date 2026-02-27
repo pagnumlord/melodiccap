@@ -1,0 +1,25 @@
+# Melodic Justice Motion Capture - Requirements
+# =============================================
+# Install with: pip install -r requirements.txt
+
+# Core dependencies
+opencv-python>=4.8.0
+opencv-contrib-python>=4.8.0  # For ArUco/ChArUco markers
+numpy>=1.24.0
+mediapipe>=0.10.0
+
+# GUI (optional, for desktop app)
+# tkinter is usually included with Python
+
+# For video processing
+scipy>=1.10.0
+
+# JSON handling (built-in, but ensuring compatibility)
+# json is built-in
+
+# Optional: For improved performance
+# numba>=0.57.0
+
+# Development dependencies (optional)
+# pytest>=7.0.0
+# black>=23.0.0
