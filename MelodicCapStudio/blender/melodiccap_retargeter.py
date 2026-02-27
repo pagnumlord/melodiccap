@@ -1,5 +1,5 @@
 """
-MelodicCap Retargeter v1.1
+MelodicCap Retargeter v1.2
 ==========================
 Clean retargeter combining:
 - v4's proven delta-from-reference IK approach (mathematically correct)
@@ -12,19 +12,22 @@ Clean retargeter combining:
 
 For Blender 4.4+ with JaxRigify armature.
 
-KEY DESIGN DECISIONS:
+KEY DESIGN DECISIONS (v1.2 corrections from live bone data):
+- NO mirroring: Person's LEFT = Character's LEFT (both at +X in capture/Blender coords)
+  Person faces camera (-Y), character's .L bones are at +X — same side.
+  v4's LEFT→RIGHT mapping was WRONG. v1/AntiGrav's LEFT→LEFT was correct.
 - NO X-axis negation (v5/v12.1 proved this double-mirrors)
-- L/R mirroring is handled ONLY in the bone mapping table
 - Data is already in Blender coordinates from the capture script
 - IK targets use delta-from-reference (includes hip movement naturally)
 - Pole targets use 3-point projection (Keemap algorithm) with delta-from-reference
-- FK rotations use V2R with per-bone rest axes from JaxRigify (not generic +Y)
+- FK rest axes from ACTUAL JaxRigify bone dump (A-pose: arms hang DOWN, not T-pose)
+- IK rotation rest axes from actual bone directions (hand_ik=-Z, foot_ik=+Y)
 """
 
 bl_info = {
     "name": "MelodicCap Retargeter",
     "author": "Karsten / MelodicCap Studio",
-    "version": (1, 1, 0),
+    "version": (1, 2, 0),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap motion capture data to JaxRigify armature",
@@ -50,49 +53,51 @@ LANDMARKS = {
 
 # =============================================================================
 # BONE MAPPING
-# MediaPipe person's LEFT = Blender's RIGHT (person faces camera)
-# This is the ONLY place mirroring happens. NO coordinate negation anywhere.
+# Person's LEFT = Character's LEFT (NO mirroring)
+# Both the performer and JaxRigify have LEFT at +X in the shared coordinate space.
+# (Person faces camera at -Y; character's .L bones verified at +X)
 # =============================================================================
 
 # IK targets for hand/foot position
 IK_TARGETS = {
-    'hand_ik.R': 15,   # Person's left wrist -> Character's right hand
-    'hand_ik.L': 16,   # Person's right wrist -> Character's left hand
-    'foot_ik.R': 27,   # Person's left ankle -> Character's right foot
-    'foot_ik.L': 28,   # Person's right ankle -> Character's left foot
+    'hand_ik.L': 15,   # Person's left wrist -> Character's left hand
+    'hand_ik.R': 16,   # Person's right wrist -> Character's right hand
+    'foot_ik.L': 27,   # Person's left ankle -> Character's left foot
+    'foot_ik.R': 28,   # Person's right ankle -> Character's right foot
 }
 
 # FK bone chains for limb rotation (V2R: start landmark -> end landmark)
 FK_CHAINS = {
-    # Person's LEFT -> Blender RIGHT
-    'upper_arm_fk.R': (11, 13),   # left shoulder -> left elbow
-    'forearm_fk.R':   (13, 15),   # left elbow -> left wrist
-    'thigh_fk.R':     (23, 25),   # left hip -> left knee
-    'shin_fk.R':      (25, 27),   # left knee -> left ankle
-    # Person's RIGHT -> Blender LEFT
-    'upper_arm_fk.L': (12, 14),   # right shoulder -> right elbow
-    'forearm_fk.L':   (14, 16),   # right elbow -> right wrist
-    'thigh_fk.L':     (24, 26),   # right hip -> right knee
-    'shin_fk.L':      (26, 28),   # right knee -> right ankle
+    # Person's LEFT -> Character's LEFT
+    'upper_arm_fk.L': (11, 13),   # left shoulder -> left elbow
+    'forearm_fk.L':   (13, 15),   # left elbow -> left wrist
+    'thigh_fk.L':     (23, 25),   # left hip -> left knee
+    'shin_fk.L':      (25, 27),   # left knee -> left ankle
+    # Person's RIGHT -> Character's RIGHT
+    'upper_arm_fk.R': (12, 14),   # right shoulder -> right elbow
+    'forearm_fk.R':   (14, 16),   # right elbow -> right wrist
+    'thigh_fk.R':     (24, 26),   # right hip -> right knee
+    'shin_fk.R':      (26, 28),   # right knee -> right ankle
 }
 
 # Pole targets for IK elbow/knee direction (3-point: root, mid, end)
-# Uses same L↔R mirroring as IK_TARGETS
 # Bone names verified from JaxRigify diagnostic dump
 POLE_TARGETS = {
-    'upper_arm_ik_target.R': (11, 13, 15),  # Person's L shoulder→elbow→wrist
-    'upper_arm_ik_target.L': (12, 14, 16),  # Person's R shoulder→elbow→wrist
-    'thigh_ik_target.R': (23, 25, 27),       # Person's L hip→knee→ankle
-    'thigh_ik_target.L': (24, 26, 28),       # Person's R hip→knee→ankle
+    'upper_arm_ik_target.L': (11, 13, 15),  # Person's L shoulder→elbow→wrist
+    'upper_arm_ik_target.R': (12, 14, 16),  # Person's R shoulder→elbow→wrist
+    'thigh_ik_target.L': (23, 25, 27),       # Person's L hip→knee→ankle
+    'thigh_ik_target.R': (24, 26, 28),       # Person's R hip→knee→ankle
 }
 
 # IK target rotation mapping (for wrist/foot orientation)
-# (start_landmark, end_landmark, rest_axis_for_that_ik_bone)
+# Rest axes from actual JaxRigify bone dump:
+#   hand_ik.L dir=( 0.147,-0.048,-0.988)  hand_ik.R dir=(-0.077,-0.128,-0.989)
+#   foot_ik.L dir=( 0.000, 1.000, 0.000)  foot_ik.R dir=( 0.000, 1.000, 0.000)
 IK_ROTATION = {
-    'hand_ik.R': (13, 15, Vector((0, 1, 0))),   # L forearm dir → hands point +Y at rest
-    'hand_ik.L': (14, 16, Vector((0, 1, 0))),   # R forearm dir
-    'foot_ik.R': (25, 27, Vector((0, 0, 1))),   # L shin dir → feet point +Z at rest
-    'foot_ik.L': (26, 28, Vector((0, 0, 1))),   # R shin dir
+    'hand_ik.L': (13, 15, Vector(( 0.147, -0.048, -0.988))),  # L forearm dir
+    'hand_ik.R': (14, 16, Vector((-0.077, -0.128, -0.989))),  # R forearm dir
+    'foot_ik.L': (25, 27, Vector((0, 1, 0))),                  # L shin dir → feet point +Y
+    'foot_ik.R': (26, 28, Vector((0, 1, 0))),                  # R shin dir → feet point +Y
 }
 
 # Spine V2R using virtual midpoints (4-segment spine)
@@ -111,24 +116,25 @@ IK_FK_SWITCHES = {
     'thigh_parent.R': 'IK_FK',
 }
 
-# Rest axes for V2R FK rotations (verified from JaxRigify bone structure)
+# Rest axes for V2R FK rotations — from ACTUAL JaxRigify bone dump (A-pose)
 # These are the bone rest directions in ARMATURE SPACE for each FK bone.
+# Arms hang DOWN in A-pose (not sideways like T-pose).
 BONE_REST_AXES = {
-    # Arms point outward from body
-    'upper_arm_fk.L': Vector((1, 0, 0)),
-    'forearm_fk.L': Vector((1, 0, 0)),
-    'upper_arm_fk.R': Vector((-1, 0, 0)),
-    'forearm_fk.R': Vector((-1, 0, 0)),
-    # Legs point down
-    'thigh_fk.L': Vector((0, 0, -1)),
-    'shin_fk.L': Vector((0, 0, -1)),
-    'thigh_fk.R': Vector((0, 0, -1)),
-    'shin_fk.R': Vector((0, 0, -1)),
-    # Spine points up
-    'spine_fk': Vector((0, 0, 1)),
-    'spine_fk.001': Vector((0, 0, 1)),
-    'spine_fk.002': Vector((0, 0, 1)),
-    'spine_fk.003': Vector((0, 0, 1)),
+    # Arms hang down and slightly outward (A-pose, from bone dump)
+    'upper_arm_fk.L': Vector(( 0.287,  0.070, -0.955)).normalized(),
+    'forearm_fk.L':   Vector(( 0.468, -0.156, -0.870)).normalized(),
+    'upper_arm_fk.R': Vector((-0.265,  0.071, -0.962)).normalized(),
+    'forearm_fk.R':   Vector((-0.453, -0.179, -0.873)).normalized(),
+    # Legs point down (nearly straight, from bone dump)
+    'thigh_fk.L': Vector(( 0.070, -0.040, -0.997)).normalized(),
+    'shin_fk.L':  Vector((-0.010,  0.066, -0.998)).normalized(),
+    'thigh_fk.R': Vector((-0.055, -0.041, -0.998)).normalized(),
+    'shin_fk.R':  Vector((-0.036,  0.066, -0.997)).normalized(),
+    # Spine points up (from bone dump)
+    'spine_fk':      Vector(( 0.000, -0.095,  0.995)).normalized(),
+    'spine_fk.001':  Vector((-0.000, -0.010,  1.000)).normalized(),
+    'spine_fk.002':  Vector((-0.000,  0.060,  0.998)).normalized(),
+    'spine_fk.003':  Vector(( 0.000,  0.001,  1.000)).normalized(),
 }
 
 # =============================================================================
@@ -244,7 +250,7 @@ class MelodicCapImporter:
     def analyze(self):
         """Analyze character and mocap data, compute scale factor."""
         log("=" * 60)
-        log("MELODICCAP RETARGETER v1.0 - ANALYSIS")
+        log("MELODICCAP RETARGETER v1.2 - ANALYSIS")
         log("=" * 60)
 
         # --- Armature scale check ---
@@ -623,8 +629,8 @@ class MelodicCapImporter:
                         target_dir = (e_pos - s_pos).normalized()
                         target_dir_local = world_inv.to_quaternion() @ target_dir
 
-                        # Spine bones point +Z at rest
-                        rest_axis = Vector((0, 0, 1))
+                        # Per-bone rest axis from actual JaxRigify bone dump
+                        rest_axis = BONE_REST_AXES.get(bone_name, Vector((0, 0, 1)))
                         quat = rest_axis.rotation_difference(target_dir_local)
 
                         pb = pose_bones[bone_name]
@@ -890,7 +896,7 @@ def register():
         description="Higher = stickier feet (reduces sliding). 0 = disabled"
     )
 
-    log("MelodicCap Retargeter v1.1 registered")
+    log("MelodicCap Retargeter v1.2 registered")
 
 def unregister():
     for c in reversed(classes):
