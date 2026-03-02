@@ -1,0 +1,41 @@
+[INFO] Log file: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\logs\capture_session_20260302_182304.log
+[INFO] Session started: 2026-03-02T18:23:04.868124
+[INFO] Python: 3.12.6 (tags/v3.12.6:a4a2d2b, Sep  6 2024, 20:11:23) [MSC v.1940 64 bit (AMD64)]
+[INFO] OpenCV: 4.12.0
+[INFO] MediaPipe: 0.10.14
+[INFO] ============================================================
+[INFO] MELODICCAP STUDIO - MOTION CAPTURE v2.1
+[INFO] ============================================================
+[INFO] 
+  Configuration:
+[INFO]     Camera A index: 2
+[INFO]     Camera B index: 0
+[INFO]     Countdown: 10s
+[INFO]     Grace period: 30 frames
+[INFO]     Outlier threshold: 5.0m
+[INFO]     Min visibility: 0.3
+[INFO]     MediaPipe complexity: 1
+[INFO]     MediaPipe detection conf: 0.3
+[INFO]     MediaPipe tracking conf: 0.3
+[INFO]     Base dir: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio
+[INFO]     Calibration file: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\calibration\stereo_calibration.json
+[INFO]     Takes dir: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\takes
+[INFO] 
+[CAMERAS]
+[INFO]   Opening Camera A (index 2, DSHOW)...
+[INFO]     Native: 1280x720 @ 0.0fps
+[INFO]   Opening Camera B (index 0, CAP_ANY)...
+[INFO]     Native: 1280x720 @ 30.0fps
+[INFO] 
+  Processing resolution: 1280x720
+[INFO]     Both cameras match - no resizing needed
+[INFO] 
+[CALIBRATION] Loaded (v5.3-robust, Stereo RMS: 0.4324, Baseline: 1.436m)
+[INFO] [FLOOR] Offset: 0.9995m
+[INFO] 
+[CONTROLS]
+[INFO]   C = Collect calibration frames (hold board visible to both cameras)
+[INFO]   S = Run stereo calibration (after collecting 15+ frames)
+[INFO]   F = Floor calibration (lay board flat on floor)
+[INFO]   R = Start/stop recording motion capture
+[INFO]   Q = Quit
