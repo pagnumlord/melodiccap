@@ -274,18 +274,40 @@ def main():
     # Open cameras
     print("\nOpening cameras...")
     cap_a = cv2.VideoCapture(CAM_A_INDEX, cv2.CAP_DSHOW)
+    cap_a.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap_a.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap_a.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
     cap_b = cv2.VideoCapture(CAM_B_INDEX, cv2.CAP_ANY)
-    
-    for cap in [cap_a, cap_b]:
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    
+    cap_b.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap_b.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap_b.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
     if not cap_a.isOpened() or not cap_b.isOpened():
         print("ERROR: Could not open cameras!")
         return
-    
-    print("OK")
+
+    native_w_a = int(cap_a.get(cv2.CAP_PROP_FRAME_WIDTH))
+    native_h_a = int(cap_a.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    native_w_b = int(cap_b.get(cv2.CAP_PROP_FRAME_WIDTH))
+    native_h_b = int(cap_b.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    print(f"Camera A: {native_w_a}x{native_h_a}")
+    print(f"Camera B: {native_w_b}x{native_h_b}")
+
+    # Use smaller camera's resolution to preserve aspect ratio
+    pixels_a = native_w_a * native_h_a
+    pixels_b = native_w_b * native_h_b
+    if pixels_a <= pixels_b:
+        proc_w, proc_h = native_w_a, native_h_a
+    else:
+        proc_w, proc_h = native_w_b, native_h_b
+    resize_a = (native_w_a != proc_w or native_h_a != proc_h)
+    resize_b = (native_w_b != proc_w or native_h_b != proc_h)
+    print(f"Processing at: {proc_w}x{proc_h}")
+    if resize_a:
+        print(f"  Camera A: will resize {native_w_a}x{native_h_a} -> {proc_w}x{proc_h}")
+    if resize_b:
+        print(f"  Camera B: will resize {native_w_b}x{native_h_b} -> {proc_w}x{proc_h}")
     
     print("\n[CONTROLS]")
     print("  Press SPACE to start/stop collecting")
@@ -301,10 +323,16 @@ def main():
     while True:
         ret_a, frame_a = cap_a.read()
         ret_b, frame_b = cap_b.read()
-        
+
         if not ret_a or not ret_b:
             continue
-        
+
+        # Resize to common resolution if needed
+        if resize_a:
+            frame_a = cv2.resize(frame_a, (proc_w, proc_h))
+        if resize_b:
+            frame_b = cv2.resize(frame_b, (proc_w, proc_h))
+
         # Detect
         cc_a, ci_a, markers_a = detect_charuco(frame_a)
         cc_b, ci_b, markers_b = detect_charuco(frame_b)

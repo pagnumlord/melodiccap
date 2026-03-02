@@ -105,13 +105,25 @@ This teaches the system how your two cameras relate to each other in 3D space.
 
 **What to look for in the output:**
 ```
-Camera A RMS: 0.08    <-- Good (< 0.5)
-Camera B RMS: 0.10    <-- Good (< 0.5)
-Stereo RMS: 0.43      <-- Good (< 1.0)
-Baseline: 1.44m       <-- Distance between cameras
+--- Iteration 1/5 ---
+Active frames: 35
+  Camera A RMS: 0.08    <-- Good (< 0.5)
+  Camera B RMS: 0.10    <-- Good (< 0.5)
+  Stereo RMS: 2.40      <-- Will improve with outlier rejection
+  Removed frame 12 (error: 3.81)
+  Removed frame 28 (error: 2.95)
+
+--- Iteration 2/5 ---
+Active frames: 33
+  Stereo RMS: 0.85      <-- Good after removing outliers!
+  Baseline: 1.44m       <-- Distance between cameras
 ```
 
-If Stereo RMS is > 1.0, try again with more frames and more varied board positions.
+The calibration now uses **iterative outlier rejection**: it calibrates, checks per-frame
+reprojection error, removes the worst frames, and recalibrates. This dramatically
+improves results compared to single-pass calibration.
+
+If final Stereo RMS is > 2.0 after all iterations, try again with more frames and more varied board positions.
 
 ---
 

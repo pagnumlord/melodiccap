@@ -1,7 +1,13 @@
 """
-MelodicCap Studio - Motion Capture v2.0
+MelodicCap Studio - Motion Capture v2.1
 ========================================
 Based on capture v8 (proven: 100% tracking, Kalman smoothing, 30-frame grace period).
+
+v2.1 changes (from v2.0):
+- Iterative outlier rejection in stereo calibration (from robust_calibration.py)
+- Fixed empty session log bug (fsync + write verification)
+- Better resolution handling (match to smaller camera, preserve aspect ratio)
+- Calibration quality validation with per-frame error reporting
 
 v2.0 changes:
 - Comprehensive debug logging to file (every session gets a log)
@@ -24,6 +30,7 @@ import cv2
 import numpy as np
 import mediapipe as mp
 import json
+import os
 import time
 import sys
 import traceback
@@ -82,7 +89,16 @@ def log_init(tag="capture"):
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     _log_path = LOGS_DIR / f"capture_{tag}_{ts}.log"
-    _log_file = open(_log_path, 'w', encoding='utf-8')
+    try:
+        _log_file = open(_log_path, 'w', encoding='utf-8')
+        # Verify the file handle works immediately
+        _log_file.write("")
+        _log_file.flush()
+        os.fsync(_log_file.fileno())
+    except Exception as e:
+        print(f"[ERROR] Failed to open log file {_log_path}: {e}")
+        _log_file = None
+
     log(f"Log file: {_log_path}")
     log(f"Session started: {datetime.now().isoformat()}")
     log(f"Python: {sys.version}")
@@ -93,7 +109,12 @@ def log_close():
     """Close the log file."""
     global _log_file, _log_path
     if _log_file:
-        _log_file.close()
+        try:
+            _log_file.flush()
+            os.fsync(_log_file.fileno())
+            _log_file.close()
+        except Exception:
+            pass
         _log_file = None
 
 def log(msg, level="INFO"):
@@ -101,8 +122,11 @@ def log(msg, level="INFO"):
     line = f"[{level}] {msg}"
     print(line)
     if _log_file:
-        _log_file.write(line + "\n")
-        _log_file.flush()
+        try:
+            _log_file.write(line + "\n")
+            _log_file.flush()
+        except Exception:
+            pass  # Don't crash on log write failure
 
 # =============================================================================
 # DETECTOR SETUP
@@ -172,16 +196,23 @@ def draw_detection(frame, charuco_corners, charuco_ids, num_markers):
     return display
 
 
-def run_stereo_calibration(frames_a, frames_b):
-    """Run stereo calibration with iterative outlier rejection."""
+def run_stereo_calibration(frames_a, frames_b, max_iterations=5, outlier_threshold=2.0):
+    """Run stereo calibration with iterative outlier rejection.
+
+    Approach (from robust_calibration.py):
+    1. Extract corners from all frames
+    2. Do initial calibration
+    3. Calculate per-frame stereo reprojection error
+    4. Remove worst frames (error > outlier_threshold * median)
+    5. Recalibrate
+    6. Repeat until stable or RMS < 2.0
+    """
     log("=" * 50)
-    log("STEREO CALIBRATION")
+    log("STEREO CALIBRATION (iterative outlier rejection)")
     log("=" * 50)
 
-    all_corners_a, all_ids_a = [], []
-    all_corners_b, all_ids_b = [], []
-    valid_pairs = []
-
+    # Phase 1: Extract corners from all frame pairs
+    all_data = []
     for i, (fa, fb) in enumerate(zip(frames_a, frames_b)):
         cc_a, ci_a, _ = detect_charuco(fa)
         cc_b, ci_b, _ = detect_charuco(fb)
@@ -195,101 +226,202 @@ def run_stereo_calibration(frames_a, frames_b):
             log(f"  Frame {i}: skipped (only {len(common)} common corners)")
             continue
 
-        all_corners_a.append(cc_a)
-        all_ids_a.append(ci_a)
-        all_corners_b.append(cc_b)
-        all_ids_b.append(ci_b)
-        valid_pairs.append((cc_a, ci_a, cc_b, ci_b, common))
+        all_data.append({
+            'index': i,
+            'corners_a': cc_a, 'ids_a': ci_a,
+            'corners_b': cc_b, 'ids_b': ci_b,
+            'common': common,
+            'active': True,
+        })
         log(f"  Frame {i}: {len(common)} common corners")
 
-    log(f"Valid pairs: {len(valid_pairs)}/{len(frames_a)}")
+    log(f"Valid pairs: {len(all_data)}/{len(frames_a)}")
 
-    if len(valid_pairs) < 8:
-        return None, f"Only {len(valid_pairs)} valid pairs (need 8+)"
+    if len(all_data) < 8:
+        return None, f"Only {len(all_data)} valid pairs (need 8+)"
 
     img_size = (frames_a[0].shape[1], frames_a[0].shape[0])
 
-    log("Calibrating Camera A...")
-    ret_a, K1, D1, _, _ = cv2.aruco.calibrateCameraCharuco(
-        all_corners_a, all_ids_a, board, img_size, None, None
-    )
-    log(f"  RMS: {ret_a:.4f}")
-    log(f"  K1 (focal): fx={K1[0,0]:.1f}, fy={K1[1,1]:.1f}")
-    log(f"  K1 (center): cx={K1[0,2]:.1f}, cy={K1[1,2]:.1f}")
-    log(f"  D1: {D1.flatten()}")
+    best_result = None
+    best_rms = float('inf')
 
-    log("Calibrating Camera B...")
-    ret_b, K2, D2, _, _ = cv2.aruco.calibrateCameraCharuco(
-        all_corners_b, all_ids_b, board, img_size, None, None
-    )
-    log(f"  RMS: {ret_b:.4f}")
-    log(f"  K2 (focal): fx={K2[0,0]:.1f}, fy={K2[1,1]:.1f}")
-    log(f"  K2 (center): cx={K2[0,2]:.1f}, cy={K2[1,2]:.1f}")
-    log(f"  D2: {D2.flatten()}")
+    # Phase 2: Iterative calibration with outlier rejection
+    for iteration in range(max_iterations):
+        log(f"\n--- Iteration {iteration + 1}/{max_iterations} ---")
 
-    obj_points = []
-    img_points_a = []
-    img_points_b = []
+        active_data = [d for d in all_data if d['active']]
+        log(f"Active frames: {len(active_data)}")
 
-    for cc_a, ci_a, cc_b, ci_b, common in valid_pairs:
-        obj_pts = []
-        pts_a = []
-        pts_b = []
+        if len(active_data) < 8:
+            log("Too few frames remaining, stopping iteration")
+            break
 
-        ci_a_flat = ci_a.flatten()
-        ci_b_flat = ci_b.flatten()
+        # Individual camera calibration
+        corners_a = [d['corners_a'] for d in active_data]
+        ids_a = [d['ids_a'] for d in active_data]
+        corners_b = [d['corners_b'] for d in active_data]
+        ids_b = [d['ids_b'] for d in active_data]
 
-        for cid in sorted(common):
-            obj_pts.append(board_corners_3d[cid])
-            idx_a = np.where(ci_a_flat == cid)[0][0]
-            idx_b = np.where(ci_b_flat == cid)[0][0]
-            pts_a.append(cc_a[idx_a].flatten())
-            pts_b.append(cc_b[idx_b].flatten())
+        ret_a, K1, D1, _, _ = cv2.aruco.calibrateCameraCharuco(
+            corners_a, ids_a, board, img_size, None, None
+        )
+        ret_b, K2, D2, _, _ = cv2.aruco.calibrateCameraCharuco(
+            corners_b, ids_b, board, img_size, None, None
+        )
+        log(f"  Camera A RMS: {ret_a:.4f} (fx={K1[0,0]:.1f}, fy={K1[1,1]:.1f})")
+        log(f"  Camera B RMS: {ret_b:.4f} (fx={K2[0,0]:.1f}, fy={K2[1,1]:.1f})")
 
-        obj_points.append(np.array(obj_pts, dtype=np.float32))
-        img_points_a.append(np.array(pts_a, dtype=np.float32))
-        img_points_b.append(np.array(pts_b, dtype=np.float32))
+        # Build stereo correspondences
+        obj_points = []
+        img_points_a = []
+        img_points_b = []
+        frame_indices = []
 
-    log("Stereo calibration...")
-    ret_stereo, K1, D1, K2, D2, R, T, E, F = cv2.stereoCalibrate(
-        obj_points, img_points_a, img_points_b,
-        K1, D1, K2, D2, img_size,
-        criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6),
-        flags=cv2.CALIB_FIX_INTRINSIC
-    )
+        for d in active_data:
+            cc_a, ci_a = d['corners_a'], d['ids_a']
+            cc_b, ci_b = d['corners_b'], d['ids_b']
+            common = d['common']
 
-    baseline = float(np.linalg.norm(T))
-    log(f"  Stereo RMS: {ret_stereo:.4f}")
-    log(f"  Baseline: {baseline:.3f}m")
-    log(f"  R: {R.tolist()}")
-    log(f"  T: {T.flatten().tolist()}")
+            obj_pts, pts_a, pts_b = [], [], []
+            ci_a_flat = ci_a.flatten()
+            ci_b_flat = ci_b.flatten()
 
-    if ret_stereo > 10.0:
-        return None, f"Stereo RMS {ret_stereo:.1f} too high!"
+            for cid in sorted(common):
+                obj_pts.append(board_corners_3d[cid])
+                idx_a = np.where(ci_a_flat == cid)[0][0]
+                idx_b = np.where(ci_b_flat == cid)[0][0]
+                pts_a.append(cc_a[idx_a].flatten())
+                pts_b.append(cc_b[idx_b].flatten())
 
+            obj_points.append(np.array(obj_pts, dtype=np.float32))
+            img_points_a.append(np.array(pts_a, dtype=np.float32))
+            img_points_b.append(np.array(pts_b, dtype=np.float32))
+            frame_indices.append(d['index'])
+
+        # Stereo calibration
+        ret_stereo, K1, D1, K2, D2, R, T, E, F = cv2.stereoCalibrate(
+            obj_points, img_points_a, img_points_b,
+            K1, D1, K2, D2, img_size,
+            criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6),
+            flags=cv2.CALIB_FIX_INTRINSIC
+        )
+
+        baseline = float(np.linalg.norm(T))
+        log(f"  Stereo RMS: {ret_stereo:.4f}")
+        log(f"  Baseline: {baseline:.3f}m")
+
+        # Track best result
+        if ret_stereo < best_rms:
+            best_rms = ret_stereo
+            best_result = {
+                'K1': K1.copy(), 'D1': D1.copy(),
+                'K2': K2.copy(), 'D2': D2.copy(),
+                'R': R.copy(), 'T': T.copy(),
+                'ret_a': ret_a, 'ret_b': ret_b,
+                'ret_stereo': ret_stereo,
+                'baseline': baseline,
+                'num_frames': len(active_data),
+            }
+
+        # If RMS is acceptable, stop iterating
+        if ret_stereo < 2.0:
+            log(f"  Stereo RMS {ret_stereo:.4f} is good, stopping iteration")
+            break
+
+        # Phase 3: Calculate per-frame reprojection error to find outliers
+        log("  Calculating per-frame reprojection errors...")
+
+        R1, R2, P1, P2, Q, _, _ = cv2.stereoRectify(
+            K1, D1, K2, D2, img_size, R, T,
+            flags=cv2.CALIB_ZERO_DISPARITY, alpha=0
+        )
+
+        frame_errors = []
+        for fi, (obj_pts, pts_a, pts_b) in enumerate(zip(obj_points, img_points_a, img_points_b)):
+            pts_a_rect = cv2.undistortPoints(pts_a.reshape(-1, 1, 2), K1, D1, R=R1, P=P1)
+            pts_b_rect = cv2.undistortPoints(pts_b.reshape(-1, 1, 2), K2, D2, R=R2, P=P2)
+
+            pts_4d = cv2.triangulatePoints(P1, P2,
+                                            pts_a_rect.reshape(-1, 2).T,
+                                            pts_b_rect.reshape(-1, 2).T)
+            pts_3d = (pts_4d[:3] / pts_4d[3]).T
+
+            pts_3d_h = np.hstack([pts_3d, np.ones((pts_3d.shape[0], 1))])
+            proj_a = (P1 @ pts_3d_h.T).T
+            proj_a = proj_a[:, :2] / proj_a[:, 2:3]
+            proj_b = (P2 @ pts_3d_h.T).T
+            proj_b = proj_b[:, :2] / proj_b[:, 2:3]
+
+            err_a = np.mean(np.linalg.norm(pts_a_rect.reshape(-1, 2) - proj_a, axis=1))
+            err_b = np.mean(np.linalg.norm(pts_b_rect.reshape(-1, 2) - proj_b, axis=1))
+
+            frame_errors.append({
+                'frame_idx': frame_indices[fi],
+                'error': (err_a + err_b) / 2,
+                'err_a': err_a, 'err_b': err_b
+            })
+
+        frame_errors.sort(key=lambda x: x['error'], reverse=True)
+        errors = [f['error'] for f in frame_errors]
+        median_error = np.median(errors)
+
+        log(f"  Median frame error: {median_error:.4f}")
+        log(f"  Worst frame error: {frame_errors[0]['error']:.4f} (frame {frame_errors[0]['frame_idx']})")
+
+        # Remove frames with error > threshold * median
+        threshold = max(outlier_threshold * median_error, 1.0)
+        removed = 0
+
+        for fe in frame_errors:
+            if fe['error'] > threshold and len(active_data) - removed > 10:
+                for d in all_data:
+                    if d['index'] == fe['frame_idx']:
+                        d['active'] = False
+                        removed += 1
+                        log(f"    Removed frame {fe['frame_idx']} (error: {fe['error']:.4f})")
+                        break
+
+        if removed == 0:
+            log("  No outliers found, stopping iteration")
+            break
+
+        log(f"  Removed {removed} outlier frames")
+
+    # Phase 4: Use best result
+    if best_result is None:
+        return None, "Calibration failed - no valid result"
+
+    if best_rms > 10.0:
+        return None, f"Best Stereo RMS {best_rms:.1f} still too high!"
+
+    log(f"\n  BEST RESULT: Stereo RMS={best_rms:.4f}, {best_result['num_frames']} frames, baseline={best_result['baseline']:.3f}m")
+
+    # Compute rectification from best result
     R1, R2, P1, P2, Q, _, _ = cv2.stereoRectify(
-        K1, D1, K2, D2, img_size, R, T,
+        best_result['K1'], best_result['D1'],
+        best_result['K2'], best_result['D2'],
+        img_size, best_result['R'], best_result['T'],
         flags=cv2.CALIB_ZERO_DISPARITY, alpha=0
     )
 
     CALIBRATION_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     data = {
-        'version': 'studio-2.0',
+        'version': 'studio-2.1-robust',
         'timestamp': datetime.now().isoformat(),
         'image_size': list(img_size),
-        'K1': K1.tolist(), 'D1': D1.tolist(),
-        'K2': K2.tolist(), 'D2': D2.tolist(),
+        'K1': best_result['K1'].tolist(), 'D1': best_result['D1'].tolist(),
+        'K2': best_result['K2'].tolist(), 'D2': best_result['D2'].tolist(),
         'R1': R1.tolist(), 'R2': R2.tolist(),
         'P1': P1.tolist(), 'P2': P2.tolist(),
-        'R': R.tolist(), 'T': T.tolist(),
-        'rms_cam_a': float(ret_a),
-        'rms_cam_b': float(ret_b),
-        'rms_stereo': float(ret_stereo),
-        'baseline_meters': baseline,
+        'R': best_result['R'].tolist(), 'T': best_result['T'].tolist(),
+        'rms_cam_a': float(best_result['ret_a']),
+        'rms_cam_b': float(best_result['ret_b']),
+        'rms_stereo': float(best_result['ret_stereo']),
+        'baseline_meters': float(best_result['baseline']),
         'floor_z_offset': 0.0,
         'floor_calibrated': False,
-        'frames_used': len(valid_pairs),
+        'frames_used': best_result['num_frames'],
     }
 
     with open(CALIBRATION_FILE, 'w') as f:
@@ -297,7 +429,7 @@ def run_stereo_calibration(frames_a, frames_b):
 
     log(f"Saved: {CALIBRATION_FILE}")
 
-    return data, f"CamA:{ret_a:.2f} CamB:{ret_b:.2f} Stereo:{ret_stereo:.2f} Base:{baseline:.2f}m"
+    return data, f"CamA:{best_result['ret_a']:.2f} CamB:{best_result['ret_b']:.2f} Stereo:{best_rms:.2f} Base:{best_result['baseline']:.2f}m ({best_result['num_frames']}f)"
 
 
 def calibrate_floor(frame_a, frame_b, calib_data):
@@ -519,7 +651,7 @@ def main():
     log_init("session")
 
     log("=" * 60)
-    log("MELODICCAP STUDIO - MOTION CAPTURE v2.0")
+    log("MELODICCAP STUDIO - MOTION CAPTURE v2.1")
     log("=" * 60)
 
     log(f"\n  Configuration:")
@@ -593,14 +725,16 @@ def main():
     # Determine common processing resolution.
     # Both cameras MUST process at the same resolution for calibration/triangulation
     # to work correctly (K matrices encode focal lengths for a specific resolution).
-    # Use the smaller of the two native resolutions.
-    PROC_W = min(native_w_a, native_w_b)
-    PROC_H = min(native_h_a, native_h_b)
+    # Use the smaller camera's resolution to preserve aspect ratio.
+    pixels_a = native_w_a * native_h_a
+    pixels_b = native_w_b * native_h_b
+    if pixels_a <= pixels_b:
+        PROC_W, PROC_H = native_w_a, native_h_a
+    else:
+        PROC_W, PROC_H = native_w_b, native_h_b
     # Track whether we need to resize each camera's frames
     resize_a = (native_w_a != PROC_W or native_h_a != PROC_H)
     resize_b = (native_w_b != PROC_W or native_h_b != PROC_H)
-    actual_w_a, actual_h_a = PROC_W, PROC_H
-    actual_w_b, actual_h_b = PROC_W, PROC_H
 
     log(f"\n  Processing resolution: {PROC_W}x{PROC_H}")
     if resize_a:
@@ -1028,7 +1162,7 @@ def main():
                             }
 
                         take_data = {
-                            'version': 'studio-2.0',
+                            'version': 'studio-2.1',
                             'timestamp': datetime.now().isoformat(),
                             'duration_seconds': time.time() - record_start_time,
                             'frame_count': len(recorded_frames),
@@ -1049,8 +1183,9 @@ def main():
                             'capture_settings': {
                                 'cam_a_index': cam_a,
                                 'cam_b_index': cam_b,
-                                'cam_a_resolution': f"{actual_w_a}x{actual_h_a}",
-                                'cam_b_resolution': f"{actual_w_b}x{actual_h_b}",
+                                'cam_a_native': f"{native_w_a}x{native_h_a}",
+                                'cam_b_native': f"{native_w_b}x{native_h_b}",
+                                'processing_resolution': f"{PROC_W}x{PROC_H}",
                                 'mediapipe_complexity': MEDIAPIPE_MODEL_COMPLEXITY,
                                 'mediapipe_detection_conf': MEDIAPIPE_MIN_DETECTION_CONF,
                                 'mediapipe_tracking_conf': MEDIAPIPE_MIN_TRACKING_CONF,
