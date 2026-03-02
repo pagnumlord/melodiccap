@@ -1,0 +1,51 @@
+[INFO] Log file: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\logs\capture_session_20260301_203537.log
+[INFO] Session started: 2026-03-01T20:35:37.091906
+[INFO] Python: 3.12.6 (tags/v3.12.6:a4a2d2b, Sep  6 2024, 20:11:23) [MSC v.1940 64 bit (AMD64)]
+[INFO] OpenCV: 4.12.0
+[INFO] MediaPipe: 0.10.14
+[INFO] ============================================================
+[INFO] MELODICCAP STUDIO - MOTION CAPTURE v2.0
+[INFO] ============================================================
+[INFO] 
+  Configuration:
+[INFO]     Camera A index: 2
+[INFO]     Camera B index: 0
+[INFO]     Countdown: 10s
+[INFO]     Grace period: 30 frames
+[INFO]     Outlier threshold: 5.0m
+[INFO]     Min visibility: 0.3
+[INFO]     MediaPipe complexity: 1
+[INFO]     MediaPipe detection conf: 0.3
+[INFO]     MediaPipe tracking conf: 0.3
+[INFO]     Base dir: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio
+[INFO]     Calibration file: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\calibration\stereo_calibration.json
+[INFO]     Takes dir: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\takes
+[INFO] 
+[CAMERAS]
+[INFO]   Opening Camera A (index 2, DSHOW)...
+[INFO]     OK: 1024x576 @ 0.0fps
+[WARN]     WARNING: Requested 1280x720 but got 1024x576!
+[INFO]   Opening Camera B (index 0, CAP_ANY)...
+[INFO]     OK: 1280x720 @ 30.0fps
+[INFO] 
+[CALIBRATION] Loaded (v5.3-robust, Stereo RMS: 0.4324, Baseline: 1.436m)
+[INFO] [FLOOR] Offset: 0.8017m
+[INFO] 
+[CONTROLS]
+[INFO]   C = Collect calibration frames (hold board visible to both cameras)
+[INFO]   S = Run stereo calibration (after collecting 15+ frames)
+[INFO]   F = Floor calibration (lay board flat on floor)
+[INFO]   R = Start/stop recording motion capture
+[INFO]   Q = Quit
+[ERROR] FATAL ERROR: all the input array dimensions except for the concatenation axis must match exactly, but along dimension 0, the array at index 0 has size 288 and the array at index 1 has size 360
+[ERROR] Traceback (most recent call last):
+  File "C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\capture\melodic_capture.py", line 867, in main
+    combined = np.hstack([disp_a, disp_b])
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ninja\AppData\Roaming\Python\Python312\site-packages\numpy\_core\shape_base.py", line 367, in hstack
+    return _nx.concatenate(arrs, 1, dtype=dtype, casting=casting)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: all the input array dimensions except for the concatenation axis must match exactly, but along dimension 0, the array at index 0 has size 288 and the array at index 1 has size 360
+
+[INFO] 
+[DONE] Session ended
