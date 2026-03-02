@@ -563,17 +563,15 @@ def main():
     cap_a.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     cap_a.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-    if cap_a.isOpened():
-        actual_w_a = int(cap_a.get(cv2.CAP_PROP_FRAME_WIDTH))
-        actual_h_a = int(cap_a.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        actual_fps_a = cap_a.get(cv2.CAP_PROP_FPS)
-        log(f"    OK: {actual_w_a}x{actual_h_a} @ {actual_fps_a:.1f}fps")
-        if actual_w_a != 1280 or actual_h_a != 720:
-            log(f"    WARNING: Requested 1280x720 but got {actual_w_a}x{actual_h_a}!", "WARN")
-    else:
+    if not cap_a.isOpened():
         log("    FAILED to open Camera A!", "ERROR")
         log_close()
         return
+
+    native_w_a = int(cap_a.get(cv2.CAP_PROP_FRAME_WIDTH))
+    native_h_a = int(cap_a.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    actual_fps_a = cap_a.get(cv2.CAP_PROP_FPS)
+    log(f"    Native: {native_w_a}x{native_h_a} @ {actual_fps_a:.1f}fps")
 
     log(f"  Opening Camera B (index {cam_b}, CAP_ANY)...")
     cap_b = cv2.VideoCapture(cam_b, cv2.CAP_ANY)
@@ -581,18 +579,36 @@ def main():
     cap_b.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     cap_b.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-    if cap_b.isOpened():
-        actual_w_b = int(cap_b.get(cv2.CAP_PROP_FRAME_WIDTH))
-        actual_h_b = int(cap_b.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        actual_fps_b = cap_b.get(cv2.CAP_PROP_FPS)
-        log(f"    OK: {actual_w_b}x{actual_h_b} @ {actual_fps_b:.1f}fps")
-        if actual_w_b != 1280 or actual_h_b != 720:
-            log(f"    WARNING: Requested 1280x720 but got {actual_w_b}x{actual_h_b}!", "WARN")
-    else:
+    if not cap_b.isOpened():
         log("    FAILED to open Camera B!", "ERROR")
         cap_a.release()
         log_close()
         return
+
+    native_w_b = int(cap_b.get(cv2.CAP_PROP_FRAME_WIDTH))
+    native_h_b = int(cap_b.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    actual_fps_b = cap_b.get(cv2.CAP_PROP_FPS)
+    log(f"    Native: {native_w_b}x{native_h_b} @ {actual_fps_b:.1f}fps")
+
+    # Determine common processing resolution.
+    # Both cameras MUST process at the same resolution for calibration/triangulation
+    # to work correctly (K matrices encode focal lengths for a specific resolution).
+    # Use the smaller of the two native resolutions.
+    PROC_W = min(native_w_a, native_w_b)
+    PROC_H = min(native_h_a, native_h_b)
+    # Track whether we need to resize each camera's frames
+    resize_a = (native_w_a != PROC_W or native_h_a != PROC_H)
+    resize_b = (native_w_b != PROC_W or native_h_b != PROC_H)
+    actual_w_a, actual_h_a = PROC_W, PROC_H
+    actual_w_b, actual_h_b = PROC_W, PROC_H
+
+    log(f"\n  Processing resolution: {PROC_W}x{PROC_H}")
+    if resize_a:
+        log(f"    Camera A: will resize {native_w_a}x{native_h_a} -> {PROC_W}x{PROC_H}")
+    if resize_b:
+        log(f"    Camera B: will resize {native_w_b}x{native_h_b} -> {PROC_W}x{PROC_H}")
+    if not resize_a and not resize_b:
+        log(f"    Both cameras match - no resizing needed")
 
     # Load existing calibration
     calib_data = None
@@ -603,9 +619,19 @@ def main():
             log(f"\n[CALIBRATION] Loaded (v{calib_data.get('version', '?')}, "
                 f"Stereo RMS: {calib_data.get('rms_stereo', '?'):.4f}, "
                 f"Baseline: {calib_data.get('baseline_meters', '?'):.3f}m)")
-            if calib_data.get('floor_calibrated'):
+
+            # Check if calibration resolution matches current processing resolution
+            cal_size = calib_data.get('image_size', [0, 0])
+            if cal_size[0] != PROC_W or cal_size[1] != PROC_H:
+                log(f"  RESOLUTION MISMATCH: calibration was done at "
+                    f"{cal_size[0]}x{cal_size[1]} but cameras are now at "
+                    f"{PROC_W}x{PROC_H}", "WARN")
+                log(f"  You MUST recalibrate (C then S) before recording!", "WARN")
+                calib_data = None  # Invalidate old calibration
+
+            if calib_data and calib_data.get('floor_calibrated'):
                 log(f"[FLOOR] Offset: {calib_data.get('floor_z_offset', 0):.4f}m")
-            else:
+            elif calib_data:
                 log("[FLOOR] Not calibrated - press F with board on floor", "WARN")
         except Exception as e:
             log(f"Failed to load calibration: {e}", "ERROR")
@@ -664,6 +690,12 @@ def main():
 
             if not ret_a or not ret_b:
                 continue
+
+            # Resize to common processing resolution if needed
+            if resize_a:
+                frame_a = cv2.resize(frame_a, (PROC_W, PROC_H))
+            if resize_b:
+                frame_b = cv2.resize(frame_b, (PROC_W, PROC_H))
 
             frame_count += 1
             grab_delay = t_grab_b - t_grab_a
@@ -860,10 +892,10 @@ def main():
                     status = "RECORDING..."
                     log("[REC] Recording started")
 
-            # Resize and combine
-            scale = 0.5
-            disp_a = cv2.resize(display_a, None, fx=scale, fy=scale)
-            disp_b = cv2.resize(display_b, None, fx=scale, fy=scale)
+            # Resize both to same size and combine
+            DISPLAY_W, DISPLAY_H = 640, 360
+            disp_a = cv2.resize(display_a, (DISPLAY_W, DISPLAY_H))
+            disp_b = cv2.resize(display_b, (DISPLAY_W, DISPLAY_H))
             combined = np.hstack([disp_a, disp_b])
 
             # Draw countdown
