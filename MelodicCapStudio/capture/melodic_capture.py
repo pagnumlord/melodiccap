@@ -1,11 +1,16 @@
 """
-MelodicCap Studio - Motion Capture
-===================================
+MelodicCap Studio - Motion Capture v2.0
+========================================
 Based on capture v8 (proven: 100% tracking, Kalman smoothing, 30-frame grace period).
 
-New in this version:
-- Outlier filter: rejects landmarks > 5m from origin (prevents +/-715m spikes)
-- Updated paths to MelodicCapStudio folder
+v2.0 changes:
+- Comprehensive debug logging to file (every session gets a log)
+- Per-landmark visibility/confidence saved in take JSON (uncertainty analysis)
+- Camera resolution validation on startup
+- Frame timing diagnostics (inter-camera grab delay)
+- Full capture metadata in take JSON
+- Outlier filter: rejects landmarks > threshold from origin
+- Configurable camera indices via command-line args
 
 Controls:
   C = Collect calibration frames
@@ -20,6 +25,8 @@ import numpy as np
 import mediapipe as mp
 import json
 import time
+import sys
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -36,10 +43,11 @@ CHARUCO_ROWS = 3
 CHARUCO_SQUARE_M = 0.0635
 CHARUCO_MARKER_M = 0.0476
 
-# Paths - UPDATE THESE to your MelodicCapStudio location
+# Paths - relative to this script's parent (MelodicCapStudio/)
 BASE_DIR = Path(__file__).parent.parent  # MelodicCapStudio/
 CALIBRATION_FILE = BASE_DIR / "calibration" / "stereo_calibration.json"
 TAKES_DIR = BASE_DIR / "takes"
+LOGS_DIR = BASE_DIR / "logs"
 
 # Recording settings
 COUNTDOWN_SECONDS = 10
@@ -56,6 +64,46 @@ MEDIAPIPE_MIN_TRACKING_CONF = 0.3
 # Prevents bad triangulation spikes (seen up to +/-715m in production takes)
 OUTLIER_THRESHOLD_M = 5.0
 
+# Minimum visibility score to accept a landmark from MediaPipe
+MIN_VISIBILITY = 0.3
+
+# =============================================================================
+# LOGGING
+# =============================================================================
+
+_log_file = None
+_log_path = None
+
+def log_init(tag="capture"):
+    """Open a session log file."""
+    global _log_file, _log_path
+    log_close()
+
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    _log_path = LOGS_DIR / f"capture_{tag}_{ts}.log"
+    _log_file = open(_log_path, 'w', encoding='utf-8')
+    log(f"Log file: {_log_path}")
+    log(f"Session started: {datetime.now().isoformat()}")
+    log(f"Python: {sys.version}")
+    log(f"OpenCV: {cv2.__version__}")
+    log(f"MediaPipe: {mp.__version__}")
+
+def log_close():
+    """Close the log file."""
+    global _log_file, _log_path
+    if _log_file:
+        _log_file.close()
+        _log_file = None
+
+def log(msg, level="INFO"):
+    """Log to both console and file."""
+    line = f"[{level}] {msg}"
+    print(line)
+    if _log_file:
+        _log_file.write(line + "\n")
+        _log_file.flush()
+
 # =============================================================================
 # DETECTOR SETUP
 # =============================================================================
@@ -71,6 +119,20 @@ params = cv2.aruco.DetectorParameters()
 params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
 detector = cv2.aruco.ArucoDetector(aruco_dict, params)
 board_corners_3d = board.getChessboardCorners()
+
+# MediaPipe landmark names for logging
+LANDMARK_NAMES = {
+    0: "nose", 1: "left_eye_inner", 2: "left_eye", 3: "left_eye_outer",
+    4: "right_eye_inner", 5: "right_eye", 6: "right_eye_outer",
+    7: "left_ear", 8: "right_ear", 9: "mouth_left", 10: "mouth_right",
+    11: "left_shoulder", 12: "right_shoulder",
+    13: "left_elbow", 14: "right_elbow", 15: "left_wrist", 16: "right_wrist",
+    17: "left_pinky", 18: "right_pinky", 19: "left_index", 20: "right_index",
+    21: "left_thumb", 22: "right_thumb",
+    23: "left_hip", 24: "right_hip", 25: "left_knee", 26: "right_knee",
+    27: "left_ankle", 28: "right_ankle", 29: "left_heel", 30: "right_heel",
+    31: "left_foot_index", 32: "right_foot_index",
+}
 
 # =============================================================================
 # CALIBRATION FUNCTIONS
@@ -112,23 +174,25 @@ def draw_detection(frame, charuco_corners, charuco_ids, num_markers):
 
 def run_stereo_calibration(frames_a, frames_b):
     """Run stereo calibration with iterative outlier rejection."""
-    print("\n" + "="*50)
-    print("STEREO CALIBRATION")
-    print("="*50)
+    log("=" * 50)
+    log("STEREO CALIBRATION")
+    log("=" * 50)
 
     all_corners_a, all_ids_a = [], []
     all_corners_b, all_ids_b = [], []
     valid_pairs = []
 
-    for fa, fb in zip(frames_a, frames_b):
+    for i, (fa, fb) in enumerate(zip(frames_a, frames_b)):
         cc_a, ci_a, _ = detect_charuco(fa)
         cc_b, ci_b, _ = detect_charuco(fb)
 
         if cc_a is None or cc_b is None:
+            log(f"  Frame {i}: skipped (detection failed)")
             continue
 
         common = set(ci_a.flatten()) & set(ci_b.flatten())
         if len(common) < 4:
+            log(f"  Frame {i}: skipped (only {len(common)} common corners)")
             continue
 
         all_corners_a.append(cc_a)
@@ -136,25 +200,32 @@ def run_stereo_calibration(frames_a, frames_b):
         all_corners_b.append(cc_b)
         all_ids_b.append(ci_b)
         valid_pairs.append((cc_a, ci_a, cc_b, ci_b, common))
+        log(f"  Frame {i}: {len(common)} common corners")
 
-    print(f"Valid pairs: {len(valid_pairs)}/{len(frames_a)}")
+    log(f"Valid pairs: {len(valid_pairs)}/{len(frames_a)}")
 
     if len(valid_pairs) < 8:
         return None, f"Only {len(valid_pairs)} valid pairs (need 8+)"
 
     img_size = (frames_a[0].shape[1], frames_a[0].shape[0])
 
-    print("\nCalibrating Camera A...")
+    log("Calibrating Camera A...")
     ret_a, K1, D1, _, _ = cv2.aruco.calibrateCameraCharuco(
         all_corners_a, all_ids_a, board, img_size, None, None
     )
-    print(f"  RMS: {ret_a:.4f}")
+    log(f"  RMS: {ret_a:.4f}")
+    log(f"  K1 (focal): fx={K1[0,0]:.1f}, fy={K1[1,1]:.1f}")
+    log(f"  K1 (center): cx={K1[0,2]:.1f}, cy={K1[1,2]:.1f}")
+    log(f"  D1: {D1.flatten()}")
 
-    print("Calibrating Camera B...")
+    log("Calibrating Camera B...")
     ret_b, K2, D2, _, _ = cv2.aruco.calibrateCameraCharuco(
         all_corners_b, all_ids_b, board, img_size, None, None
     )
-    print(f"  RMS: {ret_b:.4f}")
+    log(f"  RMS: {ret_b:.4f}")
+    log(f"  K2 (focal): fx={K2[0,0]:.1f}, fy={K2[1,1]:.1f}")
+    log(f"  K2 (center): cx={K2[0,2]:.1f}, cy={K2[1,2]:.1f}")
+    log(f"  D2: {D2.flatten()}")
 
     obj_points = []
     img_points_a = []
@@ -179,7 +250,7 @@ def run_stereo_calibration(frames_a, frames_b):
         img_points_a.append(np.array(pts_a, dtype=np.float32))
         img_points_b.append(np.array(pts_b, dtype=np.float32))
 
-    print("\nStereo calibration...")
+    log("Stereo calibration...")
     ret_stereo, K1, D1, K2, D2, R, T, E, F = cv2.stereoCalibrate(
         obj_points, img_points_a, img_points_b,
         K1, D1, K2, D2, img_size,
@@ -188,8 +259,10 @@ def run_stereo_calibration(frames_a, frames_b):
     )
 
     baseline = float(np.linalg.norm(T))
-    print(f"  Stereo RMS: {ret_stereo:.4f}")
-    print(f"  Baseline: {baseline:.3f}m")
+    log(f"  Stereo RMS: {ret_stereo:.4f}")
+    log(f"  Baseline: {baseline:.3f}m")
+    log(f"  R: {R.tolist()}")
+    log(f"  T: {T.flatten().tolist()}")
 
     if ret_stereo > 10.0:
         return None, f"Stereo RMS {ret_stereo:.1f} too high!"
@@ -202,7 +275,7 @@ def run_stereo_calibration(frames_a, frames_b):
     CALIBRATION_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     data = {
-        'version': 'studio-1.0',
+        'version': 'studio-2.0',
         'timestamp': datetime.now().isoformat(),
         'image_size': list(img_size),
         'K1': K1.tolist(), 'D1': D1.tolist(),
@@ -216,12 +289,13 @@ def run_stereo_calibration(frames_a, frames_b):
         'baseline_meters': baseline,
         'floor_z_offset': 0.0,
         'floor_calibrated': False,
+        'frames_used': len(valid_pairs),
     }
 
     with open(CALIBRATION_FILE, 'w') as f:
         json.dump(data, f, indent=2)
 
-    print(f"\nSaved: {CALIBRATION_FILE}")
+    log(f"Saved: {CALIBRATION_FILE}")
 
     return data, f"CamA:{ret_a:.2f} CamB:{ret_b:.2f} Stereo:{ret_stereo:.2f} Base:{baseline:.2f}m"
 
@@ -275,13 +349,28 @@ def calibrate_floor(frame_a, frame_b, calib_data):
     blender_z = -points_3d[:, 1]
     floor_offset = -np.mean(blender_z)
 
+    # Check consistency of floor points
+    z_std = np.std(blender_z)
+    z_range = np.max(blender_z) - np.min(blender_z)
+
+    log(f"  Floor calibration: {len(common)} points")
+    log(f"    Blender Z values: {blender_z}")
+    log(f"    Mean: {np.mean(blender_z):.4f}m, Std: {z_std:.4f}m, Range: {z_range:.4f}m")
+    log(f"    Floor offset: {floor_offset:.4f}m")
+
+    if z_std > 0.05:
+        log(f"    WARNING: Floor point spread is high ({z_std:.4f}m std). "
+            "Board might not be flat or calibration is noisy.", "WARN")
+
     calib_data['floor_z_offset'] = float(floor_offset)
     calib_data['floor_calibrated'] = True
+    calib_data['floor_z_std'] = float(z_std)
+    calib_data['floor_z_range'] = float(z_range)
 
     with open(CALIBRATION_FILE, 'w') as f:
         json.dump(calib_data, f, indent=2)
 
-    return True, f"Floor offset: {floor_offset:.3f}m"
+    return True, f"Floor offset: {floor_offset:.3f}m (std: {z_std:.3f}m)"
 
 
 # =============================================================================
@@ -350,10 +439,10 @@ def triangulate_landmarks(landmarks_a, landmarks_b, calib_data, img_size):
         blender_y = opencv_z      (forward/depth)
         blender_z = -opencv_y + floor_offset  (up)
 
-    NEW: Outlier filter rejects any landmark > OUTLIER_THRESHOLD_M from origin.
-    This prevents the +/-715m spikes seen in 22/230 frames of production takes
-    (caused by bad triangulation of extremity landmarks 31, 16, 18, 20).
-    The Kalman filter will predict through these gaps.
+    Returns:
+        points_3d: dict of {landmark_idx: [x, y, z]}
+        visibility: dict of {landmark_idx: {'vis_a': float, 'vis_b': float, 'vis_avg': float}}
+        outlier_count: number of landmarks rejected by outlier filter
     """
     K1 = np.array(calib_data['K1'])
     D1 = np.array(calib_data['D1'])
@@ -367,13 +456,26 @@ def triangulate_landmarks(landmarks_a, landmarks_b, calib_data, img_size):
 
     w, h = img_size
     points_3d = {}
+    visibility = {}
+    outlier_count = 0
 
     for idx in range(33):
         lm_a = landmarks_a.landmark[idx]
         lm_b = landmarks_b.landmark[idx]
 
-        if lm_a.visibility < 0.3 or lm_b.visibility < 0.3:
+        vis_a = lm_a.visibility
+        vis_b = lm_b.visibility
+        vis_avg = (vis_a + vis_b) / 2
+
+        if vis_a < MIN_VISIBILITY or vis_b < MIN_VISIBILITY:
             continue
+
+        # Save visibility regardless of outlier status
+        visibility[idx] = {
+            'vis_a': round(float(vis_a), 3),
+            'vis_b': round(float(vis_b), 3),
+            'vis_avg': round(float(vis_avg), 3),
+        }
 
         pt_a = np.array([[lm_a.x * w, lm_a.y * h]], dtype=np.float32).reshape(-1, 1, 2)
         pt_b = np.array([[lm_b.x * w, lm_b.y * h]], dtype=np.float32).reshape(-1, 1, 2)
@@ -391,14 +493,13 @@ def triangulate_landmarks(landmarks_a, landmarks_b, calib_data, img_size):
         blender_z = -point_3d[1] + floor_offset
 
         # OUTLIER FILTER: reject landmarks with unreasonable coordinates.
-        # Bad triangulation can produce values hundreds of meters away.
-        # The Kalman filter will predict through these gaps.
         if abs(blender_x) > OUTLIER_THRESHOLD_M or abs(blender_y) > OUTLIER_THRESHOLD_M or abs(blender_z) > OUTLIER_THRESHOLD_M:
+            outlier_count += 1
             continue
 
         points_3d[idx] = [float(blender_x), float(blender_y), float(blender_z)]
 
-    return points_3d
+    return points_3d, visibility, outlier_count
 
 
 # =============================================================================
@@ -406,14 +507,34 @@ def triangulate_landmarks(landmarks_a, landmarks_b, calib_data, img_size):
 # =============================================================================
 
 def main():
-    print("\n" + "="*60)
-    print("MELODICCAP STUDIO - MOTION CAPTURE")
-    print("="*60)
-    print(f"\n  Countdown: {COUNTDOWN_SECONDS} seconds")
-    print(f"  Grace period: {TRACKING_GRACE_FRAMES} frames")
-    print(f"  Outlier threshold: {OUTLIER_THRESHOLD_M}m")
-    print(f"  MediaPipe detection confidence: {MEDIAPIPE_MIN_DETECTION_CONF}")
-    print(f"  MediaPipe tracking confidence: {MEDIAPIPE_MIN_TRACKING_CONF}")
+    # Parse optional camera index overrides
+    cam_a = CAM_A_INDEX
+    cam_b = CAM_B_INDEX
+    if len(sys.argv) >= 3:
+        cam_a = int(sys.argv[1])
+        cam_b = int(sys.argv[2])
+        print(f"Using camera indices from args: A={cam_a}, B={cam_b}")
+
+    # Initialize logging
+    log_init("session")
+
+    log("=" * 60)
+    log("MELODICCAP STUDIO - MOTION CAPTURE v2.0")
+    log("=" * 60)
+
+    log(f"\n  Configuration:")
+    log(f"    Camera A index: {cam_a}")
+    log(f"    Camera B index: {cam_b}")
+    log(f"    Countdown: {COUNTDOWN_SECONDS}s")
+    log(f"    Grace period: {TRACKING_GRACE_FRAMES} frames")
+    log(f"    Outlier threshold: {OUTLIER_THRESHOLD_M}m")
+    log(f"    Min visibility: {MIN_VISIBILITY}")
+    log(f"    MediaPipe complexity: {MEDIAPIPE_MODEL_COMPLEXITY}")
+    log(f"    MediaPipe detection conf: {MEDIAPIPE_MIN_DETECTION_CONF}")
+    log(f"    MediaPipe tracking conf: {MEDIAPIPE_MIN_TRACKING_CONF}")
+    log(f"    Base dir: {BASE_DIR}")
+    log(f"    Calibration file: {CALIBRATION_FILE}")
+    log(f"    Takes dir: {TAKES_DIR}")
 
     # Initialize MediaPipe
     mp_pose = mp.solutions.pose
@@ -434,28 +555,43 @@ def main():
     )
 
     # Open cameras
-    print("\n[CAMERAS]")
+    log("\n[CAMERAS]")
 
-    print(f"  Camera A (index {CAM_A_INDEX})...")
-    cap_a = cv2.VideoCapture(CAM_A_INDEX, cv2.CAP_DSHOW)
+    log(f"  Opening Camera A (index {cam_a}, DSHOW)...")
+    cap_a = cv2.VideoCapture(cam_a, cv2.CAP_DSHOW)
     cap_a.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap_a.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     cap_a.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
     if cap_a.isOpened():
-        print(f"    OK ({int(cap_a.get(cv2.CAP_PROP_FRAME_WIDTH))}x{int(cap_a.get(cv2.CAP_PROP_FRAME_HEIGHT))})")
+        actual_w_a = int(cap_a.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h_a = int(cap_a.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps_a = cap_a.get(cv2.CAP_PROP_FPS)
+        log(f"    OK: {actual_w_a}x{actual_h_a} @ {actual_fps_a:.1f}fps")
+        if actual_w_a != 1280 or actual_h_a != 720:
+            log(f"    WARNING: Requested 1280x720 but got {actual_w_a}x{actual_h_a}!", "WARN")
     else:
-        print("    FAILED!")
+        log("    FAILED to open Camera A!", "ERROR")
+        log_close()
         return
 
-    print(f"  Camera B (index {CAM_B_INDEX})...")
-    cap_b = cv2.VideoCapture(CAM_B_INDEX, cv2.CAP_ANY)
+    log(f"  Opening Camera B (index {cam_b}, CAP_ANY)...")
+    cap_b = cv2.VideoCapture(cam_b, cv2.CAP_ANY)
     cap_b.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap_b.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     cap_b.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
     if cap_b.isOpened():
-        print(f"    OK ({int(cap_b.get(cv2.CAP_PROP_FRAME_WIDTH))}x{int(cap_b.get(cv2.CAP_PROP_FRAME_HEIGHT))})")
+        actual_w_b = int(cap_b.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h_b = int(cap_b.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps_b = cap_b.get(cv2.CAP_PROP_FPS)
+        log(f"    OK: {actual_w_b}x{actual_h_b} @ {actual_fps_b:.1f}fps")
+        if actual_w_b != 1280 or actual_h_b != 720:
+            log(f"    WARNING: Requested 1280x720 but got {actual_w_b}x{actual_h_b}!", "WARN")
     else:
-        print("    FAILED!")
+        log("    FAILED to open Camera B!", "ERROR")
+        cap_a.release()
+        log_close()
         return
 
     # Load existing calibration
@@ -464,18 +600,22 @@ def main():
         try:
             with open(CALIBRATION_FILE) as f:
                 calib_data = json.load(f)
-            print(f"\n[CALIBRATION] Loaded (Stereo RMS: {calib_data.get('rms_stereo', '?'):.2f})")
+            log(f"\n[CALIBRATION] Loaded (v{calib_data.get('version', '?')}, "
+                f"Stereo RMS: {calib_data.get('rms_stereo', '?'):.4f}, "
+                f"Baseline: {calib_data.get('baseline_meters', '?'):.3f}m)")
             if calib_data.get('floor_calibrated'):
-                print(f"[FLOOR] Offset: {calib_data.get('floor_z_offset', 0):.3f}m")
-        except Exception:
-            pass
+                log(f"[FLOOR] Offset: {calib_data.get('floor_z_offset', 0):.4f}m")
+            else:
+                log("[FLOOR] Not calibrated - press F with board on floor", "WARN")
+        except Exception as e:
+            log(f"Failed to load calibration: {e}", "ERROR")
 
-    print("\n[CONTROLS]")
-    print("  C = Collect calibration frames")
-    print("  S = Run stereo calibration")
-    print("  F = Floor calibration")
-    print("  R = Record motion capture")
-    print("  Q = Quit")
+    log("\n[CONTROLS]")
+    log("  C = Collect calibration frames (hold board visible to both cameras)")
+    log("  S = Run stereo calibration (after collecting 15+ frames)")
+    log("  F = Floor calibration (lay board flat on floor)")
+    log("  R = Start/stop recording motion capture")
+    log("  Q = Quit")
 
     # State
     cal_frames_a = []
@@ -497,7 +637,7 @@ def main():
     frames_without_tracking = 0
     predicted_frames = 0
     dropped_frames = 0
-    outlier_filtered = 0
+    total_outliers = 0
 
     # Per-camera tracking stats
     cam_a_lost_count = 0
@@ -505,342 +645,450 @@ def main():
     both_lost_count = 0
     total_frames = 0
 
+    # Frame timing
+    frame_grab_delays = []  # Time between cam A and cam B reads
+
+    # Per-frame visibility data
+    all_visibility = []
+
     frame_count = 0
 
-    while True:
-        ret_a, frame_a = cap_a.read()
-        ret_b, frame_b = cap_b.read()
+    try:
+        while True:
+            # Measure inter-camera grab delay
+            t_grab_a = time.time()
+            ret_a, frame_a = cap_a.read()
+            t_grab_b = time.time()
+            ret_b, frame_b = cap_b.read()
+            t_grab_done = time.time()
 
-        if not ret_a or not ret_b:
-            continue
+            if not ret_a or not ret_b:
+                continue
 
-        frame_count += 1
+            frame_count += 1
+            grab_delay = t_grab_b - t_grab_a
 
-        # Detect ChArUco
-        cc_a, ci_a, markers_a = detect_charuco(frame_a)
-        cc_b, ci_b, markers_b = detect_charuco(frame_b)
-
-        board_a = cc_a is not None
-        board_b = cc_b is not None
-
-        # Create display frames
-        if collecting_cal or floor_mode:
-            display_a = draw_detection(frame_a, cc_a, ci_a, markers_a)
-            display_b = draw_detection(frame_b, cc_b, ci_b, markers_b)
-        else:
-            display_a = frame_a.copy()
-            display_b = frame_b.copy()
-
-        # Process poses
-        pose_a_valid = False
-        pose_b_valid = False
-
-        if not collecting_cal and not floor_mode:
-            results_a = pose_a.process(cv2.cvtColor(frame_a, cv2.COLOR_BGR2RGB))
-            results_b = pose_b.process(cv2.cvtColor(frame_b, cv2.COLOR_BGR2RGB))
-
-            pose_a_valid = results_a.pose_landmarks is not None
-            pose_b_valid = results_b.pose_landmarks is not None
-
-            # Track per-camera statistics during recording
             if recording:
-                total_frames += 1
-                if not pose_a_valid and not pose_b_valid:
-                    both_lost_count += 1
-                elif not pose_a_valid:
-                    cam_a_lost_count += 1
-                elif not pose_b_valid:
-                    cam_b_lost_count += 1
+                frame_grab_delays.append(grab_delay)
 
-            # Draw skeletons
-            if pose_a_valid:
-                mp_draw.draw_landmarks(display_a, results_a.pose_landmarks, mp_pose.POSE_CONNECTIONS)
-            if pose_b_valid:
-                mp_draw.draw_landmarks(display_b, results_b.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+            # Detect ChArUco
+            cc_a, ci_a, markers_a = detect_charuco(frame_a)
+            cc_b, ci_b, markers_b = detect_charuco(frame_b)
 
-            # Recording logic with grace period
-            if recording and calib_data:
-                both_valid = pose_a_valid and pose_b_valid
+            board_a = cc_a is not None
+            board_b = cc_b is not None
 
-                if both_valid:
-                    frames_without_tracking = 0
+            # Create display frames
+            if collecting_cal or floor_mode:
+                display_a = draw_detection(frame_a, cc_a, ci_a, markers_a)
+                display_b = draw_detection(frame_b, cc_b, ci_b, markers_b)
+            else:
+                display_a = frame_a.copy()
+                display_b = frame_b.copy()
 
-                    try:
-                        img_size = (frame_a.shape[1], frame_a.shape[0])
-                        points_3d = triangulate_landmarks(
-                            results_a.pose_landmarks,
-                            results_b.pose_landmarks,
-                            calib_data,
-                            img_size
-                        )
+            # Process poses
+            pose_a_valid = False
+            pose_b_valid = False
 
-                        smoothed = {}
-                        for idx, pt in points_3d.items():
-                            if idx not in kalman_filters:
-                                kalman_filters[idx] = KalmanFilter3D()
+            if not collecting_cal and not floor_mode:
+                results_a = pose_a.process(cv2.cvtColor(frame_a, cv2.COLOR_BGR2RGB))
+                results_b = pose_b.process(cv2.cvtColor(frame_b, cv2.COLOR_BGR2RGB))
 
-                            filtered = kalman_filters[idx].update(pt)
-                            if filtered is not None:
-                                smoothed[idx] = filtered
+                pose_a_valid = results_a.pose_landmarks is not None
+                pose_b_valid = results_b.pose_landmarks is not None
 
-                        if len(smoothed) > 0:
-                            recorded_frames.append({
-                                'timestamp': time.time() - record_start_time,
-                                'landmarks': smoothed,
-                                'num_landmarks': len(smoothed),
-                                'predicted': False
-                            })
-                    except Exception as e:
-                        print(f"[WARN] Frame {frame_count}: {e}")
+                # Track per-camera statistics during recording
+                if recording:
+                    total_frames += 1
+                    if not pose_a_valid and not pose_b_valid:
+                        both_lost_count += 1
+                    elif not pose_a_valid:
+                        cam_a_lost_count += 1
+                    elif not pose_b_valid:
+                        cam_b_lost_count += 1
 
-                else:
-                    frames_without_tracking += 1
+                # Draw skeletons
+                if pose_a_valid:
+                    mp_draw.draw_landmarks(display_a, results_a.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+                if pose_b_valid:
+                    mp_draw.draw_landmarks(display_b, results_b.pose_landmarks, mp_pose.POSE_CONNECTIONS)
 
-                    if frames_without_tracking <= TRACKING_GRACE_FRAMES and len(kalman_filters) > 0:
-                        smoothed = {}
-                        for idx, kf in kalman_filters.items():
-                            if kf.initialized:
-                                pred = kf.predict()
-                                if pred is not None:
-                                    smoothed[idx] = pred
+                # Recording logic with grace period
+                if recording and calib_data:
+                    both_valid = pose_a_valid and pose_b_valid
 
-                        if len(smoothed) > 5:
-                            recorded_frames.append({
-                                'timestamp': time.time() - record_start_time,
-                                'landmarks': smoothed,
-                                'num_landmarks': len(smoothed),
-                                'predicted': True
-                            })
-                            predicted_frames += 1
+                    if both_valid:
+                        frames_without_tracking = 0
+
+                        try:
+                            img_size = (frame_a.shape[1], frame_a.shape[0])
+                            points_3d, vis_data, outlier_count = triangulate_landmarks(
+                                results_a.pose_landmarks,
+                                results_b.pose_landmarks,
+                                calib_data,
+                                img_size
+                            )
+                            total_outliers += outlier_count
+
+                            smoothed = {}
+                            for idx, pt in points_3d.items():
+                                if idx not in kalman_filters:
+                                    kalman_filters[idx] = KalmanFilter3D()
+
+                                filtered = kalman_filters[idx].update(pt)
+                                if filtered is not None:
+                                    smoothed[idx] = filtered
+
+                            if len(smoothed) > 0:
+                                recorded_frames.append({
+                                    'timestamp': time.time() - record_start_time,
+                                    'landmarks': smoothed,
+                                    'num_landmarks': len(smoothed),
+                                    'predicted': False,
+                                    'outliers_this_frame': outlier_count,
+                                    'grab_delay_ms': round(grab_delay * 1000, 2),
+                                })
+                                all_visibility.append(vis_data)
+                        except Exception as e:
+                            log(f"Frame {frame_count}: {e}", "WARN")
+                            log(traceback.format_exc(), "WARN")
+
+                    else:
+                        frames_without_tracking += 1
+
+                        if frames_without_tracking <= TRACKING_GRACE_FRAMES and len(kalman_filters) > 0:
+                            smoothed = {}
+                            for idx, kf in kalman_filters.items():
+                                if kf.initialized:
+                                    pred = kf.predict()
+                                    if pred is not None:
+                                        smoothed[idx] = pred
+
+                            if len(smoothed) > 5:
+                                recorded_frames.append({
+                                    'timestamp': time.time() - record_start_time,
+                                    'landmarks': smoothed,
+                                    'num_landmarks': len(smoothed),
+                                    'predicted': True,
+                                    'outliers_this_frame': 0,
+                                    'grab_delay_ms': round(grab_delay * 1000, 2),
+                                })
+                                all_visibility.append({})
+                                predicted_frames += 1
+                            else:
+                                dropped_frames += 1
                         else:
                             dropped_frames += 1
+
+            # Draw borders for calibration modes
+            h_a, w_a = display_a.shape[:2]
+            h_b, w_b = display_b.shape[:2]
+
+            if collecting_cal or floor_mode:
+                color_a = (0, 255, 0) if board_a else (0, 0, 255)
+                color_b = (0, 255, 0) if board_b else (0, 0, 255)
+                cv2.rectangle(display_a, (0, 0), (w_a-1, h_a-1), color_a, 8)
+                cv2.rectangle(display_b, (0, 0), (w_b-1, h_b-1), color_b, 8)
+
+            # Camera labels with tracking status
+            cv2.rectangle(display_a, (0, 0), (200, 40), (0, 0, 0), -1)
+            if collecting_cal or floor_mode:
+                cv2.putText(display_a, f"CAM A ({markers_a}m)", (10, 28),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            else:
+                color = (0, 255, 0) if pose_a_valid else (0, 0, 255)
+                cv2.putText(display_a, f"CAM A {'OK' if pose_a_valid else 'LOST'}", (10, 28),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+            cv2.rectangle(display_b, (0, 0), (200, 40), (0, 0, 0), -1)
+            if collecting_cal or floor_mode:
+                cv2.putText(display_b, f"CAM B ({markers_b}m)", (10, 28),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            else:
+                color = (0, 255, 0) if pose_b_valid else (0, 0, 255)
+                cv2.putText(display_b, f"CAM B {'OK' if pose_b_valid else 'LOST'}", (10, 28),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+            # Per-camera loss stats during recording
+            if recording and total_frames > 0:
+                a_loss_pct = (cam_a_lost_count / total_frames) * 100
+                cv2.putText(display_a, f"Lost: {a_loss_pct:.0f}%", (10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1)
+
+                b_loss_pct = (cam_b_lost_count / total_frames) * 100
+                cv2.putText(display_b, f"Lost: {b_loss_pct:.0f}%", (10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1)
+
+            # Collect calibration frames
+            if collecting_cal and board_a and board_b:
+                common = set(ci_a.flatten()) & set(ci_b.flatten())
+                now = time.time()
+                if len(common) >= 4 and now - last_capture > 0.4:
+                    cal_frames_a.append(frame_a.copy())
+                    cal_frames_b.append(frame_b.copy())
+                    last_capture = now
+                    status = f"Captured {len(cal_frames_a)} frames ({len(common)} common)"
+                    log(f"[CAL] Frame {len(cal_frames_a)}: {len(common)} common corners")
+
+            # Floor calibration
+            if floor_mode and board_a and board_b and calib_data:
+                success, msg = calibrate_floor(frame_a, frame_b, calib_data)
+                if success:
+                    floor_mode = False
+                    status = f"Floor OK: {msg}"
+                    log(f"[FLOOR] {msg}")
+
+            # Countdown handling
+            if countdown_active:
+                remaining = COUNTDOWN_SECONDS - (time.time() - countdown_start)
+                if remaining <= 0:
+                    countdown_active = False
+                    recording = True
+                    record_start_time = time.time()
+                    recorded_frames = []
+                    kalman_filters = {}
+                    frames_without_tracking = 0
+                    predicted_frames = 0
+                    dropped_frames = 0
+                    total_outliers = 0
+                    cam_a_lost_count = 0
+                    cam_b_lost_count = 0
+                    both_lost_count = 0
+                    total_frames = 0
+                    frame_grab_delays = []
+                    all_visibility = []
+                    status = "RECORDING..."
+                    log("[REC] Recording started")
+
+            # Resize and combine
+            scale = 0.5
+            disp_a = cv2.resize(display_a, None, fx=scale, fy=scale)
+            disp_b = cv2.resize(display_b, None, fx=scale, fy=scale)
+            combined = np.hstack([disp_a, disp_b])
+
+            # Draw countdown
+            if countdown_active:
+                remaining = COUNTDOWN_SECONDS - (time.time() - countdown_start)
+                count = max(1, int(remaining) + 1)
+                h, w = combined.shape[:2]
+                cv2.rectangle(combined, (w//2-80, h//2-80), (w//2+80, h//2+80), (0, 0, 0), -1)
+                cv2.putText(combined, str(count), (w//2-30, h//2+30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 4, (0, 255, 255), 5)
+                cv2.putText(combined, "GET READY!", (w//2-70, h//2+70),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+            # Recording indicator
+            if recording:
+                h, w = combined.shape[:2]
+                cv2.circle(combined, (w-30, 30), 15, (0, 0, 255), -1)
+                elapsed = time.time() - record_start_time
+
+                cv2.putText(combined, f"{len(recorded_frames)}f {elapsed:.1f}s", (w-160, 35),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+                if predicted_frames > 0:
+                    cv2.putText(combined, f"pred:{predicted_frames}", (w-160, 55),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+                if dropped_frames > 0:
+                    cv2.putText(combined, f"drop:{dropped_frames}", (w-160, 70),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 100, 255), 1)
+
+                if frames_without_tracking > 0:
+                    grace_remaining = TRACKING_GRACE_FRAMES - frames_without_tracking
+                    if grace_remaining > 0:
+                        cv2.putText(combined, f"GRACE: {grace_remaining}", (w//2-50, 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                     else:
-                        dropped_frames += 1
+                        cv2.putText(combined, "LOST!", (w//2-30, 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-        # Draw borders for calibration modes
-        h_a, w_a = display_a.shape[:2]
-        h_b, w_b = display_b.shape[:2]
+            # Status bar
+            bar = np.zeros((40, combined.shape[1], 3), dtype=np.uint8)
+            cv2.putText(bar, status, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            cv2.putText(bar, f"Cal frames: {len(cal_frames_a)}", (combined.shape[1]-180, 28),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
-        if collecting_cal or floor_mode:
-            color_a = (0, 255, 0) if board_a else (0, 0, 255)
-            color_b = (0, 255, 0) if board_b else (0, 0, 255)
-            cv2.rectangle(display_a, (0, 0), (w_a-1, h_a-1), color_a, 8)
-            cv2.rectangle(display_b, (0, 0), (w_b-1, h_b-1), color_b, 8)
+            combined = np.vstack([combined, bar])
+            cv2.imshow("MelodicCap Studio", combined)
 
-        # Camera labels with tracking status
-        cv2.rectangle(display_a, (0, 0), (200, 40), (0, 0, 0), -1)
-        if collecting_cal or floor_mode:
-            cv2.putText(display_a, f"CAM A ({markers_a}m)", (10, 28),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        else:
-            color = (0, 255, 0) if pose_a_valid else (0, 0, 255)
-            cv2.putText(display_a, f"CAM A {'OK' if pose_a_valid else 'LOST'}", (10, 28),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            # Key handling
+            key = cv2.waitKey(1) & 0xFF
 
-        cv2.rectangle(display_b, (0, 0), (200, 40), (0, 0, 0), -1)
-        if collecting_cal or floor_mode:
-            cv2.putText(display_b, f"CAM B ({markers_b}m)", (10, 28),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        else:
-            color = (0, 255, 0) if pose_b_valid else (0, 0, 255)
-            cv2.putText(display_b, f"CAM B {'OK' if pose_b_valid else 'LOST'}", (10, 28),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            if key == ord('q'):
+                break
 
-        # Per-camera loss stats during recording
-        if recording and total_frames > 0:
-            a_loss_pct = (cam_a_lost_count / total_frames) * 100
-            cv2.putText(display_a, f"Lost: {a_loss_pct:.0f}%", (10, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1)
-
-            b_loss_pct = (cam_b_lost_count / total_frames) * 100
-            cv2.putText(display_b, f"Lost: {b_loss_pct:.0f}%", (10, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1)
-
-        # Collect calibration frames
-        if collecting_cal and board_a and board_b:
-            common = set(ci_a.flatten()) & set(ci_b.flatten())
-            now = time.time()
-            if len(common) >= 4 and now - last_capture > 0.4:
-                cal_frames_a.append(frame_a.copy())
-                cal_frames_b.append(frame_b.copy())
-                last_capture = now
-                status = f"Captured {len(cal_frames_a)} frames ({len(common)} common)"
-                print(f"[CAL] Frame {len(cal_frames_a)}")
-
-        # Floor calibration
-        if floor_mode and board_a and board_b and calib_data:
-            success, msg = calibrate_floor(frame_a, frame_b, calib_data)
-            if success:
-                floor_mode = False
-                status = f"Floor OK: {msg}"
-                print(f"[FLOOR] {msg}")
-
-        # Countdown handling
-        if countdown_active:
-            remaining = COUNTDOWN_SECONDS - (time.time() - countdown_start)
-            if remaining <= 0:
-                countdown_active = False
-                recording = True
-                record_start_time = time.time()
-                recorded_frames = []
-                kalman_filters = {}
-                frames_without_tracking = 0
-                predicted_frames = 0
-                dropped_frames = 0
-                outlier_filtered = 0
-                cam_a_lost_count = 0
-                cam_b_lost_count = 0
-                both_lost_count = 0
-                total_frames = 0
-                status = "RECORDING..."
-                print("[REC] Started")
-
-        # Resize and combine
-        scale = 0.5
-        disp_a = cv2.resize(display_a, None, fx=scale, fy=scale)
-        disp_b = cv2.resize(display_b, None, fx=scale, fy=scale)
-        combined = np.hstack([disp_a, disp_b])
-
-        # Draw countdown
-        if countdown_active:
-            remaining = COUNTDOWN_SECONDS - (time.time() - countdown_start)
-            count = max(1, int(remaining) + 1)
-            h, w = combined.shape[:2]
-            cv2.rectangle(combined, (w//2-80, h//2-80), (w//2+80, h//2+80), (0, 0, 0), -1)
-            cv2.putText(combined, str(count), (w//2-30, h//2+30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 4, (0, 255, 255), 5)
-            cv2.putText(combined, "GET READY!", (w//2-70, h//2+70),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-
-        # Recording indicator
-        if recording:
-            h, w = combined.shape[:2]
-            cv2.circle(combined, (w-30, 30), 15, (0, 0, 255), -1)
-            elapsed = time.time() - record_start_time
-
-            cv2.putText(combined, f"{len(recorded_frames)}f {elapsed:.1f}s", (w-160, 35),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-
-            if predicted_frames > 0:
-                cv2.putText(combined, f"pred:{predicted_frames}", (w-160, 55),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-            if dropped_frames > 0:
-                cv2.putText(combined, f"drop:{dropped_frames}", (w-160, 70),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 100, 255), 1)
-
-            if frames_without_tracking > 0:
-                grace_remaining = TRACKING_GRACE_FRAMES - frames_without_tracking
-                if grace_remaining > 0:
-                    cv2.putText(combined, f"GRACE: {grace_remaining}", (w//2-50, 30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            elif key == ord('c'):
+                if collecting_cal:
+                    collecting_cal = False
+                    status = f"Collected {len(cal_frames_a)} frames. Press S to calibrate."
+                    log(f"[CAL] Collection stopped: {len(cal_frames_a)} frames")
                 else:
-                    cv2.putText(combined, "LOST!", (w//2-30, 30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    cal_frames_a = []
+                    cal_frames_b = []
+                    collecting_cal = True
+                    floor_mode = False
+                    status = "CALIBRATING - Show board to BOTH cameras"
+                    log("[CAL] Collection started")
 
-        # Status bar
-        bar = np.zeros((40, combined.shape[1], 3), dtype=np.uint8)
-        cv2.putText(bar, status, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        cv2.putText(bar, f"Cal frames: {len(cal_frames_a)}", (combined.shape[1]-180, 28),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-
-        combined = np.vstack([combined, bar])
-        cv2.imshow("MelodicCap Studio", combined)
-
-        # Key handling
-        key = cv2.waitKey(1) & 0xFF
-
-        if key == ord('q'):
-            break
-
-        elif key == ord('c'):
-            if collecting_cal:
-                collecting_cal = False
-                status = f"Collected {len(cal_frames_a)} frames. Press S to calibrate."
-            else:
-                cal_frames_a = []
-                cal_frames_b = []
-                collecting_cal = True
-                floor_mode = False
-                status = "CALIBRATING - Show board to BOTH cameras"
-
-        elif key == ord('s'):
-            if len(cal_frames_a) < 8:
-                status = f"Need 8+ frames (have {len(cal_frames_a)})"
-            else:
-                collecting_cal = False
-                status = "Running calibration..."
-                cv2.waitKey(100)
-
-                result, msg = run_stereo_calibration(cal_frames_a, cal_frames_b)
-                if result:
-                    calib_data = result
-                    status = f"SUCCESS! {msg}"
+            elif key == ord('s'):
+                if len(cal_frames_a) < 8:
+                    status = f"Need 8+ frames (have {len(cal_frames_a)})"
                 else:
-                    status = f"FAILED: {msg}"
+                    collecting_cal = False
+                    status = "Running calibration..."
+                    cv2.waitKey(100)
 
-        elif key == ord('f'):
-            if calib_data is None:
-                status = "Calibrate cameras first!"
-            else:
-                floor_mode = not floor_mode
-                status = "FLOOR MODE - Lay board flat" if floor_mode else "Floor mode off"
+                    result, msg = run_stereo_calibration(cal_frames_a, cal_frames_b)
+                    if result:
+                        calib_data = result
+                        status = f"SUCCESS! {msg}"
+                    else:
+                        status = f"FAILED: {msg}"
 
-        elif key == ord('r'):
-            if calib_data is None:
-                status = "Calibrate cameras first!"
-            elif recording:
-                recording = False
-
-                if len(recorded_frames) > 0:
-                    TAKES_DIR.mkdir(parents=True, exist_ok=True)
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = TAKES_DIR / f"take_{timestamp}.json"
-
-                    take_data = {
-                        'version': 'studio-1.0',
-                        'timestamp': datetime.now().isoformat(),
-                        'duration_seconds': time.time() - record_start_time,
-                        'frame_count': len(recorded_frames),
-                        'predicted_frames': predicted_frames,
-                        'dropped_frames': dropped_frames,
-                        'tracking_stats': {
-                            'total_frames': total_frames,
-                            'cam_a_lost': cam_a_lost_count,
-                            'cam_b_lost': cam_b_lost_count,
-                            'both_lost': both_lost_count
-                        },
-                        'calibration': {
-                            'rms_stereo': calib_data.get('rms_stereo'),
-                            'baseline': calib_data.get('baseline_meters'),
-                            'floor_offset': calib_data.get('floor_z_offset', 0)
-                        },
-                        'frames': recorded_frames
-                    }
-
-                    with open(filename, 'w') as f:
-                        json.dump(take_data, f)
-
-                    status = f"Saved: {filename.name} ({len(recorded_frames)}f)"
-                    print(f"\n[SAVED] {filename}")
-                    print(f"        Total frames processed: {total_frames}")
-                    print(f"        Recorded: {len(recorded_frames)} frames")
-                    print(f"        Predicted: {predicted_frames} frames")
-                    print(f"        Dropped: {dropped_frames} frames")
-                    print(f"        --- Per-Camera Stats ---")
-                    print(f"        Camera A lost: {cam_a_lost_count} ({cam_a_lost_count*100//max(1,total_frames)}%)")
-                    print(f"        Camera B lost: {cam_b_lost_count} ({cam_b_lost_count*100//max(1,total_frames)}%)")
-                    print(f"        Both lost: {both_lost_count} ({both_lost_count*100//max(1,total_frames)}%)")
+            elif key == ord('f'):
+                if calib_data is None:
+                    status = "Calibrate cameras first!"
                 else:
-                    status = "No frames recorded"
-            else:
-                countdown_active = True
-                countdown_start = time.time()
-                status = "GET READY..."
+                    floor_mode = not floor_mode
+                    status = "FLOOR MODE - Lay board flat on floor" if floor_mode else "Floor mode off"
+                    log(f"[FLOOR] Mode {'ON' if floor_mode else 'OFF'}")
 
-    cap_a.release()
-    cap_b.release()
-    cv2.destroyAllWindows()
-    print("\n[DONE]")
+            elif key == ord('r'):
+                if calib_data is None:
+                    status = "Calibrate cameras first!"
+                elif recording:
+                    recording = False
+                    log("[REC] Recording stopped")
+
+                    if len(recorded_frames) > 0:
+                        TAKES_DIR.mkdir(parents=True, exist_ok=True)
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = TAKES_DIR / f"take_{timestamp}.json"
+
+                        # Compute visibility summary
+                        vis_summary = {}
+                        for vis_frame in all_visibility:
+                            for lm_idx, vis in vis_frame.items():
+                                if lm_idx not in vis_summary:
+                                    vis_summary[lm_idx] = {'count': 0, 'total_avg': 0}
+                                vis_summary[lm_idx]['count'] += 1
+                                vis_summary[lm_idx]['total_avg'] += vis['vis_avg']
+
+                        # Average visibility per landmark
+                        vis_avg_per_lm = {}
+                        for lm_idx, data in vis_summary.items():
+                            avg = data['total_avg'] / max(data['count'], 1)
+                            name = LANDMARK_NAMES.get(lm_idx, f"lm_{lm_idx}")
+                            vis_avg_per_lm[str(lm_idx)] = {
+                                'name': name,
+                                'avg_visibility': round(avg, 3),
+                                'frames_visible': data['count'],
+                                'coverage_pct': round(data['count'] / len(recorded_frames) * 100, 1),
+                            }
+
+                        # Frame timing stats
+                        timing_stats = {}
+                        if frame_grab_delays:
+                            timing_stats = {
+                                'mean_grab_delay_ms': round(np.mean(frame_grab_delays) * 1000, 2),
+                                'max_grab_delay_ms': round(np.max(frame_grab_delays) * 1000, 2),
+                                'std_grab_delay_ms': round(np.std(frame_grab_delays) * 1000, 2),
+                            }
+
+                        take_data = {
+                            'version': 'studio-2.0',
+                            'timestamp': datetime.now().isoformat(),
+                            'duration_seconds': time.time() - record_start_time,
+                            'frame_count': len(recorded_frames),
+                            'predicted_frames': predicted_frames,
+                            'dropped_frames': dropped_frames,
+                            'total_outliers_filtered': total_outliers,
+                            'tracking_stats': {
+                                'total_frames': total_frames,
+                                'cam_a_lost': cam_a_lost_count,
+                                'cam_b_lost': cam_b_lost_count,
+                                'both_lost': both_lost_count,
+                            },
+                            'calibration': {
+                                'rms_stereo': calib_data.get('rms_stereo'),
+                                'baseline': calib_data.get('baseline_meters'),
+                                'floor_offset': calib_data.get('floor_z_offset', 0),
+                            },
+                            'capture_settings': {
+                                'cam_a_index': cam_a,
+                                'cam_b_index': cam_b,
+                                'cam_a_resolution': f"{actual_w_a}x{actual_h_a}",
+                                'cam_b_resolution': f"{actual_w_b}x{actual_h_b}",
+                                'mediapipe_complexity': MEDIAPIPE_MODEL_COMPLEXITY,
+                                'mediapipe_detection_conf': MEDIAPIPE_MIN_DETECTION_CONF,
+                                'mediapipe_tracking_conf': MEDIAPIPE_MIN_TRACKING_CONF,
+                                'outlier_threshold_m': OUTLIER_THRESHOLD_M,
+                                'min_visibility': MIN_VISIBILITY,
+                                'grace_frames': TRACKING_GRACE_FRAMES,
+                            },
+                            'frame_timing': timing_stats,
+                            'landmark_visibility': vis_avg_per_lm,
+                            'frames': recorded_frames,
+                        }
+
+                        with open(filename, 'w') as f:
+                            json.dump(take_data, f)
+
+                        file_size_mb = filename.stat().st_size / 1024 / 1024
+
+                        status = f"Saved: {filename.name} ({len(recorded_frames)}f)"
+
+                        # Comprehensive save summary
+                        log("\n" + "=" * 60)
+                        log("TAKE SAVED")
+                        log("=" * 60)
+                        log(f"  File: {filename}")
+                        log(f"  Size: {file_size_mb:.1f} MB")
+                        log(f"  Duration: {time.time() - record_start_time:.1f}s")
+                        log(f"  Recorded frames: {len(recorded_frames)}")
+                        log(f"  Predicted frames: {predicted_frames}")
+                        log(f"  Dropped frames: {dropped_frames}")
+                        log(f"  FPS: {len(recorded_frames) / max(time.time() - record_start_time, 0.1):.1f}")
+                        log(f"  Total outliers filtered: {total_outliers}")
+
+                        log(f"\n  Camera tracking:")
+                        log(f"    Total frames processed: {total_frames}")
+                        log(f"    Camera A lost: {cam_a_lost_count} ({cam_a_lost_count*100//max(1,total_frames)}%)")
+                        log(f"    Camera B lost: {cam_b_lost_count} ({cam_b_lost_count*100//max(1,total_frames)}%)")
+                        log(f"    Both lost: {both_lost_count} ({both_lost_count*100//max(1,total_frames)}%)")
+
+                        if timing_stats:
+                            log(f"\n  Frame timing:")
+                            log(f"    Mean grab delay: {timing_stats['mean_grab_delay_ms']:.2f}ms")
+                            log(f"    Max grab delay: {timing_stats['max_grab_delay_ms']:.2f}ms")
+                            log(f"    Std grab delay: {timing_stats['std_grab_delay_ms']:.2f}ms")
+
+                        log(f"\n  Landmark visibility (sorted by coverage):")
+                        sorted_vis = sorted(vis_avg_per_lm.items(),
+                                          key=lambda x: x[1]['coverage_pct'], reverse=True)
+                        for lm_key, data in sorted_vis:
+                            log(f"    [{lm_key:>2s}] {data['name']:20s}: "
+                                f"vis={data['avg_visibility']:.3f}  "
+                                f"coverage={data['coverage_pct']:.1f}%  "
+                                f"({data['frames_visible']}/{len(recorded_frames)} frames)")
+                    else:
+                        status = "No frames recorded"
+                        log("No frames recorded")
+                else:
+                    countdown_active = True
+                    countdown_start = time.time()
+                    status = "GET READY..."
+                    log("[REC] Countdown started")
+
+    except Exception as e:
+        log(f"FATAL ERROR: {e}", "ERROR")
+        log(traceback.format_exc(), "ERROR")
+    finally:
+        cap_a.release()
+        cap_b.release()
+        cv2.destroyAllWindows()
+        log("\n[DONE] Session ended")
+        log_close()
 
 
 if __name__ == "__main__":

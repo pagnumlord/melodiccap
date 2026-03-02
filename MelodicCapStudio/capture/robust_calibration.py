@@ -30,7 +30,8 @@ CHARUCO_ROWS = 3
 CHARUCO_SQUARE_M = 0.0635
 CHARUCO_MARKER_M = 0.0476
 
-OUTPUT_FILE = Path(r"C:\Users\ninja\Documents\MelodicCapStudio\MelodicCapFresh\calibration\stereo_calibration.json")
+BASE_DIR = Path(__file__).parent.parent  # MelodicCapStudio/
+OUTPUT_FILE = BASE_DIR / "calibration" / "stereo_calibration.json"
 
 # Setup
 aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
@@ -61,22 +62,6 @@ def detect_charuco(frame):
         return None, None, len(ids)
     
     return charuco_corners, charuco_ids, len(ids)
-
-
-def calculate_stereo_reprojection_error(obj_pts, pts_a, pts_b, K1, D1, K2, D2, R, T):
-    """Calculate stereo reprojection error for a single frame pair"""
-    # Project 3D points to both cameras
-    rvec1 = np.zeros((3, 1))
-    tvec1 = np.zeros((3, 1))
-    rvec2, _ = cv2.Rodrigues(R)
-    tvec2 = T
-    
-    proj_a, _ = cv2.projectPoints(obj_pts, rvec1, tvec1, K1, D1)
-    proj_b, _ = cv2.projectPoints(obj_pts, rvec2, tvec2, K2, D2)
-    
-    # This isn't quite right - we need to solve for the board pose first
-    # For now, use a simpler metric: triangulation consistency
-    return 0  # Placeholder
 
 
 def robust_stereo_calibration(frames_a, frames_b, max_iterations=5, outlier_threshold=2.0):
