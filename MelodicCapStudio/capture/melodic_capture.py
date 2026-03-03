@@ -212,9 +212,16 @@ def run_stereo_calibration(frames_a, frames_b, max_iterations=5, outlier_thresho
     log("STEREO CALIBRATION (iterative outlier rejection)")
     log("=" * 50)
 
-    if BOARD_MAX_CORNERS < 12:
-        log(f"  WARNING: Board only has {BOARD_MAX_CORNERS} max corners (need 12+ for reliable calibration)", "WARN")
-        log(f"  Results may be unreliable. Consider printing a larger board (7x5 or 9x6).", "WARN")
+    # For small boards, require more corners per frame for stronger constraints
+    min_corners = max(BOARD_MAX_CORNERS - 1, 4)  # e.g. 5 out of 6 for 4x3 board
+    use_joint_optimization = BOARD_MAX_CORNERS < 12
+
+    if use_joint_optimization:
+        log(f"  Small board mode: {BOARD_MAX_CORNERS} max corners, requiring {min_corners}+ per frame", "WARN")
+        log(f"  Using joint intrinsic+extrinsic optimization for better results", "WARN")
+        log(f"  TIP: Move board SLOWLY, hold still at each position, cover varied angles", "WARN")
+    else:
+        min_corners = 4
 
     # Phase 1: Extract corners from all frame pairs
     all_data = []
@@ -227,8 +234,8 @@ def run_stereo_calibration(frames_a, frames_b, max_iterations=5, outlier_thresho
             continue
 
         common = set(ci_a.flatten()) & set(ci_b.flatten())
-        if len(common) < 4:
-            log(f"  Frame {i}: skipped (only {len(common)} common corners)")
+        if len(common) < min_corners:
+            log(f"  Frame {i}: skipped (only {len(common)} common corners, need {min_corners}+)")
             continue
 
         all_data.append({
@@ -304,11 +311,19 @@ def run_stereo_calibration(frames_a, frames_b, max_iterations=5, outlier_thresho
             frame_indices.append(d['index'])
 
         # Stereo calibration
+        # For small boards, use INTRINSIC_GUESS to jointly optimize intrinsics+extrinsics
+        # since individual camera calibrations are underdetermined with few corners.
+        # For large boards, fix intrinsics (they're reliable from individual calibration).
+        if use_joint_optimization:
+            stereo_flags = cv2.CALIB_USE_INTRINSIC_GUESS
+        else:
+            stereo_flags = cv2.CALIB_FIX_INTRINSIC
+
         ret_stereo, K1, D1, K2, D2, R, T, E, F = cv2.stereoCalibrate(
             obj_points, img_points_a, img_points_b,
             K1, D1, K2, D2, img_size,
             criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6),
-            flags=cv2.CALIB_FIX_INTRINSIC
+            flags=stereo_flags
         )
 
         baseline = float(np.linalg.norm(T))
@@ -374,11 +389,13 @@ def run_stereo_calibration(frames_a, frames_b, max_iterations=5, outlier_thresho
         log(f"  Worst frame error: {frame_errors[0]['error']:.4f} (frame {frame_errors[0]['frame_idx']})")
 
         # Remove frames with error > threshold * median
+        # For small boards, keep more frames to avoid over-pruning
+        min_frames_keep = 15 if use_joint_optimization else 10
         threshold = max(outlier_threshold * median_error, 1.0)
         removed = 0
 
         for fe in frame_errors:
-            if fe['error'] > threshold and len(active_data) - removed > 10:
+            if fe['error'] > threshold and len(active_data) - removed > min_frames_keep:
                 for d in all_data:
                     if d['index'] == fe['frame_idx']:
                         d['active'] = False
@@ -706,8 +723,9 @@ def main():
     log(f"    Takes dir: {TAKES_DIR}")
     log(f"    ChArUco board: {CHARUCO_COLS}x{CHARUCO_ROWS} ({BOARD_MAX_CORNERS} max corners)")
     if BOARD_MAX_CORNERS < 12:
-        log(f"    WARNING: Board has only {BOARD_MAX_CORNERS} max corners. Calibration may be unreliable.", "WARN")
-        log(f"    RECOMMEND: Use at least 7x5 board (24 corners) for stable calibration.", "WARN")
+        log(f"    NOTE: Small board ({BOARD_MAX_CORNERS} corners). Calibration uses joint optimization mode.", "WARN")
+        log(f"    TIPS: Move board SLOWLY, ensure {BOARD_MAX_CORNERS - 1}+ corners visible in BOTH cameras,", "WARN")
+        log(f"          cover many angles (tilt, rotate), collect 30+ frames.", "WARN")
 
     # Initialize MediaPipe
     mp_pose = mp.solutions.pose
@@ -1032,14 +1050,16 @@ def main():
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1)
 
             # Collect calibration frames
+            # Require more corners for small boards to get better constraints
+            min_cal_corners = max(BOARD_MAX_CORNERS - 1, 4)
             if collecting_cal and board_a and board_b:
                 common = set(ci_a.flatten()) & set(ci_b.flatten())
                 now = time.time()
-                if len(common) >= 4 and now - last_capture > 0.4:
+                if len(common) >= min_cal_corners and now - last_capture > 0.4:
                     cal_frames_a.append(frame_a.copy())
                     cal_frames_b.append(frame_b.copy())
                     last_capture = now
-                    status = f"Captured {len(cal_frames_a)} frames ({len(common)} common)"
+                    status = f"Captured {len(cal_frames_a)} frames ({len(common)}/{BOARD_MAX_CORNERS} corners)"
                     log(f"[CAL] Frame {len(cal_frames_a)}: {len(common)} common corners")
 
             # Floor calibration
