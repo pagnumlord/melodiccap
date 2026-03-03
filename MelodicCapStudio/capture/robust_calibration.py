@@ -25,10 +25,13 @@ from pathlib import Path
 CAM_A_INDEX = 2
 CAM_B_INDEX = 0
 
-CHARUCO_COLS = 4
-CHARUCO_ROWS = 3
-CHARUCO_SQUARE_M = 0.0635
-CHARUCO_MARKER_M = 0.0476
+# Match these to generate_boards.py output — MEASURE printed squares with ruler!
+# Option A (single sheet): COLS=5, ROWS=7, SQUARE=0.035, MARKER=0.025
+# Option B (dual sheet):   COLS=10, ROWS=5, SQUARE=0.043, MARKER=0.031
+CHARUCO_COLS = 5
+CHARUCO_ROWS = 7
+CHARUCO_SQUARE_M = 0.035
+CHARUCO_MARKER_M = 0.025
 
 BASE_DIR = Path(__file__).parent.parent  # MelodicCapStudio/
 OUTPUT_FILE = BASE_DIR / "calibration" / "stereo_calibration.json"

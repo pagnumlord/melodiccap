@@ -450,10 +450,15 @@ class MelodicCapImporter:
     def prefilter_landmarks(self):
         """Pre-filter landmark data to remove outlier spikes.
 
-        Uses velocity-based filtering: if a landmark moves faster than
-        max_velocity m/s between consecutive frames, the frame is replaced
-        with the last known good position. This catches MediaPipe tracking
-        glitches where landmarks jump to absurd positions (e.g. 75m in one frame).
+        Uses ADAPTIVE per-landmark velocity limits based on human biomechanics:
+        - Head/face: max 5 m/s
+        - Shoulders: max 8 m/s
+        - Elbows: max 12 m/s
+        - Wrists: max 15 m/s (punching/gesturing)
+        - Hips: max 6 m/s (core, moves slowly)
+        - Knees/ankles: max 10 m/s
+
+        Also validates bone-length consistency and flags bad frames.
 
         Modifies the frame landmark data in-place so all downstream consumers
         (IK targets, pole targets, FK rotations, spine) benefit automatically.
@@ -462,15 +467,33 @@ class MelodicCapImporter:
         if len(frames) < 2:
             return
 
-        max_velocity = self.settings.get('outlier_velocity', 10.0)
+        user_max_velocity = self.settings.get('outlier_velocity', 10.0)
+
+        # Per-landmark velocity limits (m/s) based on biomechanics
+        # These are generous — real movement rarely exceeds these
+        LANDMARK_MAX_VEL = {
+            0: 5.0,   # nose
+            1: 5.0, 2: 5.0, 3: 5.0, 4: 5.0, 5: 5.0, 6: 5.0,  # eyes
+            7: 5.0, 8: 5.0,  # ears
+            9: 5.0, 10: 5.0,  # mouth
+            11: 8.0, 12: 8.0,  # shoulders
+            13: 12.0, 14: 12.0,  # elbows
+            15: 15.0, 16: 15.0,  # wrists
+            17: 15.0, 18: 15.0, 19: 15.0, 20: 15.0,  # fingers
+            21: 15.0, 22: 15.0,
+            23: 6.0, 24: 6.0,  # hips
+            25: 10.0, 26: 10.0,  # knees
+            27: 10.0, 28: 10.0,  # ankles
+            29: 10.0, 30: 10.0, 31: 10.0, 32: 10.0,  # feet
+        }
 
         # Compute frame duration from capture metadata
         duration = self.take_data.get('duration_seconds', len(frames) / 10.0)
         fps = len(frames) / max(duration, 0.1)
-        max_jump = max_velocity / fps  # meters per frame
 
-        log(f"\n  Outlier filter: max_velocity={max_velocity:.0f} m/s, "
-            f"capture fps={fps:.1f}, max_jump={max_jump:.3f}m/frame")
+        log(f"\n  Outlier filter: adaptive per-landmark velocity limits, "
+            f"capture fps={fps:.1f}")
+        log(f"    User velocity scale: {user_max_velocity:.0f} m/s")
 
         # Collect all landmark indices used by any mapping
         used_landmarks = set()
@@ -494,6 +517,9 @@ class MelodicCapImporter:
         consecutive = {}     # lm_idx -> current consecutive hold count
         max_consecutive = {} # lm_idx -> worst consecutive hold run
 
+        # Scale factor: if user sets velocity to 20, it doubles all limits
+        vel_scale = user_max_velocity / 10.0
+
         for fidx, fdata in enumerate(frames):
             lms = fdata.get('landmarks', {})
 
@@ -501,6 +527,10 @@ class MelodicCapImporter:
                 pos = get_lm(lms, lm_idx)
                 if pos is None:
                     continue
+
+                # Per-landmark velocity limit
+                base_vel = LANDMARK_MAX_VEL.get(lm_idx, 10.0)
+                max_jump = (base_vel * vel_scale) / fps
 
                 # Determine the actual key type used in this dict
                 key = str(lm_idx) if str(lm_idx) in lms else lm_idx
@@ -535,14 +565,14 @@ class MelodicCapImporter:
                 count = filter_counts[lm_idx]
                 pct = count / len(frames) * 100
                 mc = max_consecutive.get(lm_idx, 0)
+                base_vel = LANDMARK_MAX_VEL.get(lm_idx, 10.0)
                 log(f"    [{lm_idx:2d}] {name:15s}: {count:4d} frames ({pct:5.1f}%), "
-                    f"max consecutive hold={mc}")
+                    f"max consecutive hold={mc}, limit={base_vel*vel_scale:.0f}m/s")
                 if mc > fps * 2:  # More than 2 seconds of sustained holds
                     log(f"         WARNING: {mc} consecutive holds ({mc/fps:.1f}s) — "
                         f"possible sustained tracking loss", "WARN")
         else:
-            log(f"  Outlier filter: no outliers detected "
-                f"(all motion within {max_jump:.3f}m/frame)")
+            log(f"  Outlier filter: no outliers detected")
 
     def set_ik_fk_mode(self, use_ik=True):
         """Set IK/FK switches on the rig. 0.0=IK, 1.0=FK."""

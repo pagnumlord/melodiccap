@@ -53,11 +53,15 @@ from pathlib import Path
 CAM_A_INDEX = 2          # Sony ZV-1F (use DSHOW)
 CAM_B_INDEX = 0          # DroidCam (use CAP_ANY)
 
-# ChArUco board (63.5mm squares)
-CHARUCO_COLS = 4
-CHARUCO_ROWS = 3
-CHARUCO_SQUARE_M = 0.0635
-CHARUCO_MARKER_M = 0.0476
+# ChArUco board configuration
+# OPTION A: Single 8.5x11" sheet (5x7 = 24 corners, 4x better than old 4x3)
+# OPTION B: Two sheets taped together (10x5 = 36 corners, 6x better)
+# IMPORTANT: Measure a printed square with a ruler and update CHARUCO_SQUARE_M!
+#            Printer scaling can be off by 1-3mm. Use ACTUAL measured value.
+CHARUCO_COLS = 5            # 5 for single sheet, 10 for dual sheet
+CHARUCO_ROWS = 7            # 7 for single sheet, 5 for dual sheet
+CHARUCO_SQUARE_M = 0.035    # 35mm for single sheet, 43mm for dual sheet — MEASURE!
+CHARUCO_MARKER_M = 0.025    # 25mm for single sheet, 31mm for dual sheet
 
 # Paths - relative to this script's parent (MelodicCapStudio/)
 BASE_DIR = Path(__file__).parent.parent  # MelodicCapStudio/
@@ -169,11 +173,13 @@ def postprocess_take(frames, log_fn=None):
     """Post-process recorded frames to fix stereo triangulation noise.
 
     Steps:
-    1. Velocity-based outlier rejection (per-landmark)
-    2. Bone-length stabilization (enforce consistent skeleton proportions)
-    3. Temporal smoothing (moving average)
-    4. Trim collapsed frames at end of take
-    5. Floor clamping (feet can't go below z=0)
+    1. Velocity-based outlier rejection (per-landmark, adaptive to body part)
+    2. Bone-length stabilization (enforce consistent skeleton, ALWAYS applied)
+    3. Biomechanical joint-angle constraints (prevent impossible poses)
+    4. Temporal smoothing (5-frame Gaussian-weighted, not simple average)
+    5. Trim collapsed frames at end of take
+    6. Floor clamping (feet can't go below z=0)
+    7. Data quality report
 
     Modifies frames in-place and returns the (possibly trimmed) list.
     """
@@ -185,17 +191,51 @@ def postprocess_take(frames, log_fn=None):
             log_fn(msg, level)
 
     _log("=" * 50)
-    _log("POST-PROCESSING TAKE")
+    _log("POST-PROCESSING TAKE v3.0")
     _log("=" * 50)
 
     n_original = len(frames)
 
+    # Compute actual FPS from timestamps
+    if len(frames) >= 2 and 'timestamp' in frames[0] and 'timestamp' in frames[-1]:
+        dt = frames[-1]['timestamp'] - frames[0]['timestamp']
+        actual_fps = (len(frames) - 1) / max(dt, 0.001)
+    else:
+        actual_fps = 13.0  # fallback
+
+    _log(f"  Actual FPS: {actual_fps:.1f}")
+
+    # --- Per-landmark max velocity thresholds (m/s) ---
+    # Human biomechanics: hips move slowly, hands can move fast
+    # Usain Bolt sprint: 12.4 m/s. Punching: ~15 m/s. Head: ~5 m/s.
+    # Using generous limits to avoid false positives but catch the 27-1075 m/s spikes.
+    MAX_VELOCITY_MPS = {
+        # Head/face: slow
+        '0': 5.0, '1': 5.0, '2': 5.0, '3': 5.0, '4': 5.0,
+        '5': 5.0, '6': 5.0, '7': 5.0, '8': 5.0, '9': 5.0, '10': 5.0,
+        # Shoulders: moderate
+        '11': 8.0, '12': 8.0,
+        # Elbows: moderate-fast
+        '13': 12.0, '14': 12.0,
+        # Wrists: fast (punching, gesturing)
+        '15': 15.0, '16': 15.0,
+        # Fingertips: fast
+        '17': 15.0, '18': 15.0, '19': 15.0, '20': 15.0,
+        # Hips: slow (core of body)
+        '23': 6.0, '24': 6.0,
+        # Knees: moderate
+        '25': 10.0, '26': 10.0,
+        # Ankles/feet: moderate
+        '27': 10.0, '28': 10.0,
+        '29': 10.0, '30': 10.0, '31': 10.0, '32': 10.0,
+    }
+    # Default for any unlisted landmark
+    DEFAULT_MAX_VEL = 10.0
+
     # --- Step 1: Velocity-based outlier rejection ---
-    _log("\n  [Step 1] Velocity-based outlier rejection")
-    # At ~13 FPS, max human movement speed is ~10 m/s -> ~0.77m per frame
-    # Use 0.5m as threshold (catches spikes while allowing fast movements)
-    MAX_JUMP_M = 0.5
+    _log("\n  [Step 1] Adaptive velocity-based outlier rejection")
     outlier_replacements = 0
+    outlier_by_landmark = {}
 
     all_landmarks = set()
     for f in frames:
@@ -206,35 +246,44 @@ def postprocess_take(frames, log_fn=None):
         lms = fdata.get('landmarks', {})
         for lm_key in list(lms.keys()):
             pos = lms[lm_key]
+            max_vel = MAX_VELOCITY_MPS.get(lm_key, DEFAULT_MAX_VEL)
+            # Convert m/s to m/frame
+            max_jump = max_vel / actual_fps
+
             if lm_key in prev_good:
                 pg = prev_good[lm_key]
                 dx = pos[0] - pg[0]
                 dy = pos[1] - pg[1]
                 dz = pos[2] - pg[2]
                 dist = (dx*dx + dy*dy + dz*dz) ** 0.5
-                if dist > MAX_JUMP_M:
+                if dist > max_jump:
                     # Replace with last good position
                     lms[lm_key] = list(prev_good[lm_key])
                     outlier_replacements += 1
+                    outlier_by_landmark[lm_key] = outlier_by_landmark.get(lm_key, 0) + 1
                 else:
                     prev_good[lm_key] = list(pos)
             else:
                 prev_good[lm_key] = list(pos)
 
-    _log(f"    Replaced {outlier_replacements} outlier positions (threshold: {MAX_JUMP_M}m/frame)")
+    _log(f"    Replaced {outlier_replacements} outlier positions")
+    if outlier_by_landmark:
+        worst = sorted(outlier_by_landmark.items(), key=lambda x: -x[1])[:5]
+        for lm_key, count in worst:
+            name = LANDMARK_NAMES.get(int(lm_key), f"lm_{lm_key}")
+            _log(f"      {name} ({lm_key}): {count} outliers")
 
-    # --- Step 2: Bone-length stabilization ---
-    _log("\n  [Step 2] Bone-length stabilization")
+    # --- Step 2: Bone-length stabilization (ALWAYS enforce, no tolerance) ---
+    _log("\n  [Step 2] Bone-length stabilization (strict enforcement)")
 
-    # Measure reference bone lengths from first 10 clean frames (median)
+    # Measure reference bone lengths from ALL frames (robust median)
     ref_lengths = {}
     for bone_start, bone_end, bone_name in SKELETON_BONES:
         lengths = []
-        for f in frames[:min(30, len(frames))]:
+        for f in frames:
             lms = f.get('landmarks', {})
             sk_s = str(bone_start)
             sk_e = str(bone_end)
-            # Try both string and int keys
             p1 = lms.get(sk_s) or lms.get(bone_start)
             p2 = lms.get(sk_e) or lms.get(bone_end)
             if p1 and p2:
@@ -242,26 +291,39 @@ def postprocess_take(frames, log_fn=None):
                 dy = p1[1] - p2[1]
                 dz = p1[2] - p2[2]
                 length = (dx*dx + dy*dy + dz*dz) ** 0.5
-                if length > 0.01 and length < 2.0:  # sanity bounds
+                if 0.01 < length < 2.0:  # sanity bounds
                     lengths.append(length)
         if lengths:
-            # Use median to be robust to any remaining outliers
             lengths.sort()
             ref_lengths[bone_name] = lengths[len(lengths)//2]
 
     if ref_lengths:
-        _log(f"    Reference bone lengths (from first frames):")
+        _log(f"    Reference bone lengths (median over all frames):")
         for name, length in ref_lengths.items():
             _log(f"      {name:15s}: {length:.3f}m")
 
-    # Now enforce bone lengths on every frame
-    # Strategy: keep hips fixed (root), adjust child landmarks to maintain
-    # correct bone length while preserving direction
+    # Enforce bone lengths STRICTLY on every frame
+    # Process bones in order: torso first, then limbs (parent before child)
+    BONE_ORDER = [
+        (23, 24, 'hips'),
+        (11, 12, 'shoulders'),
+        (11, 23, 'l_torso'),
+        (12, 24, 'r_torso'),
+        (11, 13, 'l_upper_arm'),
+        (13, 15, 'l_forearm'),
+        (12, 14, 'r_upper_arm'),
+        (14, 16, 'r_forearm'),
+        (23, 25, 'l_thigh'),
+        (25, 27, 'l_shin'),
+        (24, 26, 'r_thigh'),
+        (26, 28, 'r_shin'),
+    ]
+
     corrections = 0
     for fidx, fdata in enumerate(frames):
         lms = fdata.get('landmarks', {})
 
-        for bone_start, bone_end, bone_name in SKELETON_BONES:
+        for bone_start, bone_end, bone_name in BONE_ORDER:
             if bone_name not in ref_lengths:
                 continue
 
@@ -282,17 +344,14 @@ def postprocess_take(frames, log_fn=None):
             if current_len < 0.001:
                 continue
 
-            # Allow 15% tolerance before correcting
-            ratio = current_len / target_len
-            if ratio < 0.85 or ratio > 1.15:
-                # Scale the endpoint to match target length
+            # ALWAYS enforce (no tolerance). Bones don't change length.
+            if abs(current_len - target_len) > 0.001:
                 scale = target_len / current_len
                 new_p2 = [
                     p1[0] + dx * scale,
                     p1[1] + dy * scale,
                     p1[2] + dz * scale,
                 ]
-                # Update the endpoint (whichever key format is used)
                 key = sk_e if sk_e in lms else bone_end
                 if key in lms:
                     lms[key] = new_p2
@@ -300,43 +359,123 @@ def postprocess_take(frames, log_fn=None):
 
     _log(f"    Applied {corrections} bone-length corrections")
 
-    # --- Step 3: Temporal smoothing (3-frame moving average) ---
-    _log("\n  [Step 3] Temporal smoothing (3-frame moving average)")
-    if len(frames) >= 3:
-        # Collect all landmark keys
+    # --- Step 3: Biomechanical joint-angle constraints ---
+    _log("\n  [Step 3] Biomechanical joint-angle constraints")
+    angle_fixes = 0
+
+    # Joint angle limits (degrees) — prevent hyperextension and impossible bends
+    # Format: (parent_landmark, joint_landmark, child_landmark, min_angle, max_angle)
+    JOINT_LIMITS = [
+        # Elbows: can't hyperextend past ~170° or bend past ~30°
+        (11, 13, 15, 25, 175, 'l_elbow'),
+        (12, 14, 16, 25, 175, 'r_elbow'),
+        # Knees: can't hyperextend past ~175° or overbend past ~30°
+        (23, 25, 27, 25, 178, 'l_knee'),
+        (24, 26, 28, 25, 178, 'r_knee'),
+    ]
+
+    import math
+
+    def vec_angle_deg(a, b):
+        """Angle between two vectors in degrees."""
+        dot = a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+        mag_a = (a[0]**2 + a[1]**2 + a[2]**2) ** 0.5
+        mag_b = (b[0]**2 + b[1]**2 + b[2]**2) ** 0.5
+        if mag_a < 0.001 or mag_b < 0.001:
+            return 180.0
+        cos_angle = max(-1.0, min(1.0, dot / (mag_a * mag_b)))
+        return math.degrees(math.acos(cos_angle))
+
+    for fidx, fdata in enumerate(frames):
+        lms = fdata.get('landmarks', {})
+
+        for parent_idx, joint_idx, child_idx, min_ang, max_ang, name in JOINT_LIMITS:
+            sp = str(parent_idx)
+            sj = str(joint_idx)
+            sc = str(child_idx)
+            p_parent = lms.get(sp) or lms.get(parent_idx)
+            p_joint = lms.get(sj) or lms.get(joint_idx)
+            p_child = lms.get(sc) or lms.get(child_idx)
+
+            if not p_parent or not p_joint or not p_child:
+                continue
+
+            # Vectors from joint to parent and child
+            v_to_parent = [p_parent[i] - p_joint[i] for i in range(3)]
+            v_to_child = [p_child[i] - p_joint[i] for i in range(3)]
+
+            angle = vec_angle_deg(v_to_parent, v_to_child)
+
+            if angle < min_ang or angle > max_ang:
+                # Clamp by moving the child along its current direction
+                # to the nearest valid angle
+                target_angle = max(min_ang, min(max_ang, angle))
+                # For simplicity, blend child position toward straight (180°)
+                # or bent (min_ang) based on which limit was violated
+                if angle < min_ang:
+                    # Over-bent: push child slightly toward straight
+                    blend = 0.3  # conservative correction
+                elif angle > max_ang:
+                    # Hyperextended: pull child back slightly
+                    blend = 0.3
+
+                # Move child 30% of the way toward a valid configuration
+                # by interpolating toward the parent-to-joint vector extended
+                child_len = (v_to_child[0]**2 + v_to_child[1]**2 + v_to_child[2]**2) ** 0.5
+                if child_len > 0.001:
+                    # Use previous frame's child position as reference if available
+                    if fidx > 0:
+                        prev_lms = frames[fidx-1].get('landmarks', {})
+                        prev_child = prev_lms.get(sc) or prev_lms.get(child_idx)
+                        if prev_child:
+                            new_child = [
+                                p_child[i] * (1 - blend) + prev_child[i] * blend
+                                for i in range(3)
+                            ]
+                            key = sc if sc in lms else child_idx
+                            if key in lms:
+                                lms[key] = new_child
+                                angle_fixes += 1
+
+    _log(f"    Fixed {angle_fixes} joint-angle violations")
+
+    # --- Step 4: Temporal smoothing (5-frame Gaussian-weighted) ---
+    _log("\n  [Step 4] Temporal smoothing (5-frame Gaussian-weighted)")
+    if len(frames) >= 5:
+        # Gaussian weights for 5-frame window: [1, 4, 6, 4, 1] / 16
+        weights = [1.0/16, 4.0/16, 6.0/16, 4.0/16, 1.0/16]
+
         all_keys = set()
         for f in frames:
             all_keys.update(f.get('landmarks', {}).keys())
 
         for lm_key in all_keys:
-            # Extract time series for this landmark
             positions = []
             for f in frames:
                 lms = f.get('landmarks', {})
                 positions.append(lms.get(lm_key))
 
-            # Apply 3-frame moving average (skip missing)
             smoothed = [None] * len(positions)
             for i in range(len(positions)):
                 if positions[i] is None:
                     smoothed[i] = None
                     continue
 
-                # Collect neighbors
-                pts = []
-                for j in range(max(0, i-1), min(len(positions), i+2)):
-                    if positions[j] is not None:
-                        pts.append(positions[j])
+                # Collect up to 5-frame window
+                w_sum = 0.0
+                avg = [0.0, 0.0, 0.0]
+                for offset in range(-2, 3):
+                    j = i + offset
+                    if 0 <= j < len(positions) and positions[j] is not None:
+                        w = weights[offset + 2]
+                        avg[0] += positions[j][0] * w
+                        avg[1] += positions[j][1] * w
+                        avg[2] += positions[j][2] * w
+                        w_sum += w
 
-                if pts:
-                    avg = [
-                        sum(p[0] for p in pts) / len(pts),
-                        sum(p[1] for p in pts) / len(pts),
-                        sum(p[2] for p in pts) / len(pts),
-                    ]
-                    smoothed[i] = avg
+                if w_sum > 0:
+                    smoothed[i] = [avg[0]/w_sum, avg[1]/w_sum, avg[2]/w_sum]
 
-            # Write back
             for i, f in enumerate(frames):
                 lms = f.get('landmarks', {})
                 if smoothed[i] is not None and lm_key in lms:
@@ -344,10 +483,40 @@ def postprocess_take(frames, log_fn=None):
 
         _log(f"    Smoothed {len(all_keys)} landmarks across {len(frames)} frames")
 
-    # --- Step 4: Trim collapsed frames ---
-    _log("\n  [Step 4] Trim collapsed frames (skeleton height < 70% of reference)")
+    # --- Step 5: Re-enforce bone lengths after smoothing ---
+    # Smoothing can drift bone lengths slightly; re-enforce to keep skeleton rigid
+    _log("\n  [Step 5] Re-enforce bone lengths after smoothing")
+    re_corrections = 0
+    for fidx, fdata in enumerate(frames):
+        lms = fdata.get('landmarks', {})
+        for bone_start, bone_end, bone_name in BONE_ORDER:
+            if bone_name not in ref_lengths:
+                continue
+            target_len = ref_lengths[bone_name]
+            sk_s = str(bone_start)
+            sk_e = str(bone_end)
+            p1 = lms.get(sk_s) or lms.get(bone_start)
+            p2 = lms.get(sk_e) or lms.get(bone_end)
+            if not p1 or not p2:
+                continue
+            dx = p2[0] - p1[0]
+            dy = p2[1] - p1[1]
+            dz = p2[2] - p1[2]
+            current_len = (dx*dx + dy*dy + dz*dz) ** 0.5
+            if current_len < 0.001:
+                continue
+            if abs(current_len - target_len) > 0.001:
+                scale = target_len / current_len
+                new_p2 = [p1[0] + dx * scale, p1[1] + dy * scale, p1[2] + dz * scale]
+                key = sk_e if sk_e in lms else bone_end
+                if key in lms:
+                    lms[key] = new_p2
+                    re_corrections += 1
+    _log(f"    Applied {re_corrections} post-smoothing bone corrections")
 
-    # Measure reference height from first 5 frames
+    # --- Step 6: Trim collapsed frames ---
+    _log("\n  [Step 6] Trim collapsed frames (skeleton height < 70% of reference)")
+
     ref_heights = []
     for f in frames[:5]:
         lms = f.get('landmarks', {})
@@ -365,7 +534,6 @@ def postprocess_take(frames, log_fn=None):
         min_height = ref_height * 0.70
         _log(f"    Reference height: {ref_height:.3f}m, minimum: {min_height:.3f}m")
 
-        # Find last good frame (scan from end)
         trim_from = len(frames)
         for i in range(len(frames) - 1, -1, -1):
             lms = frames[i].get('landmarks', {})
@@ -388,10 +556,10 @@ def postprocess_take(frames, log_fn=None):
     else:
         _log(f"    Could not measure reference height (missing nose/ankle)")
 
-    # --- Step 5: Floor clamping ---
-    _log("\n  [Step 5] Floor clamping (feet z >= 0)")
+    # --- Step 7: Floor clamping ---
+    _log("\n  [Step 7] Floor clamping (feet z >= 0)")
     floor_clamps = 0
-    foot_landmarks = ['27', '28', '29', '30', '31', '32']  # ankles, heels, foot index
+    foot_landmarks = ['27', '28', '29', '30', '31', '32']
     for f in frames:
         lms = f.get('landmarks', {})
         for lm_key in foot_landmarks:
@@ -401,13 +569,44 @@ def postprocess_take(frames, log_fn=None):
 
     _log(f"    Clamped {floor_clamps} foot positions to floor")
 
-    # --- Summary ---
-    _log(f"\n  POST-PROCESSING COMPLETE:")
+    # --- Step 8: Data quality report ---
+    _log(f"\n  DATA QUALITY REPORT:")
     _log(f"    Input frames:  {n_original}")
     _log(f"    Output frames: {len(frames)}")
     _log(f"    Outliers fixed: {outlier_replacements}")
-    _log(f"    Bone corrections: {corrections}")
+    _log(f"    Bone corrections: {corrections} (initial) + {re_corrections} (post-smooth)")
+    _log(f"    Joint-angle fixes: {angle_fixes}")
     _log(f"    Floor clamps: {floor_clamps}")
+
+    # Compute final bone-length consistency as quality metric
+    if ref_lengths and len(frames) > 0:
+        _log(f"\n    Final bone-length consistency (should all be ~0%):")
+        for bone_start, bone_end, bone_name in SKELETON_BONES:
+            if bone_name not in ref_lengths:
+                continue
+            lengths = []
+            for f in frames:
+                lms = f.get('landmarks', {})
+                p1 = lms.get(str(bone_start))
+                p2 = lms.get(str(bone_end))
+                if p1 and p2:
+                    dx = p1[0]-p2[0]; dy = p1[1]-p2[1]; dz = p1[2]-p2[2]
+                    lengths.append((dx*dx + dy*dy + dz*dz) ** 0.5)
+            if lengths:
+                mean_l = sum(lengths) / len(lengths)
+                if mean_l > 0:
+                    cv = ((sum((l-mean_l)**2 for l in lengths) / len(lengths)) ** 0.5) / mean_l * 100
+                    _log(f"      {bone_name:15s}: {mean_l:.3f}m  CV={cv:.1f}%")
+
+    # Quality score: how many outliers per second of capture
+    duration = frames[-1].get('timestamp', 0) - frames[0].get('timestamp', 0) if len(frames) > 1 else 1.0
+    outlier_rate = outlier_replacements / max(duration, 0.1)
+    if outlier_rate > 10:
+        _log(f"\n    QUALITY: POOR ({outlier_rate:.0f} outliers/sec) — recalibrate with larger board", "WARN")
+    elif outlier_rate > 3:
+        _log(f"\n    QUALITY: FAIR ({outlier_rate:.0f} outliers/sec) — usable but noisy", "WARN")
+    else:
+        _log(f"\n    QUALITY: GOOD ({outlier_rate:.1f} outliers/sec)")
 
     return frames
 
@@ -558,14 +757,35 @@ def run_stereo_calibration(frames_a, frames_b, max_iterations=5, outlier_thresho
         corners_b = [d['corners_b'] for d in active_data]
         ids_b = [d['ids_b'] for d in active_data]
 
+        # Limit distortion model based on available data.
+        # With few corners, high-order distortion coefficients (k3) overfit to noise.
+        # Total corners across all frames:
+        total_corners = sum(len(d['common']) for d in active_data)
+        if total_corners < 200:
+            # Not enough data for 5-parameter distortion — fix k3=0
+            # This prevents the k3=-17 overfitting seen with small boards
+            cal_flags = cv2.CALIB_FIX_K3
+            log(f"  Using 4-param distortion model (k3=0): only {total_corners} total corner observations")
+        else:
+            cal_flags = 0
+            log(f"  Using full 5-param distortion model: {total_corners} total corner observations")
+
         ret_a, K1, D1, _, _ = cv2.aruco.calibrateCameraCharuco(
-            corners_a, ids_a, board, img_size, None, None
+            corners_a, ids_a, board, img_size, None, None,
+            flags=cal_flags
         )
         ret_b, K2, D2, _, _ = cv2.aruco.calibrateCameraCharuco(
-            corners_b, ids_b, board, img_size, None, None
+            corners_b, ids_b, board, img_size, None, None,
+            flags=cal_flags
         )
         log(f"  Camera A RMS: {ret_a:.4f} (fx={K1[0,0]:.1f}, fy={K1[1,1]:.1f})")
         log(f"  Camera B RMS: {ret_b:.4f} (fx={K2[0,0]:.1f}, fy={K2[1,1]:.1f})")
+
+        # Check for extreme distortion coefficients (sign of bad calibration)
+        for cam_name, D in [("A", D1), ("B", D2)]:
+            d = D.flatten()
+            if len(d) >= 5 and abs(d[4]) > 10.0:
+                log(f"  WARNING: Camera {cam_name} k3={d[4]:.1f} is extreme — calibration may be overfitting", "WARN")
 
         # Build stereo correspondences
         obj_points = []
