@@ -1,7 +1,16 @@
 """
-MelodicCap Studio - Motion Capture v2.1
+MelodicCap Studio - Motion Capture v2.2
 ========================================
 Based on capture v8 (proven: 100% tracking, Kalman smoothing, 30-frame grace period).
+
+v2.2 changes (from v2.1):
+- Post-processing pipeline on take save:
+  - Velocity-based outlier rejection (0.5m/frame threshold, catches stereo spikes)
+  - Bone-length stabilization (enforces consistent skeleton proportions)
+  - 3-frame temporal smoothing (reduces jitter)
+  - Auto-trim collapsed frames at end of take
+  - Floor clamping (feet can't go below z=0)
+- Lowered outlier threshold from 5.0m to 3.0m
 
 v2.1 changes (from v2.0):
 - Iterative outlier rejection in stereo calibration (from robust_calibration.py)
@@ -69,7 +78,7 @@ MEDIAPIPE_MIN_TRACKING_CONF = 0.3
 
 # Outlier filter: reject landmarks more than this many meters from origin
 # Prevents bad triangulation spikes (seen up to +/-715m in production takes)
-OUTLIER_THRESHOLD_M = 5.0
+OUTLIER_THRESHOLD_M = 3.0
 
 # Minimum visibility score to accept a landmark from MediaPipe
 MIN_VISIBILITY = 0.3
@@ -127,6 +136,281 @@ def log(msg, level="INFO"):
             _log_file.flush()
         except Exception:
             pass  # Don't crash on log write failure
+
+# =============================================================================
+# SKELETON DEFINITIONS (for bone-length stabilization)
+# =============================================================================
+
+# Bone segments: (start_landmark, end_landmark, name)
+# These define the rigid segments of the human skeleton
+SKELETON_BONES = [
+    (11, 12, 'shoulders'),      # shoulder width
+    (23, 24, 'hips'),           # hip width
+    (11, 13, 'l_upper_arm'),    # left upper arm
+    (13, 15, 'l_forearm'),      # left forearm
+    (12, 14, 'r_upper_arm'),    # right upper arm
+    (14, 16, 'r_forearm'),      # right forearm
+    (23, 25, 'l_thigh'),        # left thigh
+    (25, 27, 'l_shin'),         # left shin
+    (24, 26, 'r_thigh'),        # right thigh
+    (26, 28, 'r_shin'),         # right shin
+    (11, 23, 'l_torso'),        # left torso (shoulder to hip)
+    (12, 24, 'r_torso'),        # right torso
+]
+
+# Landmarks that are anchored (hips define root, everything else adjusts)
+HIP_LANDMARKS = [23, 24]
+
+# =============================================================================
+# POST-PROCESSING: Stabilize bone lengths, smooth, trim, clamp floor
+# =============================================================================
+
+def postprocess_take(frames, log_fn=None):
+    """Post-process recorded frames to fix stereo triangulation noise.
+
+    Steps:
+    1. Velocity-based outlier rejection (per-landmark)
+    2. Bone-length stabilization (enforce consistent skeleton proportions)
+    3. Temporal smoothing (moving average)
+    4. Trim collapsed frames at end of take
+    5. Floor clamping (feet can't go below z=0)
+
+    Modifies frames in-place and returns the (possibly trimmed) list.
+    """
+    if not frames or len(frames) < 5:
+        return frames
+
+    def _log(msg, level="INFO"):
+        if log_fn:
+            log_fn(msg, level)
+
+    _log("=" * 50)
+    _log("POST-PROCESSING TAKE")
+    _log("=" * 50)
+
+    n_original = len(frames)
+
+    # --- Step 1: Velocity-based outlier rejection ---
+    _log("\n  [Step 1] Velocity-based outlier rejection")
+    # At ~13 FPS, max human movement speed is ~10 m/s -> ~0.77m per frame
+    # Use 0.5m as threshold (catches spikes while allowing fast movements)
+    MAX_JUMP_M = 0.5
+    outlier_replacements = 0
+
+    all_landmarks = set()
+    for f in frames:
+        all_landmarks.update(f.get('landmarks', {}).keys())
+
+    prev_good = {}  # landmark_key -> [x, y, z]
+    for fidx, fdata in enumerate(frames):
+        lms = fdata.get('landmarks', {})
+        for lm_key in list(lms.keys()):
+            pos = lms[lm_key]
+            if lm_key in prev_good:
+                pg = prev_good[lm_key]
+                dx = pos[0] - pg[0]
+                dy = pos[1] - pg[1]
+                dz = pos[2] - pg[2]
+                dist = (dx*dx + dy*dy + dz*dz) ** 0.5
+                if dist > MAX_JUMP_M:
+                    # Replace with last good position
+                    lms[lm_key] = list(prev_good[lm_key])
+                    outlier_replacements += 1
+                else:
+                    prev_good[lm_key] = list(pos)
+            else:
+                prev_good[lm_key] = list(pos)
+
+    _log(f"    Replaced {outlier_replacements} outlier positions (threshold: {MAX_JUMP_M}m/frame)")
+
+    # --- Step 2: Bone-length stabilization ---
+    _log("\n  [Step 2] Bone-length stabilization")
+
+    # Measure reference bone lengths from first 10 clean frames (median)
+    ref_lengths = {}
+    for bone_start, bone_end, bone_name in SKELETON_BONES:
+        lengths = []
+        for f in frames[:min(30, len(frames))]:
+            lms = f.get('landmarks', {})
+            sk_s = str(bone_start)
+            sk_e = str(bone_end)
+            # Try both string and int keys
+            p1 = lms.get(sk_s) or lms.get(bone_start)
+            p2 = lms.get(sk_e) or lms.get(bone_end)
+            if p1 and p2:
+                dx = p1[0] - p2[0]
+                dy = p1[1] - p2[1]
+                dz = p1[2] - p2[2]
+                length = (dx*dx + dy*dy + dz*dz) ** 0.5
+                if length > 0.01 and length < 2.0:  # sanity bounds
+                    lengths.append(length)
+        if lengths:
+            # Use median to be robust to any remaining outliers
+            lengths.sort()
+            ref_lengths[bone_name] = lengths[len(lengths)//2]
+
+    if ref_lengths:
+        _log(f"    Reference bone lengths (from first frames):")
+        for name, length in ref_lengths.items():
+            _log(f"      {name:15s}: {length:.3f}m")
+
+    # Now enforce bone lengths on every frame
+    # Strategy: keep hips fixed (root), adjust child landmarks to maintain
+    # correct bone length while preserving direction
+    corrections = 0
+    for fidx, fdata in enumerate(frames):
+        lms = fdata.get('landmarks', {})
+
+        for bone_start, bone_end, bone_name in SKELETON_BONES:
+            if bone_name not in ref_lengths:
+                continue
+
+            target_len = ref_lengths[bone_name]
+            sk_s = str(bone_start)
+            sk_e = str(bone_end)
+            p1 = lms.get(sk_s) or lms.get(bone_start)
+            p2 = lms.get(sk_e) or lms.get(bone_end)
+
+            if not p1 or not p2:
+                continue
+
+            dx = p2[0] - p1[0]
+            dy = p2[1] - p1[1]
+            dz = p2[2] - p1[2]
+            current_len = (dx*dx + dy*dy + dz*dz) ** 0.5
+
+            if current_len < 0.001:
+                continue
+
+            # Allow 15% tolerance before correcting
+            ratio = current_len / target_len
+            if ratio < 0.85 or ratio > 1.15:
+                # Scale the endpoint to match target length
+                scale = target_len / current_len
+                new_p2 = [
+                    p1[0] + dx * scale,
+                    p1[1] + dy * scale,
+                    p1[2] + dz * scale,
+                ]
+                # Update the endpoint (whichever key format is used)
+                key = sk_e if sk_e in lms else bone_end
+                if key in lms:
+                    lms[key] = new_p2
+                    corrections += 1
+
+    _log(f"    Applied {corrections} bone-length corrections")
+
+    # --- Step 3: Temporal smoothing (3-frame moving average) ---
+    _log("\n  [Step 3] Temporal smoothing (3-frame moving average)")
+    if len(frames) >= 3:
+        # Collect all landmark keys
+        all_keys = set()
+        for f in frames:
+            all_keys.update(f.get('landmarks', {}).keys())
+
+        for lm_key in all_keys:
+            # Extract time series for this landmark
+            positions = []
+            for f in frames:
+                lms = f.get('landmarks', {})
+                positions.append(lms.get(lm_key))
+
+            # Apply 3-frame moving average (skip missing)
+            smoothed = [None] * len(positions)
+            for i in range(len(positions)):
+                if positions[i] is None:
+                    smoothed[i] = None
+                    continue
+
+                # Collect neighbors
+                pts = []
+                for j in range(max(0, i-1), min(len(positions), i+2)):
+                    if positions[j] is not None:
+                        pts.append(positions[j])
+
+                if pts:
+                    avg = [
+                        sum(p[0] for p in pts) / len(pts),
+                        sum(p[1] for p in pts) / len(pts),
+                        sum(p[2] for p in pts) / len(pts),
+                    ]
+                    smoothed[i] = avg
+
+            # Write back
+            for i, f in enumerate(frames):
+                lms = f.get('landmarks', {})
+                if smoothed[i] is not None and lm_key in lms:
+                    lms[lm_key] = smoothed[i]
+
+        _log(f"    Smoothed {len(all_keys)} landmarks across {len(frames)} frames")
+
+    # --- Step 4: Trim collapsed frames ---
+    _log("\n  [Step 4] Trim collapsed frames (skeleton height < 70% of reference)")
+
+    # Measure reference height from first 5 frames
+    ref_heights = []
+    for f in frames[:5]:
+        lms = f.get('landmarks', {})
+        nose = lms.get('0') or lms.get(0)
+        l_ankle = lms.get('27') or lms.get(27)
+        r_ankle = lms.get('28') or lms.get(28)
+        if nose and l_ankle and r_ankle:
+            ankle_z = (l_ankle[2] + r_ankle[2]) / 2
+            height = nose[2] - ankle_z
+            if height > 0.5:
+                ref_heights.append(height)
+
+    if ref_heights:
+        ref_height = sum(ref_heights) / len(ref_heights)
+        min_height = ref_height * 0.70
+        _log(f"    Reference height: {ref_height:.3f}m, minimum: {min_height:.3f}m")
+
+        # Find last good frame (scan from end)
+        trim_from = len(frames)
+        for i in range(len(frames) - 1, -1, -1):
+            lms = frames[i].get('landmarks', {})
+            nose = lms.get('0') or lms.get(0)
+            l_ankle = lms.get('27') or lms.get(27)
+            r_ankle = lms.get('28') or lms.get(28)
+            if nose and l_ankle and r_ankle:
+                ankle_z = (l_ankle[2] + r_ankle[2]) / 2
+                height = nose[2] - ankle_z
+                if height >= min_height:
+                    trim_from = i + 1
+                    break
+
+        if trim_from < len(frames):
+            trimmed = len(frames) - trim_from
+            frames[:] = frames[:trim_from]
+            _log(f"    Trimmed {trimmed} collapsed frames from end")
+        else:
+            _log(f"    No collapsed frames detected")
+    else:
+        _log(f"    Could not measure reference height (missing nose/ankle)")
+
+    # --- Step 5: Floor clamping ---
+    _log("\n  [Step 5] Floor clamping (feet z >= 0)")
+    floor_clamps = 0
+    foot_landmarks = ['27', '28', '29', '30', '31', '32']  # ankles, heels, foot index
+    for f in frames:
+        lms = f.get('landmarks', {})
+        for lm_key in foot_landmarks:
+            if lm_key in lms and lms[lm_key][2] < 0:
+                lms[lm_key][2] = 0.0
+                floor_clamps += 1
+
+    _log(f"    Clamped {floor_clamps} foot positions to floor")
+
+    # --- Summary ---
+    _log(f"\n  POST-PROCESSING COMPLETE:")
+    _log(f"    Input frames:  {n_original}")
+    _log(f"    Output frames: {len(frames)}")
+    _log(f"    Outliers fixed: {outlier_replacements}")
+    _log(f"    Bone corrections: {corrections}")
+    _log(f"    Floor clamps: {floor_clamps}")
+
+    return frames
+
 
 # =============================================================================
 # DETECTOR SETUP
@@ -705,7 +989,7 @@ def main():
     log_init("session")
 
     log("=" * 60)
-    log("MELODICCAP STUDIO - MOTION CAPTURE v2.1")
+    log("MELODICCAP STUDIO - MOTION CAPTURE v2.2")
     log("=" * 60)
 
     log(f"\n  Configuration:")
@@ -1193,6 +1477,9 @@ def main():
                     log("[REC] Recording stopped")
 
                     if len(recorded_frames) > 0:
+                        # Post-process: stabilize bones, smooth, trim, clamp
+                        recorded_frames = postprocess_take(recorded_frames, log_fn=log)
+
                         TAKES_DIR.mkdir(parents=True, exist_ok=True)
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                         filename = TAKES_DIR / f"take_{timestamp}.json"
@@ -1228,7 +1515,7 @@ def main():
                             }
 
                         take_data = {
-                            'version': 'studio-2.1',
+                            'version': 'studio-2.2',
                             'timestamp': datetime.now().isoformat(),
                             'duration_seconds': time.time() - record_start_time,
                             'frame_count': len(recorded_frames),
