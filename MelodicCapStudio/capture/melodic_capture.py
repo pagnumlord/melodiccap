@@ -143,6 +143,7 @@ params = cv2.aruco.DetectorParameters()
 params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
 detector = cv2.aruco.ArucoDetector(aruco_dict, params)
 board_corners_3d = board.getChessboardCorners()
+BOARD_MAX_CORNERS = (CHARUCO_COLS - 1) * (CHARUCO_ROWS - 1)
 
 # MediaPipe landmark names for logging
 LANDMARK_NAMES = {
@@ -210,6 +211,10 @@ def run_stereo_calibration(frames_a, frames_b, max_iterations=5, outlier_thresho
     log("=" * 50)
     log("STEREO CALIBRATION (iterative outlier rejection)")
     log("=" * 50)
+
+    if BOARD_MAX_CORNERS < 12:
+        log(f"  WARNING: Board only has {BOARD_MAX_CORNERS} max corners (need 12+ for reliable calibration)", "WARN")
+        log(f"  Results may be unreliable. Consider printing a larger board (7x5 or 9x6).", "WARN")
 
     # Phase 1: Extract corners from all frame pairs
     all_data = []
@@ -387,14 +392,29 @@ def run_stereo_calibration(frames_a, frames_b, max_iterations=5, outlier_thresho
 
         log(f"  Removed {removed} outlier frames")
 
-    # Phase 4: Use best result
+    # Phase 4: Validate and use best result
     if best_result is None:
         return None, "Calibration failed - no valid result"
 
-    if best_rms > 10.0:
-        return None, f"Best Stereo RMS {best_rms:.1f} still too high!"
+    if best_rms > 3.0:
+        log(f"\n  REJECTED: Best Stereo RMS {best_rms:.2f} exceeds quality threshold (3.0)", "WARN")
+        return None, f"Stereo RMS {best_rms:.1f} too high (need < 3.0). Try a larger board or more varied angles."
 
     log(f"\n  BEST RESULT: Stereo RMS={best_rms:.4f}, {best_result['num_frames']} frames, baseline={best_result['baseline']:.3f}m")
+
+    # Sanity check: focal lengths should be in reasonable range for the image size
+    img_w = img_size[0]
+    for cam_name, K in [("A", best_result['K1']), ("B", best_result['K2'])]:
+        fx, fy = K[0, 0], K[1, 1]
+        if fx < img_w * 0.3 or fx > img_w * 3.0 or fy < img_w * 0.3 or fy > img_w * 3.0:
+            log(f"\n  REJECTED: Camera {cam_name} focal length implausible (fx={fx:.1f}, fy={fy:.1f}) for {img_w}px width", "WARN")
+            return None, f"Camera {cam_name} focal length implausible (fx={fx:.0f}). Calibration data insufficient."
+
+    # Sanity check: baseline should be physically reasonable (0.1m - 5.0m)
+    baseline = best_result['baseline']
+    if baseline < 0.1 or baseline > 5.0:
+        log(f"\n  REJECTED: Baseline {baseline:.3f}m is implausible (expect 0.1-5.0m)", "WARN")
+        return None, f"Baseline {baseline:.2f}m implausible. Check camera positions."
 
     # Compute rectification from best result
     R1, R2, P1, P2, Q, _, _ = cv2.stereoRectify(
@@ -423,6 +443,23 @@ def run_stereo_calibration(frames_a, frames_b, max_iterations=5, outlier_thresho
         'floor_calibrated': False,
         'frames_used': best_result['num_frames'],
     }
+
+    # Protect against overwriting a better existing calibration
+    if CALIBRATION_FILE.exists():
+        try:
+            with open(CALIBRATION_FILE, 'r') as f:
+                existing = json.load(f)
+            existing_rms = existing.get('rms_stereo', float('inf'))
+            if existing_rms < best_rms:
+                log(f"\n  WARNING: Existing calibration (RMS={existing_rms:.4f}) is better than new (RMS={best_rms:.4f})", "WARN")
+                log(f"  Saving new calibration anyway - old one is backed up", "WARN")
+                # Backup existing calibration
+                backup_path = CALIBRATION_FILE.with_suffix('.json.bak')
+                with open(backup_path, 'w') as f:
+                    json.dump(existing, f, indent=2)
+                log(f"  Backup saved: {backup_path}")
+        except (json.JSONDecodeError, IOError):
+            pass  # No existing calibration or can't read it
 
     with open(CALIBRATION_FILE, 'w') as f:
         json.dump(data, f, indent=2)
@@ -667,6 +704,10 @@ def main():
     log(f"    Base dir: {BASE_DIR}")
     log(f"    Calibration file: {CALIBRATION_FILE}")
     log(f"    Takes dir: {TAKES_DIR}")
+    log(f"    ChArUco board: {CHARUCO_COLS}x{CHARUCO_ROWS} ({BOARD_MAX_CORNERS} max corners)")
+    if BOARD_MAX_CORNERS < 12:
+        log(f"    WARNING: Board has only {BOARD_MAX_CORNERS} max corners. Calibration may be unreliable.", "WARN")
+        log(f"    RECOMMEND: Use at least 7x5 board (24 corners) for stable calibration.", "WARN")
 
     # Initialize MediaPipe
     mp_pose = mp.solutions.pose
@@ -837,12 +878,17 @@ def main():
             if recording:
                 frame_grab_delays.append(grab_delay)
 
-            # Detect ChArUco
-            cc_a, ci_a, markers_a = detect_charuco(frame_a)
-            cc_b, ci_b, markers_b = detect_charuco(frame_b)
+            # Detect ChArUco (skip during recording to save CPU)
+            if not recording:
+                cc_a, ci_a, markers_a = detect_charuco(frame_a)
+                cc_b, ci_b, markers_b = detect_charuco(frame_b)
 
-            board_a = cc_a is not None
-            board_b = cc_b is not None
+                board_a = cc_a is not None
+                board_b = cc_b is not None
+            else:
+                cc_a = ci_a = markers_a = None
+                cc_b = ci_b = markers_b = None
+                board_a = board_b = False
 
             # Create display frames
             if collecting_cal or floor_mode:
