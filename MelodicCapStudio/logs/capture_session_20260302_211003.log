@@ -1,0 +1,378 @@
+[INFO] Log file: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\logs\capture_session_20260302_211003.log
+[INFO] Session started: 2026-03-02T21:10:03.811715
+[INFO] Python: 3.12.6 (tags/v3.12.6:a4a2d2b, Sep  6 2024, 20:11:23) [MSC v.1940 64 bit (AMD64)]
+[INFO] OpenCV: 4.12.0
+[INFO] MediaPipe: 0.10.14
+[INFO] ============================================================
+[INFO] MELODICCAP STUDIO - MOTION CAPTURE v2.1
+[INFO] ============================================================
+[INFO] 
+  Configuration:
+[INFO]     Camera A index: 2
+[INFO]     Camera B index: 0
+[INFO]     Countdown: 10s
+[INFO]     Grace period: 30 frames
+[INFO]     Outlier threshold: 5.0m
+[INFO]     Min visibility: 0.3
+[INFO]     MediaPipe complexity: 1
+[INFO]     MediaPipe detection conf: 0.3
+[INFO]     MediaPipe tracking conf: 0.3
+[INFO]     Base dir: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio
+[INFO]     Calibration file: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\calibration\stereo_calibration.json
+[INFO]     Takes dir: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\takes
+[INFO]     ChArUco board: 4x3 (6 max corners)
+[WARN]     NOTE: Small board (6 corners). Calibration uses joint optimization mode.
+[WARN]     TIPS: Move board SLOWLY, ensure 5+ corners visible in BOTH cameras,
+[WARN]           cover many angles (tilt, rotate), collect 30+ frames.
+[INFO] 
+[CAMERAS]
+[INFO]   Opening Camera A (index 2, DSHOW)...
+[INFO]     Native: 1280x720 @ 0.0fps
+[INFO]   Opening Camera B (index 0, CAP_ANY)...
+[INFO]     Native: 1280x720 @ 30.0fps
+[INFO] 
+  Processing resolution: 1280x720
+[INFO]     Both cameras match - no resizing needed
+[INFO] 
+[CALIBRATION] Loaded (v5.3-robust, Stereo RMS: 0.4324, Baseline: 1.436m)
+[INFO] [FLOOR] Offset: 0.9995m
+[INFO] 
+[CONTROLS]
+[INFO]   C = Collect calibration frames (hold board visible to both cameras)
+[INFO]   S = Run stereo calibration (after collecting 15+ frames)
+[INFO]   F = Floor calibration (lay board flat on floor)
+[INFO]   R = Start/stop recording motion capture
+[INFO]   Q = Quit
+[INFO] [CAL] Collection started
+[INFO] [CAL] Frame 1: 6 common corners
+[INFO] [CAL] Frame 2: 5 common corners
+[INFO] [CAL] Frame 3: 6 common corners
+[INFO] [CAL] Frame 4: 6 common corners
+[INFO] [CAL] Frame 5: 6 common corners
+[INFO] [CAL] Frame 6: 6 common corners
+[INFO] [CAL] Frame 7: 6 common corners
+[INFO] [CAL] Frame 8: 5 common corners
+[INFO] [CAL] Frame 9: 6 common corners
+[INFO] [CAL] Frame 10: 6 common corners
+[INFO] [CAL] Frame 11: 6 common corners
+[INFO] [CAL] Frame 12: 6 common corners
+[INFO] [CAL] Frame 13: 6 common corners
+[INFO] [CAL] Frame 14: 6 common corners
+[INFO] [CAL] Frame 15: 5 common corners
+[INFO] [CAL] Frame 16: 6 common corners
+[INFO] [CAL] Frame 17: 6 common corners
+[INFO] [CAL] Frame 18: 6 common corners
+[INFO] [CAL] Frame 19: 6 common corners
+[INFO] [CAL] Frame 20: 6 common corners
+[INFO] [CAL] Frame 21: 6 common corners
+[INFO] [CAL] Frame 22: 6 common corners
+[INFO] [CAL] Frame 23: 6 common corners
+[INFO] [CAL] Frame 24: 6 common corners
+[INFO] [CAL] Frame 25: 6 common corners
+[INFO] [CAL] Frame 26: 6 common corners
+[INFO] [CAL] Frame 27: 6 common corners
+[INFO] [CAL] Frame 28: 6 common corners
+[INFO] [CAL] Frame 29: 6 common corners
+[INFO] [CAL] Frame 30: 6 common corners
+[INFO] [CAL] Frame 31: 6 common corners
+[INFO] [CAL] Frame 32: 6 common corners
+[INFO] [CAL] Frame 33: 6 common corners
+[INFO] [CAL] Frame 34: 6 common corners
+[INFO] [CAL] Frame 35: 6 common corners
+[INFO] [CAL] Frame 36: 6 common corners
+[INFO] [CAL] Frame 37: 6 common corners
+[INFO] [CAL] Frame 38: 6 common corners
+[INFO] [CAL] Frame 39: 6 common corners
+[INFO] [CAL] Frame 40: 6 common corners
+[INFO] [CAL] Frame 41: 6 common corners
+[INFO] [CAL] Frame 42: 6 common corners
+[INFO] [CAL] Frame 43: 6 common corners
+[INFO] [CAL] Frame 44: 6 common corners
+[INFO] [CAL] Frame 45: 6 common corners
+[INFO] [CAL] Frame 46: 6 common corners
+[INFO] [CAL] Frame 47: 6 common corners
+[INFO] [CAL] Frame 48: 6 common corners
+[INFO] [CAL] Frame 49: 5 common corners
+[INFO] [CAL] Frame 50: 6 common corners
+[INFO] [CAL] Frame 51: 6 common corners
+[INFO] [CAL] Frame 52: 6 common corners
+[INFO] [CAL] Frame 53: 6 common corners
+[INFO] [CAL] Frame 54: 6 common corners
+[INFO] [CAL] Frame 55: 6 common corners
+[INFO] [CAL] Frame 56: 6 common corners
+[INFO] [CAL] Frame 57: 6 common corners
+[INFO] [CAL] Frame 58: 6 common corners
+[INFO] [CAL] Frame 59: 6 common corners
+[INFO] [CAL] Collection stopped: 59 frames
+[INFO] ==================================================
+[INFO] STEREO CALIBRATION (iterative outlier rejection)
+[INFO] ==================================================
+[WARN]   Small board mode: 6 max corners, requiring 5+ per frame
+[WARN]   Using joint intrinsic+extrinsic optimization for better results
+[WARN]   TIP: Move board SLOWLY, hold still at each position, cover varied angles
+[INFO]   Frame 0: 6 common corners
+[INFO]   Frame 1: 5 common corners
+[INFO]   Frame 2: 6 common corners
+[INFO]   Frame 3: 6 common corners
+[INFO]   Frame 4: 6 common corners
+[INFO]   Frame 5: 6 common corners
+[INFO]   Frame 6: 6 common corners
+[INFO]   Frame 7: 5 common corners
+[INFO]   Frame 8: 6 common corners
+[INFO]   Frame 9: 6 common corners
+[INFO]   Frame 10: 6 common corners
+[INFO]   Frame 11: 6 common corners
+[INFO]   Frame 12: 6 common corners
+[INFO]   Frame 13: 6 common corners
+[INFO]   Frame 14: 5 common corners
+[INFO]   Frame 15: 6 common corners
+[INFO]   Frame 16: 6 common corners
+[INFO]   Frame 17: 6 common corners
+[INFO]   Frame 18: 6 common corners
+[INFO]   Frame 19: 6 common corners
+[INFO]   Frame 20: 6 common corners
+[INFO]   Frame 21: 6 common corners
+[INFO]   Frame 22: 6 common corners
+[INFO]   Frame 23: 6 common corners
+[INFO]   Frame 24: 6 common corners
+[INFO]   Frame 25: 6 common corners
+[INFO]   Frame 26: 6 common corners
+[INFO]   Frame 27: 6 common corners
+[INFO]   Frame 28: 6 common corners
+[INFO]   Frame 29: 6 common corners
+[INFO]   Frame 30: 6 common corners
+[INFO]   Frame 31: 6 common corners
+[INFO]   Frame 32: 6 common corners
+[INFO]   Frame 33: 6 common corners
+[INFO]   Frame 34: 6 common corners
+[INFO]   Frame 35: 6 common corners
+[INFO]   Frame 36: 6 common corners
+[INFO]   Frame 37: 6 common corners
+[INFO]   Frame 38: 6 common corners
+[INFO]   Frame 39: 6 common corners
+[INFO]   Frame 40: 6 common corners
+[INFO]   Frame 41: 6 common corners
+[INFO]   Frame 42: 6 common corners
+[INFO]   Frame 43: 6 common corners
+[INFO]   Frame 44: 6 common corners
+[INFO]   Frame 45: 6 common corners
+[INFO]   Frame 46: 6 common corners
+[INFO]   Frame 47: 6 common corners
+[INFO]   Frame 48: 5 common corners
+[INFO]   Frame 49: 6 common corners
+[INFO]   Frame 50: 6 common corners
+[INFO]   Frame 51: 6 common corners
+[INFO]   Frame 52: 6 common corners
+[INFO]   Frame 53: 6 common corners
+[INFO]   Frame 54: 6 common corners
+[INFO]   Frame 55: 6 common corners
+[INFO]   Frame 56: 6 common corners
+[INFO]   Frame 57: 6 common corners
+[INFO]   Frame 58: 6 common corners
+[INFO] Valid pairs: 59/59
+[INFO] 
+--- Iteration 1/5 ---
+[INFO] Active frames: 59
+[INFO]   Camera A RMS: 0.1174 (fx=645.8, fy=674.4)
+[INFO]   Camera B RMS: 0.0956 (fx=766.5, fy=740.4)
+[INFO]   Stereo RMS: 0.8701
+[INFO]   Baseline: 1.275m
+[INFO]   Stereo RMS 0.8701 is good, stopping iteration
+[INFO] 
+  BEST RESULT: Stereo RMS=0.8701, 59 frames, baseline=1.275m
+[WARN] 
+  WARNING: Existing calibration (RMS=0.4324) is better than new (RMS=0.8701)
+[WARN]   Saving new calibration anyway - old one is backed up
+[INFO]   Backup saved: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\calibration\stereo_calibration.json.bak
+[INFO] Saved: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\calibration\stereo_calibration.json
+[INFO] [FLOOR] Mode ON
+[INFO]   Floor calibration: 4 points
+[INFO]     Blender Z values: [-0.8472206 -0.8565315 -0.8522218 -0.845324 ]
+[INFO]     Mean: -0.8503m, Std: 0.0044m, Range: 0.0112m
+[INFO]     Floor offset: 0.8503m
+[INFO] [FLOOR] Floor offset: 0.850m (std: 0.004m)
+[INFO] [REC] Countdown started
+[INFO] [REC] Recording started
+[INFO] [REC] Recording stopped
+[INFO] 
+============================================================
+[INFO] TAKE SAVED
+[INFO] ============================================================
+[INFO]   File: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\takes\take_20260302_213906.json
+[INFO]   Size: 0.8 MB
+[INFO]   Duration: 27.7s
+[INFO]   Recorded frames: 364
+[INFO]   Predicted frames: 0
+[INFO]   Dropped frames: 0
+[INFO]   FPS: 13.1
+[INFO]   Total outliers filtered: 3
+[INFO] 
+  Camera tracking:
+[INFO]     Total frames processed: 364
+[INFO]     Camera A lost: 0 (0%)
+[INFO]     Camera B lost: 0 (0%)
+[INFO]     Both lost: 0 (0%)
+[INFO] 
+  Frame timing:
+[INFO]     Mean grab delay: 0.26ms
+[INFO]     Max grab delay: 2.13ms
+[INFO]     Std grab delay: 0.33ms
+[INFO] 
+  Landmark visibility (sorted by coverage):
+[INFO]     [ 0] nose                : vis=1.000  coverage=100.0%  (364/364 frames)
+[INFO]     [ 1] left_eye_inner      : vis=1.000  coverage=100.0%  (364/364 frames)
+[INFO]     [ 2] left_eye            : vis=1.000  coverage=100.0%  (364/364 frames)
+[INFO]     [ 3] left_eye_outer      : vis=1.000  coverage=100.0%  (364/364 frames)
+[INFO]     [ 4] right_eye_inner     : vis=1.000  coverage=100.0%  (364/364 frames)
+[INFO]     [ 5] right_eye           : vis=1.000  coverage=100.0%  (364/364 frames)
+[INFO]     [ 6] right_eye_outer     : vis=1.000  coverage=100.0%  (364/364 frames)
+[INFO]     [ 7] left_ear            : vis=1.000  coverage=100.0%  (364/364 frames)
+[INFO]     [ 8] right_ear           : vis=1.000  coverage=100.0%  (364/364 frames)
+[INFO]     [ 9] mouth_left          : vis=1.000  coverage=100.0%  (364/364 frames)
+[INFO]     [10] mouth_right         : vis=1.000  coverage=100.0%  (364/364 frames)
+[INFO]     [11] left_shoulder       : vis=1.000  coverage=100.0%  (364/364 frames)
+[INFO]     [12] right_shoulder      : vis=1.000  coverage=100.0%  (364/364 frames)
+[INFO]     [13] left_elbow          : vis=0.971  coverage=100.0%  (364/364 frames)
+[INFO]     [15] left_wrist          : vis=0.978  coverage=100.0%  (364/364 frames)
+[INFO]     [17] left_pinky          : vis=0.964  coverage=100.0%  (364/364 frames)
+[INFO]     [19] left_index          : vis=0.967  coverage=100.0%  (364/364 frames)
+[INFO]     [21] left_thumb          : vis=0.963  coverage=100.0%  (364/364 frames)
+[INFO]     [23] left_hip            : vis=1.000  coverage=100.0%  (364/364 frames)
+[INFO]     [24] right_hip           : vis=1.000  coverage=100.0%  (364/364 frames)
+[INFO]     [25] left_knee           : vis=0.960  coverage=100.0%  (364/364 frames)
+[INFO]     [26] right_knee          : vis=0.942  coverage=100.0%  (364/364 frames)
+[INFO]     [27] left_ankle          : vis=0.964  coverage=100.0%  (364/364 frames)
+[INFO]     [28] right_ankle         : vis=0.952  coverage=100.0%  (364/364 frames)
+[INFO]     [29] left_heel           : vis=0.897  coverage=100.0%  (364/364 frames)
+[INFO]     [30] right_heel          : vis=0.858  coverage=100.0%  (364/364 frames)
+[INFO]     [31] left_foot_index     : vis=0.961  coverage=100.0%  (364/364 frames)
+[INFO]     [32] right_foot_index    : vis=0.955  coverage=100.0%  (364/364 frames)
+[INFO]     [20] right_index         : vis=0.927  coverage=93.1%  (339/364 frames)
+[INFO]     [22] right_thumb         : vis=0.924  coverage=92.9%  (338/364 frames)
+[INFO]     [16] right_wrist         : vis=0.947  coverage=92.6%  (337/364 frames)
+[INFO]     [18] right_pinky         : vis=0.925  coverage=92.6%  (337/364 frames)
+[INFO]     [14] right_elbow         : vis=0.946  coverage=89.6%  (326/364 frames)
+[INFO] [REC] Countdown started
+[INFO] [REC] Recording started
+[INFO] [REC] Recording stopped
+[INFO] 
+============================================================
+[INFO] TAKE SAVED
+[INFO] ============================================================
+[INFO]   File: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\takes\take_20260302_213944.json
+[INFO]   Size: 0.8 MB
+[INFO]   Duration: 27.0s
+[INFO]   Recorded frames: 355
+[INFO]   Predicted frames: 2
+[INFO]   Dropped frames: 0
+[INFO]   FPS: 13.2
+[INFO]   Total outliers filtered: 18
+[INFO] 
+  Camera tracking:
+[INFO]     Total frames processed: 355
+[INFO]     Camera A lost: 2 (0%)
+[INFO]     Camera B lost: 0 (0%)
+[INFO]     Both lost: 0 (0%)
+[INFO] 
+  Frame timing:
+[INFO]     Mean grab delay: 0.25ms
+[INFO]     Max grab delay: 1.78ms
+[INFO]     Std grab delay: 0.33ms
+[INFO] 
+  Landmark visibility (sorted by coverage):
+[INFO]     [ 0] nose                : vis=1.000  coverage=99.4%  (353/355 frames)
+[INFO]     [ 1] left_eye_inner      : vis=1.000  coverage=99.4%  (353/355 frames)
+[INFO]     [ 2] left_eye            : vis=1.000  coverage=99.4%  (353/355 frames)
+[INFO]     [ 3] left_eye_outer      : vis=1.000  coverage=99.4%  (353/355 frames)
+[INFO]     [ 4] right_eye_inner     : vis=1.000  coverage=99.4%  (353/355 frames)
+[INFO]     [ 5] right_eye           : vis=1.000  coverage=99.4%  (353/355 frames)
+[INFO]     [ 6] right_eye_outer     : vis=1.000  coverage=99.4%  (353/355 frames)
+[INFO]     [ 7] left_ear            : vis=1.000  coverage=99.4%  (353/355 frames)
+[INFO]     [ 8] right_ear           : vis=1.000  coverage=99.4%  (353/355 frames)
+[INFO]     [ 9] mouth_left          : vis=1.000  coverage=99.4%  (353/355 frames)
+[INFO]     [10] mouth_right         : vis=1.000  coverage=99.4%  (353/355 frames)
+[INFO]     [11] left_shoulder       : vis=1.000  coverage=99.4%  (353/355 frames)
+[INFO]     [12] right_shoulder      : vis=1.000  coverage=99.4%  (353/355 frames)
+[INFO]     [23] left_hip            : vis=0.999  coverage=99.4%  (353/355 frames)
+[INFO]     [24] right_hip           : vis=1.000  coverage=99.4%  (353/355 frames)
+[INFO]     [25] left_knee           : vis=0.947  coverage=99.4%  (353/355 frames)
+[INFO]     [26] right_knee          : vis=0.947  coverage=99.4%  (353/355 frames)
+[INFO]     [27] left_ankle          : vis=0.961  coverage=99.4%  (353/355 frames)
+[INFO]     [28] right_ankle         : vis=0.956  coverage=99.4%  (353/355 frames)
+[INFO]     [29] left_heel           : vis=0.901  coverage=99.4%  (353/355 frames)
+[INFO]     [30] right_heel          : vis=0.855  coverage=99.4%  (353/355 frames)
+[INFO]     [31] left_foot_index     : vis=0.960  coverage=99.4%  (353/355 frames)
+[INFO]     [32] right_foot_index    : vis=0.957  coverage=99.4%  (353/355 frames)
+[INFO]     [15] left_wrist          : vis=0.961  coverage=97.7%  (347/355 frames)
+[INFO]     [17] left_pinky          : vis=0.946  coverage=97.7%  (347/355 frames)
+[INFO]     [19] left_index          : vis=0.949  coverage=97.7%  (347/355 frames)
+[INFO]     [21] left_thumb          : vis=0.945  coverage=97.7%  (347/355 frames)
+[INFO]     [13] left_elbow          : vis=0.956  coverage=96.3%  (342/355 frames)
+[INFO]     [16] right_wrist         : vis=0.941  coverage=91.3%  (324/355 frames)
+[INFO]     [18] right_pinky         : vis=0.924  coverage=91.0%  (323/355 frames)
+[INFO]     [20] right_index         : vis=0.928  coverage=91.0%  (323/355 frames)
+[INFO]     [22] right_thumb         : vis=0.923  coverage=91.0%  (323/355 frames)
+[INFO]     [14] right_elbow         : vis=0.943  coverage=89.9%  (319/355 frames)
+[INFO] [REC] Countdown started
+[INFO] [REC] Recording started
+[INFO] [REC] Recording stopped
+[INFO] 
+============================================================
+[INFO] TAKE SAVED
+[INFO] ============================================================
+[INFO]   File: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\takes\take_20260302_214020.json
+[INFO]   Size: 0.7 MB
+[INFO]   Duration: 24.7s
+[INFO]   Recorded frames: 324
+[INFO]   Predicted frames: 2
+[INFO]   Dropped frames: 0
+[INFO]   FPS: 13.1
+[INFO]   Total outliers filtered: 16
+[INFO] 
+  Camera tracking:
+[INFO]     Total frames processed: 324
+[INFO]     Camera A lost: 2 (0%)
+[INFO]     Camera B lost: 0 (0%)
+[INFO]     Both lost: 0 (0%)
+[INFO] 
+  Frame timing:
+[INFO]     Mean grab delay: 0.25ms
+[INFO]     Max grab delay: 1.54ms
+[INFO]     Std grab delay: 0.32ms
+[INFO] 
+  Landmark visibility (sorted by coverage):
+[INFO]     [ 0] nose                : vis=1.000  coverage=99.4%  (322/324 frames)
+[INFO]     [ 1] left_eye_inner      : vis=1.000  coverage=99.4%  (322/324 frames)
+[INFO]     [ 2] left_eye            : vis=1.000  coverage=99.4%  (322/324 frames)
+[INFO]     [ 3] left_eye_outer      : vis=1.000  coverage=99.4%  (322/324 frames)
+[INFO]     [ 4] right_eye_inner     : vis=1.000  coverage=99.4%  (322/324 frames)
+[INFO]     [ 5] right_eye           : vis=1.000  coverage=99.4%  (322/324 frames)
+[INFO]     [ 6] right_eye_outer     : vis=1.000  coverage=99.4%  (322/324 frames)
+[INFO]     [ 7] left_ear            : vis=1.000  coverage=99.4%  (322/324 frames)
+[INFO]     [ 8] right_ear           : vis=1.000  coverage=99.4%  (322/324 frames)
+[INFO]     [ 9] mouth_left          : vis=1.000  coverage=99.4%  (322/324 frames)
+[INFO]     [10] mouth_right         : vis=1.000  coverage=99.4%  (322/324 frames)
+[INFO]     [11] left_shoulder       : vis=1.000  coverage=99.4%  (322/324 frames)
+[INFO]     [12] right_shoulder      : vis=1.000  coverage=99.4%  (322/324 frames)
+[INFO]     [13] left_elbow          : vis=0.957  coverage=99.4%  (322/324 frames)
+[INFO]     [15] left_wrist          : vis=0.974  coverage=99.4%  (322/324 frames)
+[INFO]     [17] left_pinky          : vis=0.960  coverage=99.4%  (322/324 frames)
+[INFO]     [19] left_index          : vis=0.963  coverage=99.4%  (322/324 frames)
+[INFO]     [21] left_thumb          : vis=0.958  coverage=99.4%  (322/324 frames)
+[INFO]     [23] left_hip            : vis=0.999  coverage=99.4%  (322/324 frames)
+[INFO]     [24] right_hip           : vis=1.000  coverage=99.4%  (322/324 frames)
+[INFO]     [25] left_knee           : vis=0.944  coverage=99.4%  (322/324 frames)
+[INFO]     [26] right_knee          : vis=0.948  coverage=99.4%  (322/324 frames)
+[INFO]     [27] left_ankle          : vis=0.959  coverage=99.4%  (322/324 frames)
+[INFO]     [28] right_ankle         : vis=0.958  coverage=99.4%  (322/324 frames)
+[INFO]     [29] left_heel           : vis=0.903  coverage=99.4%  (322/324 frames)
+[INFO]     [30] right_heel          : vis=0.850  coverage=99.4%  (322/324 frames)
+[INFO]     [31] left_foot_index     : vis=0.958  coverage=99.4%  (322/324 frames)
+[INFO]     [32] right_foot_index    : vis=0.958  coverage=99.4%  (322/324 frames)
+[INFO]     [16] right_wrist         : vis=0.952  coverage=90.4%  (293/324 frames)
+[INFO]     [18] right_pinky         : vis=0.937  coverage=90.4%  (293/324 frames)
+[INFO]     [20] right_index         : vis=0.940  coverage=90.4%  (293/324 frames)
+[INFO]     [22] right_thumb         : vis=0.937  coverage=90.4%  (293/324 frames)
+[INFO]     [14] right_elbow         : vis=0.955  coverage=88.9%  (288/324 frames)
+[INFO] 
+[DONE] Session ended
