@@ -53,11 +53,12 @@ from pathlib import Path
 CAM_A_INDEX = 3          # Sony ZV-1F (MSMF, 1280x720)
 CAM_B_INDEX = 0          # DroidCam USB (MSMF, 1920x1080)
 
-# ChArUco board: 10x5 dual-sheet board (printed, measured ~43mm squares)
+# ChArUco board: 10x5 dual-sheet board (printed, measured ~42mm squares)
+# Measured: between 1-5/8" (41.3mm) and 1-6/8" (42.9mm), using midpoint
 CHARUCO_COLS = 10
 CHARUCO_ROWS = 5
-CHARUCO_SQUARE_M = 0.043    # 43mm — measured from print
-CHARUCO_MARKER_M = 0.031    # 31mm (72% of square)
+CHARUCO_SQUARE_M = 0.042    # 42mm — midpoint of measured range
+CHARUCO_MARKER_M = 0.030    # 30mm (72% of square)
 
 # Paths - relative to this script's parent (MelodicCapStudio/)
 BASE_DIR = Path(__file__).parent.parent  # MelodicCapStudio/
@@ -1563,12 +1564,23 @@ def main():
                     log(f"[CAL] Frame {len(cal_frames_a)}: {len(common)} common corners")
 
             # Floor calibration
-            if floor_mode and board_a and board_b and calib_data:
-                success, msg = calibrate_floor(frame_a, frame_b, calib_data)
-                if success:
-                    floor_mode = False
-                    status = f"Floor OK: {msg}"
-                    log(f"[FLOOR] {msg}")
+            if floor_mode and calib_data:
+                if board_a and board_b:
+                    success, msg = calibrate_floor(frame_a, frame_b, calib_data)
+                    if success:
+                        floor_mode = False
+                        status = f"Floor OK: {msg}"
+                        log(f"[FLOOR] {msg}")
+                    else:
+                        status = f"Floor FAILED: {msg}"
+                        log(f"[FLOOR] Failed: {msg}", "WARN")
+                else:
+                    missing = []
+                    if not board_a:
+                        missing.append("A")
+                    if not board_b:
+                        missing.append("B")
+                    status = f"FLOOR: Board not seen in Cam {'+'.join(missing)} - move closer"
 
             # Countdown handling
             if countdown_active:
