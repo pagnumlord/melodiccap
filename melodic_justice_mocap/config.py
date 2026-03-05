@@ -204,10 +204,10 @@ class StereoConfig:
 @dataclass
 class CharucoBoardConfig:
     """Configuration for ChArUco calibration board."""
-    squares_x: int = 7
+    squares_x: int = 10
     squares_y: int = 5
-    square_length_meters: float = 0.04  # 4cm squares
-    marker_length_meters: float = 0.03  # 3cm markers
+    square_length_meters: float = 0.043  # 43mm squares (measured from printed 10x5 board)
+    marker_length_meters: float = 0.031  # 31mm markers (72% of square)
     dictionary_id: int = 0  # DICT_4X4_50
     
     def get_board_size_meters(self) -> Tuple[float, float]:

@@ -24,10 +24,10 @@ except ImportError:
     
     @dataclass
     class CharucoBoardConfig:
-        squares_x: int = 7
+        squares_x: int = 10
         squares_y: int = 5
-        square_length_meters: float = 0.04
-        marker_length_meters: float = 0.03
+        square_length_meters: float = 0.043
+        marker_length_meters: float = 0.031
         dictionary_id: int = 0
 
 

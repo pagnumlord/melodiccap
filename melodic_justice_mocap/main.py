@@ -157,7 +157,7 @@ class MocapGUI:
         board_frame.pack(fill='x', pady=5)
         
         ttk.Label(board_frame, text="Squares X:").grid(row=0, column=0, sticky='w')
-        self.squares_x_var = tk.StringVar(value="7")
+        self.squares_x_var = tk.StringVar(value="10")
         ttk.Entry(board_frame, textvariable=self.squares_x_var, width=10).grid(row=0, column=1)
         
         ttk.Label(board_frame, text="Squares Y:").grid(row=0, column=2, sticky='w', padx=(20, 0))
@@ -165,7 +165,7 @@ class MocapGUI:
         ttk.Entry(board_frame, textvariable=self.squares_y_var, width=10).grid(row=0, column=3)
         
         ttk.Label(board_frame, text="Square Size (cm):").grid(row=1, column=0, sticky='w', pady=(10, 0))
-        self.square_size_var = tk.StringVar(value="4.0")
+        self.square_size_var = tk.StringVar(value="4.3")
         ttk.Entry(board_frame, textvariable=self.square_size_var, width=10).grid(row=1, column=1, pady=(10, 0))
         
         ttk.Button(
