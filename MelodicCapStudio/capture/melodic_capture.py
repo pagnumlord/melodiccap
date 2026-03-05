@@ -50,18 +50,14 @@ from pathlib import Path
 # CONFIGURATION
 # =============================================================================
 
-CAM_A_INDEX = 2          # Sony ZV-1F (use DSHOW)
-CAM_B_INDEX = 0          # DroidCam (use CAP_ANY)
+CAM_A_INDEX = 3          # Sony ZV-1F (MSMF, 1280x720)
+CAM_B_INDEX = 0          # DroidCam USB (MSMF, 1920x1080)
 
-# ChArUco board configuration
-# OPTION A: Single 8.5x11" sheet (5x7 = 24 corners, 4x better than old 4x3)
-# OPTION B: Two sheets taped together (10x5 = 36 corners, 6x better)
-# IMPORTANT: Measure a printed square with a ruler and update CHARUCO_SQUARE_M!
-#            Printer scaling can be off by 1-3mm. Use ACTUAL measured value.
-CHARUCO_COLS = 5            # 5 for single sheet, 10 for dual sheet
-CHARUCO_ROWS = 7            # 7 for single sheet, 5 for dual sheet
-CHARUCO_SQUARE_M = 0.035    # 35mm for single sheet, 43mm for dual sheet — MEASURE!
-CHARUCO_MARKER_M = 0.025    # 25mm for single sheet, 31mm for dual sheet
+# ChArUco board: 10x5 dual-sheet board (printed, measured ~43mm squares)
+CHARUCO_COLS = 10
+CHARUCO_ROWS = 5
+CHARUCO_SQUARE_M = 0.043    # 43mm — measured from print
+CHARUCO_MARKER_M = 0.031    # 31mm (72% of square)
 
 # Paths - relative to this script's parent (MelodicCapStudio/)
 BASE_DIR = Path(__file__).parent.parent  # MelodicCapStudio/
