@@ -1248,8 +1248,8 @@ def main():
     # Open cameras
     log("\n[CAMERAS]")
 
-    log(f"  Opening Camera A (index {cam_a}, DSHOW)...")
-    cap_a = cv2.VideoCapture(cam_a, cv2.CAP_DSHOW)
+    log(f"  Opening Camera A (index {cam_a}, MSMF)...")
+    cap_a = cv2.VideoCapture(cam_a, cv2.CAP_MSMF)
     cap_a.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap_a.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     cap_a.set(cv2.CAP_PROP_BUFFERSIZE, 1)
