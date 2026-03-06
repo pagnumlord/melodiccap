@@ -60,6 +60,13 @@ CHARUCO_ROWS = 5
 CHARUCO_SQUARE_M = 0.042    # 42mm — midpoint of measured range
 CHARUCO_MARKER_M = 0.030    # 30mm (72% of square)
 
+# Floor ChArUco board: smaller 3x4 board for floor calibration
+# (easier to place on floor within both cameras' view)
+FLOOR_CHARUCO_COLS = 3
+FLOOR_CHARUCO_ROWS = 4
+FLOOR_CHARUCO_SQUARE_M = 0.0635   # 63.5mm squares
+FLOOR_CHARUCO_MARKER_M = 0.0476   # 47.6mm markers (75% of square)
+
 # Paths - relative to this script's parent (MelodicCapStudio/)
 BASE_DIR = Path(__file__).parent.parent  # MelodicCapStudio/
 CALIBRATION_FILE = BASE_DIR / "calibration" / "stereo_calibration.json"
@@ -625,6 +632,15 @@ detector = cv2.aruco.ArucoDetector(aruco_dict, params)
 board_corners_3d = board.getChessboardCorners()
 BOARD_MAX_CORNERS = (CHARUCO_COLS - 1) * (CHARUCO_ROWS - 1)
 
+# Floor board (separate smaller board for floor calibration)
+floor_board = cv2.aruco.CharucoBoard(
+    (FLOOR_CHARUCO_COLS, FLOOR_CHARUCO_ROWS),
+    FLOOR_CHARUCO_SQUARE_M,
+    FLOOR_CHARUCO_MARKER_M,
+    aruco_dict
+)
+FLOOR_BOARD_MAX_CORNERS = (FLOOR_CHARUCO_COLS - 1) * (FLOOR_CHARUCO_ROWS - 1)
+
 # MediaPipe landmark names for logging
 LANDMARK_NAMES = {
     0: "nose", 1: "left_eye_inner", 2: "left_eye", 3: "left_eye_outer",
@@ -653,6 +669,24 @@ def detect_charuco(frame):
 
     num, charuco_corners, charuco_ids = cv2.aruco.interpolateCornersCharuco(
         corners, ids, gray, board
+    )
+
+    if num is None or num < 4:
+        return None, None, len(ids)
+
+    return charuco_corners, charuco_ids, len(ids)
+
+
+def detect_charuco_floor(frame):
+    """Detect ChArUco corners using the smaller floor board."""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    corners, ids, _ = detector.detectMarkers(gray)
+
+    if ids is None or len(ids) < 2:
+        return None, None, 0
+
+    num, charuco_corners, charuco_ids = cv2.aruco.interpolateCornersCharuco(
+        corners, ids, gray, floor_board
     )
 
     if num is None or num < 4:
@@ -988,9 +1022,9 @@ def run_stereo_calibration(frames_a, frames_b, max_iterations=5, outlier_thresho
 
 
 def calibrate_floor(frame_a, frame_b, calib_data):
-    """Calibrate floor from board lying flat on ground."""
-    cc_a, ci_a, _ = detect_charuco(frame_a)
-    cc_b, ci_b, _ = detect_charuco(frame_b)
+    """Calibrate floor from smaller board lying flat on ground."""
+    cc_a, ci_a, _ = detect_charuco_floor(frame_a)
+    cc_b, ci_b, _ = detect_charuco_floor(frame_b)
 
     if cc_a is None:
         return False, "Board not detected in Camera A"
@@ -1223,6 +1257,7 @@ def main():
     log(f"    Calibration file: {CALIBRATION_FILE}")
     log(f"    Takes dir: {TAKES_DIR}")
     log(f"    ChArUco board: {CHARUCO_COLS}x{CHARUCO_ROWS} ({BOARD_MAX_CORNERS} max corners)")
+    log(f"    Floor board: {FLOOR_CHARUCO_COLS}x{FLOOR_CHARUCO_ROWS} ({FLOOR_BOARD_MAX_CORNERS} max corners, {FLOOR_CHARUCO_SQUARE_M*1000:.1f}mm squares)")
     if BOARD_MAX_CORNERS < 12:
         log(f"    NOTE: Small board ({BOARD_MAX_CORNERS} corners). Calibration uses joint optimization mode.", "WARN")
         log(f"    TIPS: Move board SLOWLY, ensure {BOARD_MAX_CORNERS - 1}+ corners visible in BOTH cameras,", "WARN")
@@ -1399,8 +1434,13 @@ def main():
 
             # Detect ChArUco (skip during recording to save CPU)
             if not recording:
-                cc_a, ci_a, markers_a = detect_charuco(frame_a)
-                cc_b, ci_b, markers_b = detect_charuco(frame_b)
+                if floor_mode:
+                    # Use smaller floor board for floor calibration
+                    cc_a, ci_a, markers_a = detect_charuco_floor(frame_a)
+                    cc_b, ci_b, markers_b = detect_charuco_floor(frame_b)
+                else:
+                    cc_a, ci_a, markers_a = detect_charuco(frame_a)
+                    cc_b, ci_b, markers_b = detect_charuco(frame_b)
 
                 board_a = cc_a is not None
                 board_b = cc_b is not None
