@@ -60,10 +60,11 @@ CHARUCO_ROWS = 5
 CHARUCO_SQUARE_M = 0.042    # 42mm — midpoint of measured range
 CHARUCO_MARKER_M = 0.030    # 30mm (72% of square)
 
-# Floor ChArUco board: smaller 3x4 board for floor calibration
+# Floor ChArUco board: smaller board for floor calibration
 # (easier to place on floor within both cameras' view)
-FLOOR_CHARUCO_COLS = 3
-FLOOR_CHARUCO_ROWS = 4
+# Try both orientations — set FLOOR_CHARUCO_COLS to the wider dimension
+FLOOR_CHARUCO_COLS = 4
+FLOOR_CHARUCO_ROWS = 3
 FLOOR_CHARUCO_SQUARE_M = 0.0635   # 63.5mm squares
 FLOOR_CHARUCO_MARKER_M = 0.0476   # 47.6mm markers (75% of square)
 
@@ -633,8 +634,15 @@ board_corners_3d = board.getChessboardCorners()
 BOARD_MAX_CORNERS = (CHARUCO_COLS - 1) * (CHARUCO_ROWS - 1)
 
 # Floor board (separate smaller board for floor calibration)
-floor_board = cv2.aruco.CharucoBoard(
+# Create both orientations — detection tries both and picks the winner
+floor_board_a = cv2.aruco.CharucoBoard(
     (FLOOR_CHARUCO_COLS, FLOOR_CHARUCO_ROWS),
+    FLOOR_CHARUCO_SQUARE_M,
+    FLOOR_CHARUCO_MARKER_M,
+    aruco_dict
+)
+floor_board_b = cv2.aruco.CharucoBoard(
+    (FLOOR_CHARUCO_ROWS, FLOOR_CHARUCO_COLS),  # swapped orientation
     FLOOR_CHARUCO_SQUARE_M,
     FLOOR_CHARUCO_MARKER_M,
     aruco_dict
@@ -677,22 +685,43 @@ def detect_charuco(frame):
     return charuco_corners, charuco_ids, len(ids)
 
 
-def detect_charuco_floor(frame):
-    """Detect ChArUco corners using the smaller floor board."""
+def detect_charuco_floor(frame, debug=False):
+    """Detect ChArUco corners using the smaller floor board.
+    Tries both orientations and picks whichever finds more corners."""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     corners, ids, _ = detector.detectMarkers(gray)
 
     if ids is None or len(ids) < 2:
+        if debug:
+            log(f"    [FLOOR DBG] No ArUco markers found")
         return None, None, 0
 
-    num, charuco_corners, charuco_ids = cv2.aruco.interpolateCornersCharuco(
-        corners, ids, gray, floor_board
-    )
+    if debug:
+        log(f"    [FLOOR DBG] Found {len(ids)} ArUco markers, IDs: {sorted(ids.flatten().tolist())}")
 
-    if num is None or num < 4:
+    # Try both orientations
+    best_num = 0
+    best_corners = None
+    best_ids = None
+    best_label = None
+
+    for label, fb in [("4x3", floor_board_a), ("3x4", floor_board_b)]:
+        num, cc, ci = cv2.aruco.interpolateCornersCharuco(corners, ids, gray, fb)
+        if num is not None and num > best_num:
+            best_num = num
+            best_corners = cc
+            best_ids = ci
+            best_label = label
+
+    if debug:
+        log(f"    [FLOOR DBG] Best orientation: {best_label}, charuco corners: {best_num}")
+
+    if best_num < 4:
+        if debug:
+            log(f"    [FLOOR DBG] Need >= 4 charuco corners, only got {best_num}")
         return None, None, len(ids)
 
-    return charuco_corners, charuco_ids, len(ids)
+    return best_corners, best_ids, len(ids)
 
 
 def draw_detection(frame, charuco_corners, charuco_ids, num_markers):
@@ -1023,8 +1052,9 @@ def run_stereo_calibration(frames_a, frames_b, max_iterations=5, outlier_thresho
 
 def calibrate_floor(frame_a, frame_b, calib_data):
     """Calibrate floor from smaller board lying flat on ground."""
-    cc_a, ci_a, _ = detect_charuco_floor(frame_a)
-    cc_b, ci_b, _ = detect_charuco_floor(frame_b)
+    log("  [FLOOR] Attempting floor calibration...")
+    cc_a, ci_a, _ = detect_charuco_floor(frame_a, debug=True)
+    cc_b, ci_b, _ = detect_charuco_floor(frame_b, debug=True)
 
     if cc_a is None:
         return False, "Board not detected in Camera A"
@@ -1617,10 +1647,10 @@ def main():
                 else:
                     missing = []
                     if not board_a:
-                        missing.append("A")
+                        missing.append(f"A({markers_a or 0}mkr)")
                     if not board_b:
-                        missing.append("B")
-                    status = f"FLOOR: Board not seen in Cam {'+'.join(missing)} - move closer"
+                        missing.append(f"B({markers_b or 0}mkr)")
+                    status = f"FLOOR: Not enough corners in {' '.join(missing)} - need 4+ charuco corners"
 
             # Countdown handling
             if countdown_active:
