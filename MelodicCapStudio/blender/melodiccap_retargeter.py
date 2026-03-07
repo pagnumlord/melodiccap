@@ -1,5 +1,5 @@
 """
-MelodicCap Retargeter v1.4
+MelodicCap Retargeter v1.5
 ==========================
 Clean retargeter combining:
 - v4's proven delta-from-reference IK approach (mathematically correct)
@@ -10,6 +10,8 @@ Clean retargeter combining:
 - Smart foot pinning (reduces sliding when feet should be planted)
 - 4-segment spine animation via virtual midpoints
 - Outlier filtering (catches MediaPipe landmark spikes)
+- Torso ROTATION from hip orientation (body yaw/tilt)
+- Spine TWIST distribution (shoulder twist relative to hips)
 
 For Blender 4.4+ with JaxRigify armature.
 
@@ -22,6 +24,18 @@ KEY DESIGN DECISIONS:
 - Pole targets use 3-point projection (Keemap algorithm) with delta-from-reference
 - FK rest axes from ACTUAL JaxRigify bone dump (A-pose: arms hang DOWN, not T-pose)
 - IK rotation rest axes from actual bone directions (hand_ik=-Z, foot_ik=+Y)
+
+v1.5 TORSO ROTATION + SPINE TWIST:
+- Torso bone now gets ROTATION keyframes in addition to location.
+  Rotation is derived from hip orientation: the vector from right_hip to left_hip
+  gives the body's lateral axis. Yaw (horizontal turn) and tilt are computed as
+  the angular change from the reference frame's hip orientation.
+  This is CRITICAL — without it the character never turns when you turn your body.
+- Spine twist: The old virtual midpoint approach produced COLLINEAR points, so all
+  4 spine segments got identical rotations (just the overall lean direction).
+  Now we compute the twist between shoulder line and hip line, and distribute it
+  across the spine segments. Lower segments follow hips, upper follow shoulders.
+- Enhanced frame-by-frame debugging: hip yaw, shoulder yaw, twist angle logged.
 
 v1.4 OUTLIER FILTERING:
 - Velocity-based pre-filter on raw landmarks before animation.
@@ -45,7 +59,7 @@ v1.3 CRITICAL FIXES (from Rigify property diagnostics):
 bl_info = {
     "name": "MelodicCap Retargeter",
     "author": "Karsten / MelodicCap Studio",
-    "version": (1, 4, 0),
+    "version": (1, 5, 0),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap motion capture data to JaxRigify armature",
@@ -55,6 +69,7 @@ bl_info = {
 import bpy
 import json
 import os
+import math
 import datetime
 from pathlib import Path
 from mathutils import Vector, Matrix, Quaternion
@@ -299,6 +314,175 @@ def compute_virtual_spine(landmarks):
     }
 
 
+def compute_body_orientation(landmarks):
+    """Compute hip and shoulder orientation from landmarks.
+
+    Returns a dict with:
+      hip_dir: Vector from right_hip to left_hip (lateral axis, +X direction)
+      shoulder_dir: Vector from right_shoulder to left_shoulder
+      hip_yaw: Angle of hip_dir projected onto XY plane (radians)
+      shoulder_yaw: Angle of shoulder_dir projected onto XY plane (radians)
+      spine_up: Direction from hip_mid to shoulder_mid (spine lean)
+      hip_forward: Forward direction from hip orientation (perpendicular to hip_dir, horizontal)
+    Or None if landmarks missing.
+    """
+    hip_l = get_lm(landmarks, 23)
+    hip_r = get_lm(landmarks, 24)
+    sh_l = get_lm(landmarks, 11)
+    sh_r = get_lm(landmarks, 12)
+
+    if not all([hip_l, hip_r, sh_l, sh_r]):
+        return None
+
+    hip_dir = hip_l - hip_r           # right→left, roughly +X in performer space
+    shoulder_dir = sh_l - sh_r        # right→left
+
+    hip_mid = (hip_l + hip_r) / 2
+    shoulder_mid = (sh_l + sh_r) / 2
+    spine_up = (shoulder_mid - hip_mid).normalized()
+
+    # Yaw angles from XY projection (atan2 of the lateral axis)
+    hip_yaw = math.atan2(hip_dir.y, hip_dir.x)
+    shoulder_yaw = math.atan2(shoulder_dir.y, shoulder_dir.x)
+
+    # Hip forward direction: perpendicular to hip_dir in XY plane, pointing forward (-Y)
+    hip_dir_xy = Vector((hip_dir.x, hip_dir.y, 0))
+    if hip_dir_xy.length > 0.01:
+        hip_dir_xy.normalize()
+        # Rotate 90° clockwise in XY: (x,y) → (y,-x) gives the forward direction
+        # For a person facing -Y with left at +X: hip_dir = +X, forward = -Y = (0,-1)
+        # Rotate (1,0) by -90° → (0,-1) ✓
+        hip_forward = Vector((hip_dir_xy.y, -hip_dir_xy.x, 0))
+    else:
+        hip_forward = Vector((0, -1, 0))
+
+    return {
+        'hip_dir': hip_dir,
+        'shoulder_dir': shoulder_dir,
+        'hip_yaw': hip_yaw,
+        'shoulder_yaw': shoulder_yaw,
+        'spine_up': spine_up,
+        'hip_forward': hip_forward,
+        'hip_mid': hip_mid,
+        'shoulder_mid': shoulder_mid,
+    }
+
+
+def compute_torso_rotation(cur_orient, ref_orient, world_inv_quat):
+    """Compute torso rotation quaternion from hip orientation change.
+
+    Uses the hip lateral axis (right→left) to determine body yaw (horizontal turn)
+    and the spine direction to capture forward/backward lean.
+
+    Args:
+        cur_orient: Current frame body orientation dict
+        ref_orient: Reference frame body orientation dict
+        world_inv_quat: Inverse of armature world rotation
+
+    Returns:
+        Quaternion in armature local space, or None.
+    """
+    ref_hip = ref_orient['hip_dir'].copy()
+    cur_hip = cur_orient['hip_dir'].copy()
+
+    if ref_hip.length < 0.01 or cur_hip.length < 0.01:
+        return None
+
+    ref_hip.normalize()
+    cur_hip.normalize()
+
+    # Full 3D rotation from reference hip direction to current hip direction
+    # This captures yaw (turning) + any roll/tilt of the hips
+    hip_rot = ref_hip.rotation_difference(cur_hip)
+
+    # Also capture spine lean: the direction from hip_mid to shoulder_mid
+    ref_up = ref_orient['spine_up'].copy()
+    cur_up = cur_orient['spine_up'].copy()
+
+    if ref_up.length > 0.01 and cur_up.length > 0.01:
+        ref_up.normalize()
+        cur_up.normalize()
+        lean_rot = ref_up.rotation_difference(cur_up)
+
+        # Blend: hip rotation captures yaw, lean captures tilt
+        # Use slerp to combine — hip yaw is primary, lean is secondary
+        # hip_rot handles lateral axis rotation, lean_rot handles forward/back tilt
+        combined = hip_rot @ lean_rot
+        # Normalize to prevent quaternion drift
+        combined.normalize()
+    else:
+        combined = hip_rot
+
+    # Transform to armature local space
+    local_rot = world_inv_quat @ combined @ world_inv_quat.conjugated()
+    local_rot.normalize()
+
+    return local_rot
+
+
+def compute_spine_twist_rotations(cur_orient, ref_orient, world_inv_quat):
+    """Compute per-segment spine rotations that include TWIST.
+
+    The old approach computed V2R from collinear midpoints, giving identical
+    rotations for all 4 spine segments (just overall lean, no twist).
+
+    New approach:
+    1. Compute the overall spine lean direction (hip_mid → shoulder_mid)
+    2. Compute the twist angle between shoulder line and hip line
+    3. Distribute twist across 4 segments with increasing weight toward shoulders
+    4. For each segment, combine its V2R lean rotation with its share of twist
+
+    Args:
+        cur_orient: Current frame body orientation dict
+        ref_orient: Reference frame body orientation dict
+        world_inv_quat: Inverse of armature world rotation
+
+    Returns:
+        Dict mapping spine bone name → Quaternion, or None.
+    """
+    # Twist angle: difference between shoulder yaw and hip yaw
+    cur_twist = cur_orient['shoulder_yaw'] - cur_orient['hip_yaw']
+    ref_twist = ref_orient['shoulder_yaw'] - ref_orient['hip_yaw']
+    delta_twist = cur_twist - ref_twist
+
+    # Normalize to [-pi, pi]
+    while delta_twist > math.pi:
+        delta_twist -= 2 * math.pi
+    while delta_twist < -math.pi:
+        delta_twist += 2 * math.pi
+
+    # Spine lean direction (for V2R base rotation)
+    cur_up = cur_orient['spine_up'].copy()
+    cur_up_local = world_inv_quat @ cur_up
+
+    # Twist weights: lower spine follows hips, upper follows shoulders
+    # segment 0 (spine_fk) = near hips → small twist
+    # segment 3 (spine_fk.003) = near shoulders → large twist
+    twist_weights = [0.1, 0.25, 0.5, 0.8]
+
+    segment_names = ['spine_fk', 'spine_fk.001', 'spine_fk.002', 'spine_fk.003']
+    result = {}
+
+    for i, bone_name in enumerate(segment_names):
+        rest_axis = BONE_REST_AXES.get(bone_name, Vector((0, 0, 1)))
+
+        # Base rotation: V2R from rest axis to current spine lean direction
+        base_quat = rest_axis.rotation_difference(cur_up_local)
+
+        # Twist rotation around the spine's up axis (local Z after lean)
+        twist_amount = delta_twist * twist_weights[i]
+        twist_axis = cur_up_local.normalized()
+        twist_quat = Quaternion(twist_axis, twist_amount)
+
+        # Combine: first apply lean, then twist on top
+        combined = twist_quat @ base_quat
+        combined.normalize()
+
+        result[bone_name] = combined
+
+    return result
+
+
 # =============================================================================
 # IMPORTER
 # =============================================================================
@@ -313,6 +497,7 @@ class MelodicCapImporter:
         # Reference frame data
         self.ref_hip = None
         self.ref_landmarks = None
+        self.ref_orientation = None  # Hip/shoulder orientation at frame 0
 
         # Scaling
         self.scale = 1.0
@@ -407,6 +592,22 @@ class MelodicCapImporter:
             return False
 
         log(f"\n  Reference frame hip: ({self.ref_hip.x:.3f}, {self.ref_hip.y:.3f}, {self.ref_hip.z:.3f})")
+
+        # --- Reference body orientation ---
+        self.ref_orientation = compute_body_orientation(self.ref_landmarks)
+        if self.ref_orientation:
+            hip_yaw_deg = math.degrees(self.ref_orientation['hip_yaw'])
+            sh_yaw_deg = math.degrees(self.ref_orientation['shoulder_yaw'])
+            twist_deg = sh_yaw_deg - hip_yaw_deg
+            fwd = self.ref_orientation['hip_forward']
+            log(f"  Reference hip yaw: {hip_yaw_deg:.1f}°")
+            log(f"  Reference shoulder yaw: {sh_yaw_deg:.1f}°")
+            log(f"  Reference hip-shoulder twist: {twist_deg:.1f}°")
+            log(f"  Reference hip forward: ({fwd.x:.3f}, {fwd.y:.3f}, {fwd.z:.3f})")
+            hd = self.ref_orientation['hip_dir']
+            log(f"  Reference hip lateral (R→L): ({hd.x:.3f}, {hd.y:.3f}, {hd.z:.3f})")
+        else:
+            log("  WARNING: Could not compute reference body orientation!", "WARN")
 
         # --- Person height: nose to ankle midpoint + 0.15m ---
         nose = get_lm(self.ref_landmarks, 0)
@@ -589,12 +790,12 @@ class MelodicCapImporter:
 
     def apply_animation(self):
         """Apply animation using hybrid approach:
-        - Torso: delta from reference hip (root motion)
+        - Torso: delta from reference hip (root motion) + hip orientation rotation
         - IK targets: delta from reference positions (hands/feet)
         - IK rotation: wrist/foot orientation from forearm/shin direction
         - Pole targets: 3-point projection for elbow/knee bend direction
         - FK rotations: V2R with per-bone rest axes (visible in FK mode only)
-        - Spine: V2R with virtual midpoints (body twist/bend)
+        - Spine: V2R lean + twist distribution (shoulder twist relative to hips)
         """
         log("\n" + "=" * 60)
         log("APPLYING ANIMATION")
@@ -697,6 +898,9 @@ class MelodicCapImporter:
         # How many frames get full detailed logging (first N)
         DETAIL_FRAMES = 5
 
+        # Extra orientation sampling for debugging (log yaw/twist at these intervals)
+        ORIENT_LOG_INTERVAL = 25
+
         # Process each frame
         log(f"  Processing {len(frames)} frames (detailed log for first {DETAIL_FRAMES})...")
 
@@ -720,8 +924,10 @@ class MelodicCapImporter:
                     f"{hip.y - self.ref_hip.y:.4f}, {hip.z - self.ref_hip.z:.4f})")
 
             # =================================================================
-            # ROOT MOTION (TORSO)
+            # ROOT MOTION (TORSO) — location + rotation
             # =================================================================
+            cur_orient = compute_body_orientation(lms)
+
             if has_torso:
                 delta = (hip - self.ref_hip) * self.scale
                 local_delta = world_inv.to_3x3() @ delta
@@ -736,6 +942,29 @@ class MelodicCapImporter:
 
                 if detail:
                     log(f"    TORSO loc: ({local_delta.x:.4f}, {local_delta.y:.4f}, {local_delta.z:.4f})")
+
+                # TORSO ROTATION from hip orientation change
+                if cur_orient and self.ref_orientation:
+                    torso_rot = compute_torso_rotation(
+                        cur_orient, self.ref_orientation,
+                        world_inv.to_quaternion())
+
+                    if torso_rot:
+                        torso.rotation_mode = 'QUATERNION'
+                        torso.rotation_quaternion = torso_rot
+                        torso.keyframe_insert(data_path="rotation_quaternion", frame=bf)
+
+                        track_range(self.ranges, 'torso_rot',
+                                    [torso_rot.w, torso_rot.x, torso_rot.y], 'rot')
+                        self.stats['keys'] += 1
+
+                        if detail:
+                            hip_yaw = math.degrees(cur_orient['hip_yaw'])
+                            ref_yaw = math.degrees(self.ref_orientation['hip_yaw'])
+                            delta_yaw = hip_yaw - ref_yaw
+                            log(f"    TORSO rot: w={torso_rot.w:.3f} ({torso_rot.x:.3f}, "
+                                f"{torso_rot.y:.3f}, {torso_rot.z:.3f})  "
+                                f"hip_yaw={hip_yaw:.1f}° (Δ{delta_yaw:+.1f}°)")
 
             # =================================================================
             # IK TARGETS (HANDS AND FEET)
@@ -881,39 +1110,80 @@ class MelodicCapImporter:
                             f"  dir=({target_dir_local.x:.3f}, {target_dir_local.y:.3f}, {target_dir_local.z:.3f})")
 
             # =================================================================
-            # SPINE ANIMATION (V2R with virtual midpoints)
+            # SPINE ANIMATION (V2R with lean + twist distribution)
             # =================================================================
             if animate_spine and avail_spine:
-                spine_pts = compute_virtual_spine(lms)
-                if spine_pts:
-                    for bone_name, (start_key, end_key) in avail_spine.items():
-                        s_pos = spine_pts.get(start_key)
-                        e_pos = spine_pts.get(end_key)
-                        if not s_pos or not e_pos:
-                            continue
+                if cur_orient and self.ref_orientation:
+                    # New approach: lean + twist per segment
+                    spine_rots = compute_spine_twist_rotations(
+                        cur_orient, self.ref_orientation,
+                        world_inv.to_quaternion())
 
-                        target_dir = (e_pos - s_pos).normalized()
-                        target_dir_local = world_inv.to_quaternion() @ target_dir
+                    if spine_rots:
+                        for bone_name in avail_spine:
+                            quat = spine_rots.get(bone_name)
+                            if not quat:
+                                continue
 
-                        rest_axis = BONE_REST_AXES.get(bone_name, Vector((0, 0, 1)))
-                        quat = rest_axis.rotation_difference(target_dir_local)
+                            pb = pose_bones[bone_name]
+                            pb.rotation_quaternion = quat
+                            pb.keyframe_insert(data_path="rotation_quaternion", frame=bf)
 
-                        pb = pose_bones[bone_name]
-                        pb.rotation_quaternion = quat
-                        pb.keyframe_insert(data_path="rotation_quaternion", frame=bf)
+                            track_range(self.ranges, bone_name, [quat.w, quat.x, quat.y], 'rot')
+                            self.stats['keys'] += 1
+                            self.stats['bones'].add(bone_name)
 
-                        track_range(self.ranges, bone_name, [quat.w, quat.x, quat.y], 'rot')
-                        self.stats['keys'] += 1
-                        self.stats['bones'].add(bone_name)
+                            if detail:
+                                twist_deg = math.degrees(
+                                    (cur_orient['shoulder_yaw'] - cur_orient['hip_yaw']) -
+                                    (self.ref_orientation['shoulder_yaw'] - self.ref_orientation['hip_yaw']))
+                                log(f"    {bone_name} rot: w={quat.w:.3f} ({quat.x:.3f}, {quat.y:.3f}, {quat.z:.3f})"
+                                    f"  twist={twist_deg:+.1f}°")
+                else:
+                    # Fallback: old collinear midpoint approach if orientation unavailable
+                    spine_pts = compute_virtual_spine(lms)
+                    if spine_pts:
+                        for bone_name, (start_key, end_key) in avail_spine.items():
+                            s_pos = spine_pts.get(start_key)
+                            e_pos = spine_pts.get(end_key)
+                            if not s_pos or not e_pos:
+                                continue
 
-                        if detail:
-                            log(f"    {bone_name} rot: w={quat.w:.3f} ({quat.x:.3f}, {quat.y:.3f}, {quat.z:.3f})"
-                                f"  dir=({target_dir_local.x:.3f}, {target_dir_local.y:.3f}, {target_dir_local.z:.3f})")
+                            target_dir = (e_pos - s_pos).normalized()
+                            target_dir_local = world_inv.to_quaternion() @ target_dir
+
+                            rest_axis = BONE_REST_AXES.get(bone_name, Vector((0, 0, 1)))
+                            quat = rest_axis.rotation_difference(target_dir_local)
+
+                            pb = pose_bones[bone_name]
+                            pb.rotation_quaternion = quat
+                            pb.keyframe_insert(data_path="rotation_quaternion", frame=bf)
+
+                            track_range(self.ranges, bone_name, [quat.w, quat.x, quat.y], 'rot')
+                            self.stats['keys'] += 1
+                            self.stats['bones'].add(bone_name)
+
+                            if detail:
+                                log(f"    {bone_name} rot: w={quat.w:.3f} ({quat.x:.3f}, {quat.y:.3f}, {quat.z:.3f})"
+                                    f"  dir=({target_dir_local.x:.3f}, {target_dir_local.y:.3f}, {target_dir_local.z:.3f})"
+                                    f"  [FALLBACK-collinear]")
 
             self.stats['frames'] += 1
 
-            if fidx % 50 == 0 and fidx >= DETAIL_FRAMES:
-                log(f"    Frame {fidx}/{len(frames)}")
+            # Periodic orientation logging for debugging
+            if fidx >= DETAIL_FRAMES and fidx % ORIENT_LOG_INTERVAL == 0:
+                parts = [f"    Frame {fidx}/{len(frames)}"]
+                if cur_orient and self.ref_orientation:
+                    hip_yaw = math.degrees(cur_orient['hip_yaw'])
+                    ref_yaw = math.degrees(self.ref_orientation['hip_yaw'])
+                    sh_yaw = math.degrees(cur_orient['shoulder_yaw'])
+                    ref_sh_yaw = math.degrees(self.ref_orientation['shoulder_yaw'])
+                    twist = (cur_orient['shoulder_yaw'] - cur_orient['hip_yaw']) - \
+                            (self.ref_orientation['shoulder_yaw'] - self.ref_orientation['hip_yaw'])
+                    parts.append(f"hip_yaw={hip_yaw:.1f}°(Δ{hip_yaw-ref_yaw:+.1f}°)")
+                    parts.append(f"sh_yaw={sh_yaw:.1f}°(Δ{sh_yaw-ref_sh_yaw:+.1f}°)")
+                    parts.append(f"twist={math.degrees(twist):+.1f}°")
+                log("  ".join(parts))
 
         return True
 
@@ -1324,7 +1594,7 @@ def register():
         description="Higher = stickier feet (reduces sliding). 0 = disabled"
     )
 
-    log("MelodicCap Retargeter v1.4 registered")
+    log("MelodicCap Retargeter v1.5 registered")
 
 def unregister():
     for c in reversed(classes):
