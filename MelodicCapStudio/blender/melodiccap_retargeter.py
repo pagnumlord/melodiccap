@@ -1,5 +1,5 @@
 """
-MelodicCap Retargeter v1.5
+MelodicCap Retargeter v2.0
 ==========================
 Clean retargeter combining:
 - v4's proven delta-from-reference IK approach (mathematically correct)
@@ -24,6 +24,21 @@ KEY DESIGN DECISIONS:
 - Pole targets use 3-point projection (Keemap algorithm) with delta-from-reference
 - FK rest axes from ACTUAL JaxRigify bone dump (A-pose: arms hang DOWN, not T-pose)
 - IK rotation rest axes from actual bone directions (hand_ik=-Z, foot_ik=+Y)
+
+v2.0 PROFESSIONAL UPGRADE:
+- Velocity-based foot contact detection with hysteresis state machine
+  (MOVING→PLANTING→PLANTED). Locks both position AND rotation when planted.
+- Hand rotation from wrist→index finger (landmarks 15→19, 16→20) instead
+  of forearm direction. Captures actual wrist twist and hand orientation.
+- Foot rotation from ankle→foot_index (landmarks 27→31, 28→32) instead
+  of shin direction. Captures actual toe direction.
+- Fallback to forearm/shin direction when finger/toe landmarks unavailable.
+- Quaternion continuity enforcement on ALL rotation channels (IK, FK, spine,
+  torso, head). Prevents 360° spin artifacts from hemisphere flips.
+- Relaxed finger rest pose (natural curl, static keyframe on start frame).
+- Head/neck animation from nose + ear landmarks (V2R facing direction).
+- Tighter hip velocity limit (6.0→4.0 m/s) in outlier filter.
+- Safe unregister with try/except for version-transition robustness.
 
 v1.5 TORSO ROTATION + SPINE TWIST:
 - Torso bone now gets ROTATION keyframes in addition to location.
@@ -59,7 +74,7 @@ v1.3 CRITICAL FIXES (from Rigify property diagnostics):
 bl_info = {
     "name": "MelodicCap Retargeter",
     "author": "Karsten / MelodicCap Studio",
-    "version": (1, 5, 0),
+    "version": (2, 0, 0),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap motion capture data to JaxRigify armature",
@@ -81,10 +96,13 @@ from bpy_extras.io_utils import ImportHelper
 # =============================================================================
 
 LANDMARKS = {
-    0: "nose", 11: "left_shoulder", 12: "right_shoulder",
+    0: "nose", 7: "left_ear", 8: "right_ear",
+    11: "left_shoulder", 12: "right_shoulder",
     13: "left_elbow", 14: "right_elbow", 15: "left_wrist", 16: "right_wrist",
+    19: "left_index", 20: "right_index",
     23: "left_hip", 24: "right_hip", 25: "left_knee", 26: "right_knee",
     27: "left_ankle", 28: "right_ankle",
+    29: "left_heel", 30: "right_heel", 31: "left_foot_index", 32: "right_foot_index",
 }
 
 # =============================================================================
@@ -130,11 +148,32 @@ POLE_TARGETS = {
 #   hand_ik.L dir=( 0.147,-0.048,-0.988)  hand_ik.R dir=(-0.077,-0.128,-0.989)
 #   foot_ik.L dir=( 0.000, 1.000, 0.000)  foot_ik.R dir=( 0.000, 1.000, 0.000)
 IK_ROTATION = {
+    'hand_ik.L': (15, 19, Vector(( 0.147, -0.048, -0.988))),  # L wrist→index finger
+    'hand_ik.R': (16, 20, Vector((-0.077, -0.128, -0.989))),  # R wrist→index finger
+    'foot_ik.L': (27, 31, Vector((0, 1, 0))),                  # L ankle→foot_index (toe dir)
+    'foot_ik.R': (28, 32, Vector((0, 1, 0))),                  # R ankle→foot_index (toe dir)
+}
+
+# Fallback IK rotation: used when primary landmarks aren't available
+IK_ROTATION_FALLBACK = {
     'hand_ik.L': (13, 15, Vector(( 0.147, -0.048, -0.988))),  # L forearm dir
     'hand_ik.R': (14, 16, Vector((-0.077, -0.128, -0.989))),  # R forearm dir
-    'foot_ik.L': (25, 27, Vector((0, 1, 0))),                  # L shin dir → feet point +Y
-    'foot_ik.R': (26, 28, Vector((0, 1, 0))),                  # R shin dir → feet point +Y
+    'foot_ik.L': (25, 27, Vector((0, 1, 0))),                  # L shin dir
+    'foot_ik.R': (26, 28, Vector((0, 1, 0))),                  # R shin dir
 }
+
+# Relaxed finger curl angles (degrees) for natural rest pose
+# Applied per-joint: .01 = proximal, .02 = middle, .03 = distal
+FINGER_CURL = {
+    'f_index.01': 12, 'f_index.02': 15, 'f_index.03': 10,
+    'f_middle.01': 14, 'f_middle.02': 17, 'f_middle.03': 12,
+    'f_ring.01': 16, 'f_ring.02': 19, 'f_ring.03': 14,
+    'f_pinky.01': 18, 'f_pinky.02': 21, 'f_pinky.03': 16,
+    'thumb.01': 10, 'thumb.02': 8, 'thumb.03': 5,
+}
+
+# Head tracking landmarks: nose (0), left ear (7), right ear (8)
+HEAD_LANDMARKS = {'nose': 0, 'left_ear': 7, 'right_ear': 8}
 
 # Spine V2R using virtual midpoints (4-segment spine)
 SPINE_CHAINS = {
@@ -483,6 +522,18 @@ def compute_spine_twist_rotations(cur_orient, ref_orient, world_inv_quat):
     return result
 
 
+def ensure_quaternion_continuity(q_current, q_prev):
+    """Ensure quaternion takes the shortest path from the previous frame.
+
+    Quaternions q and -q represent the same rotation, but interpolating
+    between q_prev and -q_current goes the long way around (360° spin).
+    If the dot product is negative, negate to keep continuity.
+    """
+    if q_prev is not None and q_current.dot(q_prev) < 0:
+        q_current.negate()
+    return q_current
+
+
 # =============================================================================
 # IMPORTER
 # =============================================================================
@@ -508,6 +559,19 @@ class MelodicCapImporter:
 
         # Reference pole positions (mocap world space, for delta computation)
         self.ref_pole_positions = {}
+
+        # Foot contact state machine (velocity-based with hysteresis)
+        self.foot_state = {}          # bone -> 'MOVING'|'PLANTING'|'PLANTED'
+        self.foot_velocity_buf = {}   # bone -> list of recent positions (ring buffer)
+        self.foot_locked_pos = {}     # bone -> locked position delta
+        self.foot_locked_rot = {}     # bone -> locked rotation quaternion
+        self.foot_state_frames = {}   # bone -> frames in current state
+
+        # Quaternion continuity tracking (prevents hemisphere flips / 360° pops)
+        self.prev_quats = {}          # bone_name -> previous frame's quaternion
+
+        # Head animation reference
+        self.ref_head_dir = None      # Reference head direction for V2R
 
         # Stats
         self.stats = {'frames': 0, 'keys': 0, 'bones': set()}
@@ -682,7 +746,7 @@ class MelodicCapImporter:
             15: 15.0, 16: 15.0,  # wrists
             17: 15.0, 18: 15.0, 19: 15.0, 20: 15.0,  # fingers
             21: 15.0, 22: 15.0,
-            23: 6.0, 24: 6.0,  # hips
+            23: 4.0, 24: 4.0,  # hips (center of mass, can't move fast)
             25: 10.0, 26: 10.0,  # knees
             27: 10.0, 28: 10.0,  # ankles
             29: 10.0, 30: 10.0, 31: 10.0, 32: 10.0,  # feet
@@ -710,7 +774,7 @@ class MelodicCapImporter:
         for lm_start, lm_end, _ in IK_ROTATION.values():
             used_landmarks.add(lm_start)
             used_landmarks.add(lm_end)
-        used_landmarks.update([0, 11, 12, 23, 24])  # spine/height landmarks
+        used_landmarks.update([0, 7, 8, 11, 12, 23, 24])  # spine/height/head landmarks
 
         # Track state per landmark
         prev_good = {}       # lm_idx -> Vector (last accepted position)
@@ -788,6 +852,34 @@ class MelodicCapImporter:
 
         log(f"  Set {'IK' if use_ik else 'FK'} mode on all limbs")
 
+    def apply_finger_rest_pose(self, start_frame):
+        """Apply a natural relaxed finger curl pose (static, not animated per-frame).
+
+        Sets all finger bones to a slight curl on the start frame.
+        Since no finger animation data overwrites these, they persist.
+        """
+        pose_bones = self.armature.pose.bones
+        finger_count = 0
+
+        for bone_base, angle_deg in FINGER_CURL.items():
+            for side in ['.L', '.R']:
+                bone_name = bone_base + side
+                if bone_name not in pose_bones:
+                    continue
+
+                pb = pose_bones[bone_name]
+                pb.rotation_mode = 'QUATERNION'
+
+                # Curl around local X axis (flex axis for fingers)
+                angle_rad = math.radians(angle_deg)
+                curl_quat = Quaternion(Vector((1, 0, 0)), angle_rad)
+
+                pb.rotation_quaternion = curl_quat
+                pb.keyframe_insert(data_path="rotation_quaternion", frame=start_frame)
+                finger_count += 1
+
+        log(f"  Applied relaxed finger pose to {finger_count} bones")
+
     def apply_animation(self):
         """Apply animation using hybrid approach:
         - Torso: delta from reference hip (root motion) + hip orientation rotation
@@ -811,12 +903,21 @@ class MelodicCapImporter:
         animate_poles = self.settings.get('animate_poles', True)
         animate_ik_rot = self.settings.get('animate_ik_rot', True)
 
+        # Compute capture FPS for velocity calculations
+        duration = self.take_data.get('duration_seconds', len(frames) / 10.0)
+        fps = len(frames) / max(duration, 0.1)
+        log(f"  Capture FPS: {fps:.1f}")
+
         # Pre-filter outlier landmarks (modifies frame data in-place)
         if self.settings.get('filter_outliers', True):
             self.prefilter_landmarks()
 
         # Force IK mode
         self.set_ik_fk_mode(use_ik=True)
+
+        # Apply relaxed finger pose (static, before animation loop)
+        if self.settings.get('finger_curl', True):
+            self.apply_finger_rest_pose(start)
 
         # Configure Rigify properties for correct mocap retargeting
         log("  Configuring Rigify properties:")
@@ -892,8 +993,16 @@ class MelodicCapImporter:
             f"{len(avail_fk)} FK chains, {len(avail_spine)} spine segments, "
             f"{len(avail_ik_rot)} IK rotations, torso={'yes' if has_torso else 'no'}")
 
-        # Smart pinning state (for feet)
-        prev_deltas = {}
+        # Foot contact detection settings
+        foot_plant_vel = self.settings.get('foot_plant_velocity', 0.3)
+        foot_lift_vel = self.settings.get('foot_lift_velocity', 0.5)
+
+        # Initialize foot state for each foot IK bone
+        for bone_name in avail_ik:
+            if 'foot' in bone_name:
+                self.foot_state[bone_name] = 'MOVING'
+                self.foot_velocity_buf[bone_name] = []
+                self.foot_state_frames[bone_name] = 0
 
         # How many frames get full detailed logging (first N)
         DETAIL_FRAMES = 5
@@ -950,6 +1059,11 @@ class MelodicCapImporter:
                         world_inv.to_quaternion())
 
                     if torso_rot:
+                        # Quaternion continuity
+                        prev_q = self.prev_quats.get('torso_rot')
+                        torso_rot = ensure_quaternion_continuity(torso_rot, prev_q)
+                        self.prev_quats['torso_rot'] = torso_rot.copy()
+
                         torso.rotation_mode = 'QUATERNION'
                         torso.rotation_quaternion = torso_rot
                         torso.keyframe_insert(data_path="rotation_quaternion", frame=bf)
@@ -992,15 +1106,57 @@ class MelodicCapImporter:
 
                 local_delta = world_inv.to_3x3() @ mocap_delta
 
-                # Smart pinning
+                # Velocity-based foot contact detection with state machine
                 pinned = False
-                if 'foot' in ik_bone and pin_threshold > 0:
-                    prev = prev_deltas.get(ik_bone)
-                    if prev is not None:
-                        if (local_delta - prev).length < pin_threshold:
-                            local_delta = prev.copy()
-                            pinned = True
-                    prev_deltas[ik_bone] = local_delta.copy()
+                if 'foot' in ik_bone and ik_bone in self.foot_state:
+                    # Track position history for velocity computation
+                    buf = self.foot_velocity_buf[ik_bone]
+                    buf.append(local_delta.copy())
+                    if len(buf) > 3:
+                        buf.pop(0)
+
+                    # Compute velocity over the buffer window
+                    if len(buf) >= 2:
+                        # Use frame-to-frame displacement scaled by fps
+                        frame_vel = (buf[-1] - buf[-2]).length * fps
+                    else:
+                        frame_vel = float('inf')
+
+                    state = self.foot_state[ik_bone]
+                    self.foot_state_frames[ik_bone] += 1
+
+                    if state == 'MOVING':
+                        if frame_vel < foot_plant_vel:
+                            self.foot_state[ik_bone] = 'PLANTING'
+                            self.foot_state_frames[ik_bone] = 1
+                    elif state == 'PLANTING':
+                        if frame_vel < foot_plant_vel:
+                            if self.foot_state_frames[ik_bone] >= 2:
+                                # Confirmed plant — lock position (rotation locked in IK rot section)
+                                self.foot_state[ik_bone] = 'PLANTED'
+                                self.foot_locked_pos[ik_bone] = local_delta.copy()
+                                # Pre-lock current rotation if available from previous frame
+                                prev_rot = self.prev_quats.get(ik_bone + '_rot')
+                                if prev_rot:
+                                    self.foot_locked_rot[ik_bone] = prev_rot.copy()
+                                self.foot_state_frames[ik_bone] = 0
+                        else:
+                            # Velocity went back up, cancel planting
+                            self.foot_state[ik_bone] = 'MOVING'
+                            self.foot_state_frames[ik_bone] = 0
+                    elif state == 'PLANTED':
+                        if frame_vel > foot_lift_vel:
+                            if self.foot_state_frames[ik_bone] >= 2:
+                                # Confirmed lift
+                                self.foot_state[ik_bone] = 'MOVING'
+                                self.foot_state_frames[ik_bone] = 0
+                        else:
+                            self.foot_state_frames[ik_bone] = 0
+
+                    # Apply locked position when planted
+                    if self.foot_state[ik_bone] == 'PLANTED' and ik_bone in self.foot_locked_pos:
+                        local_delta = self.foot_locked_pos[ik_bone].copy()
+                        pinned = True
 
                 pb = pose_bones[ik_bone]
                 pb.location = local_delta
@@ -1021,17 +1177,50 @@ class MelodicCapImporter:
                         f"  lm{lm_idx}({lm_name}){flags}")
 
             # =================================================================
-            # IK TARGET ROTATION
+            # IK TARGET ROTATION (with fallback and quaternion continuity)
             # =================================================================
             for ik_bone, (lm_start, lm_end, rest_ax) in avail_ik_rot.items():
+                # Skip rotation for planted feet — use locked rotation
+                if self.foot_state.get(ik_bone) == 'PLANTED' and ik_bone in self.foot_locked_rot:
+                    quat = self.foot_locked_rot[ik_bone].copy()
+                    pb = pose_bones[ik_bone]
+                    pb.rotation_mode = 'QUATERNION'
+                    pb.rotation_quaternion = quat
+                    pb.keyframe_insert(data_path="rotation_quaternion", frame=bf)
+                    track_range(self.ranges, ik_bone + '_rot', [quat.w, quat.x, quat.y], 'rot')
+                    self.stats['keys'] += 1
+                    if detail:
+                        log(f"    {ik_bone} rot: LOCKED (planted)")
+                    continue
+
                 p1 = get_lm(lms, lm_start)
                 p2 = get_lm(lms, lm_end)
+                used_fallback = False
+
+                # Fallback to forearm/shin direction if finger/toe landmarks missing
+                if not p1 or not p2:
+                    fb = IK_ROTATION_FALLBACK.get(ik_bone)
+                    if fb:
+                        p1 = get_lm(lms, fb[0])
+                        p2 = get_lm(lms, fb[1])
+                        rest_ax = fb[2]
+                        used_fallback = True
+
                 if not p1 or not p2:
                     continue
 
                 limb_dir = (p2 - p1).normalized()
                 dir_local = world_inv.to_quaternion() @ limb_dir
                 quat = rest_ax.rotation_difference(dir_local)
+
+                # Quaternion continuity: prevent hemisphere flips
+                prev_q = self.prev_quats.get(ik_bone + '_rot')
+                quat = ensure_quaternion_continuity(quat, prev_q)
+                self.prev_quats[ik_bone + '_rot'] = quat.copy()
+
+                # Store rotation for foot locking
+                if 'foot' in ik_bone and self.foot_state.get(ik_bone) == 'PLANTED':
+                    self.foot_locked_rot[ik_bone] = quat.copy()
 
                 pb = pose_bones[ik_bone]
                 pb.rotation_mode = 'QUATERNION'
@@ -1042,8 +1231,9 @@ class MelodicCapImporter:
                 self.stats['keys'] += 1
 
                 if detail:
+                    fb_tag = " [FALLBACK]" if used_fallback else ""
                     log(f"    {ik_bone} rot: w={quat.w:.3f} ({quat.x:.3f}, {quat.y:.3f}, {quat.z:.3f})"
-                        f"  dir_local=({dir_local.x:.3f}, {dir_local.y:.3f}, {dir_local.z:.3f})")
+                        f"  dir_local=({dir_local.x:.3f}, {dir_local.y:.3f}, {dir_local.z:.3f}){fb_tag}")
 
             # =================================================================
             # POLE TARGETS
@@ -1097,6 +1287,11 @@ class MelodicCapImporter:
 
                     quat = rest_axis.rotation_difference(target_dir_local)
 
+                    # Quaternion continuity
+                    prev_q = self.prev_quats.get(fk_bone)
+                    quat = ensure_quaternion_continuity(quat, prev_q)
+                    self.prev_quats[fk_bone] = quat.copy()
+
                     pb = pose_bones[fk_bone]
                     pb.rotation_quaternion = quat
                     pb.keyframe_insert(data_path="rotation_quaternion", frame=bf)
@@ -1124,6 +1319,11 @@ class MelodicCapImporter:
                             quat = spine_rots.get(bone_name)
                             if not quat:
                                 continue
+
+                            # Quaternion continuity
+                            prev_q = self.prev_quats.get(bone_name)
+                            quat = ensure_quaternion_continuity(quat, prev_q)
+                            self.prev_quats[bone_name] = quat.copy()
 
                             pb = pose_bones[bone_name]
                             pb.rotation_quaternion = quat
@@ -1167,6 +1367,44 @@ class MelodicCapImporter:
                                 log(f"    {bone_name} rot: w={quat.w:.3f} ({quat.x:.3f}, {quat.y:.3f}, {quat.z:.3f})"
                                     f"  dir=({target_dir_local.x:.3f}, {target_dir_local.y:.3f}, {target_dir_local.z:.3f})"
                                     f"  [FALLBACK-collinear]")
+
+            # =================================================================
+            # HEAD ANIMATION (nose + ear midpoint → head facing direction)
+            # =================================================================
+            if 'head' in pose_bones:
+                nose = get_lm(lms, 0)
+                ear_l = get_lm(lms, 7)
+                ear_r = get_lm(lms, 8)
+                if nose and ear_l and ear_r:
+                    ear_mid = (ear_l + ear_r) / 2
+                    head_dir = (nose - ear_mid)
+                    if head_dir.length > 0.01:
+                        head_dir.normalize()
+                        head_dir_local = world_inv.to_quaternion() @ head_dir
+
+                        # Compute reference head direction on first frame
+                        if self.ref_head_dir is None:
+                            self.ref_head_dir = head_dir_local.copy()
+
+                        # V2R: rotation from reference to current head direction
+                        quat = self.ref_head_dir.rotation_difference(head_dir_local)
+
+                        # Quaternion continuity
+                        prev_q = self.prev_quats.get('head')
+                        quat = ensure_quaternion_continuity(quat, prev_q)
+                        self.prev_quats['head'] = quat.copy()
+
+                        pb = pose_bones['head']
+                        pb.rotation_mode = 'QUATERNION'
+                        pb.rotation_quaternion = quat
+                        pb.keyframe_insert(data_path="rotation_quaternion", frame=bf)
+
+                        track_range(self.ranges, 'head', [quat.w, quat.x, quat.y], 'rot')
+                        self.stats['keys'] += 1
+                        self.stats['bones'].add('head')
+
+                        if detail:
+                            log(f"    head rot: w={quat.w:.3f} ({quat.x:.3f}, {quat.y:.3f}, {quat.z:.3f})")
 
             self.stats['frames'] += 1
 
@@ -1281,6 +1519,9 @@ class MELODICCAP_OT_import(bpy.types.Operator, ImportHelper):
             'pin_threshold': context.scene.melodiccap_pin_threshold,
             'filter_outliers': context.scene.melodiccap_filter_outliers,
             'outlier_velocity': context.scene.melodiccap_outlier_velocity,
+            'foot_plant_velocity': context.scene.melodiccap_foot_plant_velocity,
+            'foot_lift_velocity': context.scene.melodiccap_foot_lift_velocity,
+            'finger_curl': context.scene.melodiccap_finger_curl,
         }
 
         log(f"\n  Settings:")
@@ -1499,17 +1740,31 @@ class MELODICCAP_PT_panel(bpy.types.Panel):
         box = layout.box()
         box.label(text="Settings:", icon='SETTINGS')
         box.prop(context.scene, "melodiccap_start_frame")
-        box.prop(context.scene, "melodiccap_pin_threshold")
         box.separator()
+
+        # Foot contact settings
+        box.label(text="Foot Contact:")
+        box.prop(context.scene, "melodiccap_foot_plant_velocity")
+        box.prop(context.scene, "melodiccap_foot_lift_velocity")
+        box.prop(context.scene, "melodiccap_ground_clamp")
+        box.separator()
+
+        # Finger pose
+        box.prop(context.scene, "melodiccap_finger_curl")
+        box.separator()
+
+        # Outlier filtering
         box.prop(context.scene, "melodiccap_filter_outliers")
         if context.scene.melodiccap_filter_outliers:
             box.prop(context.scene, "melodiccap_outlier_velocity")
         box.separator()
+
+        # Animation channels
+        box.label(text="Animation Channels:")
         box.prop(context.scene, "melodiccap_animate_poles")
         box.prop(context.scene, "melodiccap_animate_ik_rot")
         box.prop(context.scene, "melodiccap_animate_fk")
         box.prop(context.scene, "melodiccap_animate_spine")
-        box.prop(context.scene, "melodiccap_ground_clamp")
 
         # Actions
         box = layout.box()
@@ -1587,28 +1842,52 @@ def register():
         description="Prevent feet from going below floor level"
     )
     bpy.types.Scene.melodiccap_pin_threshold = FloatProperty(
-        name="Foot Pin Threshold",
+        name="Foot Pin Threshold (legacy)",
         default=0.02,
         min=0.0,
         max=0.2,
-        description="Higher = stickier feet (reduces sliding). 0 = disabled"
+        description="Legacy position-delta pinning. Use foot plant velocity instead"
+    )
+    bpy.types.Scene.melodiccap_foot_plant_velocity = FloatProperty(
+        name="Foot Plant Velocity",
+        default=0.3,
+        min=0.05,
+        max=1.0,
+        description="Foot plants when velocity drops below this (m/s). Lower = stricter"
+    )
+    bpy.types.Scene.melodiccap_foot_lift_velocity = FloatProperty(
+        name="Foot Lift Velocity",
+        default=0.5,
+        min=0.1,
+        max=2.0,
+        description="Foot lifts when velocity exceeds this (m/s). Higher = stickier"
+    )
+    bpy.types.Scene.melodiccap_finger_curl = BoolProperty(
+        name="Relaxed Finger Pose",
+        default=True,
+        description="Apply natural finger curl (static rest pose)"
     )
 
-    log("MelodicCap Retargeter v1.5 registered")
+    log("MelodicCap Retargeter v2.0 registered")
 
 def unregister():
     for c in reversed(classes):
         bpy.utils.unregister_class(c)
 
-    del bpy.types.Scene.melodiccap_start_frame
-    del bpy.types.Scene.melodiccap_filter_outliers
-    del bpy.types.Scene.melodiccap_outlier_velocity
-    del bpy.types.Scene.melodiccap_animate_poles
-    del bpy.types.Scene.melodiccap_animate_ik_rot
-    del bpy.types.Scene.melodiccap_animate_fk
-    del bpy.types.Scene.melodiccap_animate_spine
-    del bpy.types.Scene.melodiccap_ground_clamp
-    del bpy.types.Scene.melodiccap_pin_threshold
+    props = [
+        'melodiccap_start_frame', 'melodiccap_filter_outliers',
+        'melodiccap_outlier_velocity', 'melodiccap_animate_poles',
+        'melodiccap_animate_ik_rot', 'melodiccap_animate_fk',
+        'melodiccap_animate_spine', 'melodiccap_ground_clamp',
+        'melodiccap_pin_threshold',
+        'melodiccap_foot_plant_velocity', 'melodiccap_foot_lift_velocity',
+        'melodiccap_finger_curl',
+    ]
+    for prop in props:
+        try:
+            delattr(bpy.types.Scene, prop)
+        except AttributeError:
+            pass
 
 if __name__ == "__main__":
     register()

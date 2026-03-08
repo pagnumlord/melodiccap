@@ -1,7 +1,18 @@
 """
-MelodicCap Studio - Motion Capture v2.2
+MelodicCap Studio - Motion Capture v3.0
 ========================================
 Based on capture v8 (proven: 100% tracking, Kalman smoothing, 30-frame grace period).
+
+v3.0 changes (from v2.2):
+- Parallel camera grabs via ThreadedCamera (eliminates serial grab delay)
+- Parallel MediaPipe processing via ThreadPoolExecutor (~2x FPS improvement)
+- --lite flag for fast capture (model_complexity=0)
+- --offline mode: process pre-recorded video clips with heavy model (complexity=2)
+  - Flash sync: automatic frame synchronization between two video files
+  - No time pressure, every frame processed, best quality
+- Acceleration-based outlier detection (catches sudden velocity spikes)
+- Tighter outlier thresholds: spatial 3.0→2.0m, hip velocity 6.0→4.0 m/s
+- CLI argument parser (replaces positional-only cam indices)
 
 v2.2 changes (from v2.1):
 - Post-processing pipeline on take save:
@@ -42,7 +53,10 @@ import json
 import os
 import time
 import sys
+import threading
 import traceback
+import argparse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -87,7 +101,9 @@ MEDIAPIPE_MIN_TRACKING_CONF = 0.3
 
 # Outlier filter: reject landmarks more than this many meters from origin
 # Prevents bad triangulation spikes (seen up to +/-715m in production takes)
-OUTLIER_THRESHOLD_M = 3.0
+# Reduced from 3.0 to 2.0: indoor capture with stereo cameras at ~1-2m baseline
+# should never produce valid landmarks beyond 2m from origin
+OUTLIER_THRESHOLD_M = 2.0
 
 # Minimum visibility score to accept a landmark from MediaPipe
 MIN_VISIBILITY = 0.3
@@ -226,8 +242,8 @@ def postprocess_take(frames, log_fn=None):
         '15': 15.0, '16': 15.0,
         # Fingertips: fast
         '17': 15.0, '18': 15.0, '19': 15.0, '20': 15.0,
-        # Hips: slow (core of body)
-        '23': 6.0, '24': 6.0,
+        # Hips: slow (core of body, center of mass can't move fast)
+        '23': 4.0, '24': 4.0,
         # Knees: moderate
         '25': 10.0, '26': 10.0,
         # Ankles/feet: moderate
@@ -277,6 +293,60 @@ def postprocess_take(frames, log_fn=None):
         for lm_key, count in worst:
             name = LANDMARK_NAMES.get(int(lm_key), f"lm_{lm_key}")
             _log(f"      {name} ({lm_key}): {count} outliers")
+
+    # --- Step 1b: Acceleration-based outlier detection ---
+    _log("\n  [Step 1b] Acceleration-based outlier rejection")
+    accel_replacements = 0
+
+    # Max acceleration thresholds (m/s^2) by body part
+    MAX_ACCEL = {
+        '0': 80, '7': 80, '8': 80,                           # head
+        '11': 100, '12': 100,                                  # shoulders
+        '13': 150, '14': 150,                                  # elbows
+        '15': 200, '16': 200,                                  # wrists
+        '23': 50, '24': 50,                                    # hips
+        '25': 100, '26': 100,                                  # knees
+        '27': 100, '28': 100,                                  # ankles
+    }
+    DEFAULT_MAX_ACCEL = 150
+
+    prev_vel = {}  # lm_key -> velocity vector from previous frame
+    for fidx in range(1, len(frames)):
+        lms = frames[fidx].get('landmarks', {})
+        prev_lms = frames[fidx - 1].get('landmarks', {})
+
+        for lm_key in list(lms.keys()):
+            pos = lms.get(lm_key)
+            prev_pos = prev_lms.get(lm_key)
+            if not pos or not prev_pos:
+                continue
+
+            # Current velocity
+            vel = [(pos[i] - prev_pos[i]) * actual_fps for i in range(3)]
+
+            if lm_key in prev_vel:
+                pv = prev_vel[lm_key]
+                # Acceleration = change in velocity per second
+                accel_sq = sum(((vel[i] - pv[i]) * actual_fps) ** 2 for i in range(3))
+                max_a = MAX_ACCEL.get(lm_key, DEFAULT_MAX_ACCEL)
+                if accel_sq > max_a * max_a:
+                    # Replace with interpolation from neighbors
+                    if fidx + 1 < len(frames):
+                        next_lms = frames[fidx + 1].get('landmarks', {})
+                        next_pos = next_lms.get(lm_key)
+                        if next_pos:
+                            lms[lm_key] = [(prev_pos[i] + next_pos[i]) / 2 for i in range(3)]
+                        else:
+                            lms[lm_key] = list(prev_pos)
+                    else:
+                        lms[lm_key] = list(prev_pos)
+                    accel_replacements += 1
+                    # Reset velocity to avoid cascade
+                    vel = [(lms[lm_key][i] - prev_pos[i]) * actual_fps for i in range(3)]
+
+            prev_vel[lm_key] = vel
+
+    _log(f"    Replaced {accel_replacements} acceleration-spike positions")
 
     # --- Step 2: Bone-length stabilization (ALWAYS enforce, no tolerance) ---
     _log("\n  [Step 2] Bone-length stabilization (strict enforcement)")
@@ -578,7 +648,8 @@ def postprocess_take(frames, log_fn=None):
     _log(f"\n  DATA QUALITY REPORT:")
     _log(f"    Input frames:  {n_original}")
     _log(f"    Output frames: {len(frames)}")
-    _log(f"    Outliers fixed: {outlier_replacements}")
+    _log(f"    Velocity outliers fixed: {outlier_replacements}")
+    _log(f"    Acceleration outliers fixed: {accel_replacements}")
     _log(f"    Bone corrections: {corrections} (initial) + {re_corrections} (post-smooth)")
     _log(f"    Joint-angle fixes: {angle_fixes}")
     _log(f"    Floor clamps: {floor_clamps}")
@@ -1254,23 +1325,369 @@ def triangulate_landmarks(landmarks_a, landmarks_b, calib_data, img_size):
 
 
 # =============================================================================
+# THREADED CAMERA (parallel frame grabs)
+# =============================================================================
+
+class ThreadedCamera:
+    """Wraps a cv2.VideoCapture to grab frames in a background thread.
+
+    Eliminates serial grab delay — both cameras are read simultaneously.
+    The main loop calls read() to get the latest frame instantly.
+    """
+    def __init__(self, cap):
+        self.cap = cap
+        self.frame = None
+        self.ret = False
+        self.lock = threading.Lock()
+        self.running = True
+        self.thread = threading.Thread(target=self._reader, daemon=True)
+        self.thread.start()
+
+    def _reader(self):
+        while self.running:
+            ret, frame = self.cap.read()
+            with self.lock:
+                self.ret = ret
+                self.frame = frame
+
+    def read(self):
+        with self.lock:
+            return self.ret, self.frame.copy() if self.frame is not None else None
+
+    def release(self):
+        self.running = False
+        self.thread.join(timeout=2.0)
+        self.cap.release()
+
+    def get(self, prop):
+        return self.cap.get(prop)
+
+    def set(self, prop, val):
+        return self.cap.set(prop, val)
+
+    def isOpened(self):
+        return self.cap.isOpened()
+
+
+# =============================================================================
+# OFFLINE CLIP-BASED PROCESSING
+# =============================================================================
+
+def find_flash_frame(cap, threshold=50, max_frames=300):
+    """Scan for a bright flash frame to use as sync point.
+
+    Returns the frame index with the largest brightness spike, or 0 if none found.
+    """
+    prev_brightness = 0
+    best_delta = 0
+    best_frame = 0
+
+    for frame_idx in range(max_frames):
+        ret, frame = cap.read()
+        if not ret:
+            break
+        brightness = float(np.mean(frame))
+        delta = brightness - prev_brightness
+        if delta > best_delta and delta > threshold:
+            best_delta = delta
+            best_frame = frame_idx
+        prev_brightness = brightness
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # rewind
+    return best_frame if best_delta > threshold else 0
+
+
+def process_offline(video_a_path, video_b_path, calib_path=None):
+    """Process two pre-recorded video files for motion capture.
+
+    Uses the heavy MediaPipe model (complexity=2) with no time pressure,
+    processes every frame, and applies full post-processing pipeline.
+
+    Args:
+        video_a_path: Path to Camera A video file
+        video_b_path: Path to Camera B video file
+        calib_path: Optional path to calibration JSON (default: auto-detect)
+    """
+    log_init("offline")
+
+    log("=" * 60)
+    log("MELODICCAP STUDIO - OFFLINE PROCESSING")
+    log("=" * 60)
+
+    # Load calibration
+    cal_file = Path(calib_path) if calib_path else CALIBRATION_FILE
+    if not cal_file.exists():
+        log(f"Calibration file not found: {cal_file}", "ERROR")
+        log("Run live calibration first (C then S), then use --offline", "ERROR")
+        log_close()
+        return
+
+    with open(cal_file, 'r') as f:
+        calib_data = json.load(f)
+
+    log(f"  Calibration: RMS={calib_data.get('rms_stereo', '?'):.4f}, "
+        f"baseline={calib_data.get('baseline_meters', '?'):.3f}m")
+
+    # Open video files
+    cap_a = cv2.VideoCapture(video_a_path)
+    cap_b = cv2.VideoCapture(video_b_path)
+
+    if not cap_a.isOpened():
+        log(f"Failed to open video A: {video_a_path}", "ERROR")
+        log_close()
+        return
+    if not cap_b.isOpened():
+        log(f"Failed to open video B: {video_b_path}", "ERROR")
+        cap_a.release()
+        log_close()
+        return
+
+    fps_a = cap_a.get(cv2.CAP_PROP_FPS)
+    fps_b = cap_b.get(cv2.CAP_PROP_FPS)
+    total_a = int(cap_a.get(cv2.CAP_PROP_FRAME_COUNT))
+    total_b = int(cap_b.get(cv2.CAP_PROP_FRAME_COUNT))
+    w_a = int(cap_a.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h_a = int(cap_a.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    w_b = int(cap_b.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h_b = int(cap_b.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    log(f"  Video A: {video_a_path}")
+    log(f"    {w_a}x{h_a} @ {fps_a:.1f}fps, {total_a} frames")
+    log(f"  Video B: {video_b_path}")
+    log(f"    {w_b}x{h_b} @ {fps_b:.1f}fps, {total_b} frames")
+
+    # Determine processing resolution (match calibration)
+    cal_size = calib_data.get('image_size', [w_a, h_a])
+    PROC_W, PROC_H = cal_size[0], cal_size[1]
+    log(f"  Processing resolution: {PROC_W}x{PROC_H} (from calibration)")
+
+    # Flash sync: find sync point in both videos
+    log("\n  [SYNC] Scanning for flash sync...")
+    sync_a = find_flash_frame(cap_a)
+    sync_b = find_flash_frame(cap_b)
+
+    if sync_a > 0 or sync_b > 0:
+        log(f"    Flash detected: Video A frame {sync_a}, Video B frame {sync_b}")
+        cap_a.set(cv2.CAP_PROP_POS_FRAMES, sync_a)
+        cap_b.set(cv2.CAP_PROP_POS_FRAMES, sync_b)
+        remaining_a = total_a - sync_a
+        remaining_b = total_b - sync_b
+    else:
+        log(f"    No flash detected — assuming simultaneous start")
+        remaining_a = total_a
+        remaining_b = total_b
+
+    total_frames = min(remaining_a, remaining_b)
+    log(f"    Processing {total_frames} synchronized frames")
+
+    # Initialize MediaPipe with heavy model (no time pressure)
+    mp_pose = mp.solutions.pose
+    pose_a = mp_pose.Pose(
+        static_image_mode=False,
+        model_complexity=2,  # Heavy model for best accuracy
+        min_detection_confidence=MEDIAPIPE_MIN_DETECTION_CONF,
+        min_tracking_confidence=MEDIAPIPE_MIN_TRACKING_CONF
+    )
+    pose_b = mp_pose.Pose(
+        static_image_mode=False,
+        model_complexity=2,
+        min_detection_confidence=MEDIAPIPE_MIN_DETECTION_CONF,
+        min_tracking_confidence=MEDIAPIPE_MIN_TRACKING_CONF
+    )
+
+    # Kalman filters for smoothing
+    kalman_filters = {}
+    recorded_frames = []
+    all_visibility = []
+    total_outliers = 0
+    start_time = time.time()
+
+    log(f"\n  Processing frames...")
+
+    for frame_idx in range(total_frames):
+        ret_a, frame_a = cap_a.read()
+        ret_b, frame_b = cap_b.read()
+
+        if not ret_a or not ret_b:
+            break
+
+        # Resize to calibration resolution
+        if frame_a.shape[1] != PROC_W or frame_a.shape[0] != PROC_H:
+            frame_a = cv2.resize(frame_a, (PROC_W, PROC_H))
+        if frame_b.shape[1] != PROC_W or frame_b.shape[0] != PROC_H:
+            frame_b = cv2.resize(frame_b, (PROC_W, PROC_H))
+
+        # Process poses
+        rgb_a = cv2.cvtColor(frame_a, cv2.COLOR_BGR2RGB)
+        rgb_b = cv2.cvtColor(frame_b, cv2.COLOR_BGR2RGB)
+        results_a = pose_a.process(rgb_a)
+        results_b = pose_b.process(rgb_b)
+
+        if results_a.pose_landmarks and results_b.pose_landmarks:
+            img_size = (PROC_W, PROC_H)
+            points_3d, vis_data, outlier_count = triangulate_landmarks(
+                results_a.pose_landmarks,
+                results_b.pose_landmarks,
+                calib_data,
+                img_size
+            )
+            total_outliers += outlier_count
+
+            # Kalman smoothing
+            smoothed = {}
+            for idx, pt in points_3d.items():
+                if idx not in kalman_filters:
+                    kalman_filters[idx] = KalmanFilter3D()
+                filtered = kalman_filters[idx].update(pt)
+                if filtered is not None:
+                    smoothed[idx] = filtered
+
+            if len(smoothed) > 0:
+                timestamp = frame_idx / fps_a  # Use video A's fps for timing
+                recorded_frames.append({
+                    'timestamp': timestamp,
+                    'landmarks': smoothed,
+                    'num_landmarks': len(smoothed),
+                    'predicted': False,
+                    'outliers_this_frame': outlier_count,
+                })
+                all_visibility.append(vis_data)
+
+        # Progress logging
+        if frame_idx % 100 == 0 and frame_idx > 0:
+            elapsed = time.time() - start_time
+            fps_proc = frame_idx / elapsed
+            eta = (total_frames - frame_idx) / fps_proc
+            log(f"    Frame {frame_idx}/{total_frames} ({fps_proc:.1f} fps, ETA {eta:.0f}s)")
+
+    processing_time = time.time() - start_time
+    log(f"\n  Processing complete: {len(recorded_frames)} frames in {processing_time:.1f}s "
+        f"({len(recorded_frames)/max(processing_time, 0.1):.1f} fps)")
+
+    cap_a.release()
+    cap_b.release()
+    pose_a.close()
+    pose_b.close()
+
+    if len(recorded_frames) < 5:
+        log("Too few frames captured — check videos and calibration", "ERROR")
+        log_close()
+        return
+
+    # Post-process
+    recorded_frames = postprocess_take(recorded_frames, log_fn=log)
+
+    # Save take
+    TAKES_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = TAKES_DIR / f"take_offline_{timestamp}.json"
+
+    # Visibility summary
+    vis_summary = {}
+    for vis_frame in all_visibility:
+        for lm_idx, vis in vis_frame.items():
+            if lm_idx not in vis_summary:
+                vis_summary[lm_idx] = {'count': 0, 'total_avg': 0}
+            vis_summary[lm_idx]['count'] += 1
+            vis_summary[lm_idx]['total_avg'] += vis['vis_avg']
+
+    vis_avg_per_lm = {}
+    for lm_idx, data in vis_summary.items():
+        avg = data['total_avg'] / max(data['count'], 1)
+        name = LANDMARK_NAMES.get(lm_idx, f"lm_{lm_idx}")
+        vis_avg_per_lm[str(lm_idx)] = {
+            'name': name,
+            'avg_visibility': round(avg, 3),
+            'frames_visible': data['count'],
+            'coverage_pct': round(data['count'] / len(recorded_frames) * 100, 1),
+        }
+
+    take_data = {
+        'version': 'studio-2.2-offline',
+        'timestamp': datetime.now().isoformat(),
+        'capture_mode': 'offline',
+        'source_videos': {
+            'video_a': str(video_a_path),
+            'video_b': str(video_b_path),
+        },
+        'duration_seconds': recorded_frames[-1]['timestamp'] if recorded_frames else 0,
+        'frame_count': len(recorded_frames),
+        'predicted_frames': 0,
+        'dropped_frames': total_frames - len(recorded_frames),
+        'total_outliers_filtered': total_outliers,
+        'calibration': {
+            'rms_stereo': calib_data.get('rms_stereo'),
+            'baseline': calib_data.get('baseline_meters'),
+            'floor_offset': calib_data.get('floor_z_offset', 0),
+        },
+        'capture_settings': {
+            'processing_resolution': f"{PROC_W}x{PROC_H}",
+            'mediapipe_complexity': 2,
+            'outlier_threshold_m': OUTLIER_THRESHOLD_M,
+            'min_visibility': MIN_VISIBILITY,
+        },
+        'processing_stats': {
+            'processing_time_seconds': round(processing_time, 1),
+            'processing_fps': round(len(recorded_frames) / max(processing_time, 0.1), 1),
+        },
+        'landmark_visibility': vis_avg_per_lm,
+        'frames': recorded_frames,
+    }
+
+    with open(filename, 'w') as f:
+        json.dump(take_data, f)
+
+    file_size_mb = filename.stat().st_size / 1024 / 1024
+
+    log("\n" + "=" * 60)
+    log("OFFLINE TAKE SAVED")
+    log("=" * 60)
+    log(f"  File: {filename}")
+    log(f"  Size: {file_size_mb:.1f} MB")
+    log(f"  Frames: {len(recorded_frames)}")
+    log(f"  Duration: {take_data['duration_seconds']:.1f}s")
+    log(f"  Processing time: {processing_time:.1f}s")
+    log(f"  Outliers filtered: {total_outliers}")
+
+    log_close()
+    print(f"\nSaved: {filename}")
+
+
+# =============================================================================
 # MAIN APPLICATION
 # =============================================================================
 
 def main():
-    # Parse optional camera index overrides
-    cam_a = CAM_A_INDEX
-    cam_b = CAM_B_INDEX
-    if len(sys.argv) >= 3:
-        cam_a = int(sys.argv[1])
-        cam_b = int(sys.argv[2])
-        print(f"Using camera indices from args: A={cam_a}, B={cam_b}")
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='MelodicCap Studio - Motion Capture')
+    parser.add_argument('cam_a', nargs='?', type=int, default=CAM_A_INDEX,
+                        help=f'Camera A index (default: {CAM_A_INDEX})')
+    parser.add_argument('cam_b', nargs='?', type=int, default=CAM_B_INDEX,
+                        help=f'Camera B index (default: {CAM_B_INDEX})')
+    parser.add_argument('--lite', action='store_true',
+                        help='Use lite MediaPipe model (faster, less accurate)')
+    parser.add_argument('--offline', nargs=2, metavar=('VIDEO_A', 'VIDEO_B'),
+                        help='Offline mode: process two video files instead of live cameras')
+    parser.add_argument('--calib', type=str, default=None,
+                        help='Path to calibration JSON (default: auto-detect)')
+
+    args = parser.parse_args()
+    cam_a = args.cam_a
+    cam_b = args.cam_b
+
+    # Handle offline mode
+    if args.offline:
+        process_offline(args.offline[0], args.offline[1], args.calib)
+        return
+
+    # Lite mode overrides model complexity
+    model_complexity = 0 if args.lite else MEDIAPIPE_MODEL_COMPLEXITY
 
     # Initialize logging
     log_init("session")
 
     log("=" * 60)
-    log("MELODICCAP STUDIO - MOTION CAPTURE v2.2")
+    log("MELODICCAP STUDIO - MOTION CAPTURE v3.0")
     log("=" * 60)
 
     log(f"\n  Configuration:")
@@ -1298,15 +1715,17 @@ def main():
     mp_draw = mp.solutions.drawing_utils
 
     # Separate pose detectors for each camera
+    log(f"  MediaPipe model complexity: {model_complexity}" +
+        (" (LITE)" if model_complexity == 0 else ""))
     pose_a = mp_pose.Pose(
         static_image_mode=False,
-        model_complexity=MEDIAPIPE_MODEL_COMPLEXITY,
+        model_complexity=model_complexity,
         min_detection_confidence=MEDIAPIPE_MIN_DETECTION_CONF,
         min_tracking_confidence=MEDIAPIPE_MIN_TRACKING_CONF
     )
     pose_b = mp_pose.Pose(
         static_image_mode=False,
-        model_complexity=MEDIAPIPE_MODEL_COMPLEXITY,
+        model_complexity=model_complexity,
         min_detection_confidence=MEDIAPIPE_MIN_DETECTION_CONF,
         min_tracking_confidence=MEDIAPIPE_MIN_TRACKING_CONF
     )
@@ -1402,6 +1821,13 @@ def main():
     log("  R = Start/stop recording motion capture")
     log("  Q = Quit")
 
+    # Wrap cameras in threaded readers for parallel grabs during recording
+    threaded_a = ThreadedCamera(cap_a)
+    threaded_b = ThreadedCamera(cap_b)
+
+    # Thread pool for parallel MediaPipe processing
+    mp_executor = ThreadPoolExecutor(max_workers=2)
+
     # State
     cal_frames_a = []
     cal_frames_b = []
@@ -1440,14 +1866,13 @@ def main():
 
     try:
         while True:
-            # Measure inter-camera grab delay
+            # Read frames from threaded cameras (near-simultaneous)
             t_grab_a = time.time()
-            ret_a, frame_a = cap_a.read()
-            t_grab_b = time.time()
-            ret_b, frame_b = cap_b.read()
+            ret_a, frame_a = threaded_a.read()
+            ret_b, frame_b = threaded_b.read()
             t_grab_done = time.time()
 
-            if not ret_a or not ret_b:
+            if not ret_a or not ret_b or frame_a is None or frame_b is None:
                 continue
 
             # Resize to common processing resolution if needed
@@ -1457,7 +1882,7 @@ def main():
                 frame_b = cv2.resize(frame_b, (PROC_W, PROC_H))
 
             frame_count += 1
-            grab_delay = t_grab_b - t_grab_a
+            grab_delay = t_grab_done - t_grab_a
 
             if recording:
                 frame_grab_delays.append(grab_delay)
@@ -1492,8 +1917,13 @@ def main():
             pose_b_valid = False
 
             if not collecting_cal and not floor_mode:
-                results_a = pose_a.process(cv2.cvtColor(frame_a, cv2.COLOR_BGR2RGB))
-                results_b = pose_b.process(cv2.cvtColor(frame_b, cv2.COLOR_BGR2RGB))
+                # Parallel MediaPipe processing via thread pool
+                rgb_a = cv2.cvtColor(frame_a, cv2.COLOR_BGR2RGB)
+                rgb_b = cv2.cvtColor(frame_b, cv2.COLOR_BGR2RGB)
+                future_a = mp_executor.submit(pose_a.process, rgb_a)
+                future_b = mp_executor.submit(pose_b.process, rgb_b)
+                results_a = future_a.result()
+                results_b = future_b.result()
 
                 pose_a_valid = results_a.pose_landmarks is not None
                 pose_b_valid = results_b.pose_landmarks is not None
@@ -1813,7 +2243,7 @@ def main():
                             }
 
                         take_data = {
-                            'version': 'studio-2.2',
+                            'version': 'studio-3.0',
                             'timestamp': datetime.now().isoformat(),
                             'duration_seconds': time.time() - record_start_time,
                             'frame_count': len(recorded_frames),
@@ -1902,8 +2332,9 @@ def main():
         log(f"FATAL ERROR: {e}", "ERROR")
         log(traceback.format_exc(), "ERROR")
     finally:
-        cap_a.release()
-        cap_b.release()
+        mp_executor.shutdown(wait=False)
+        threaded_a.release()
+        threaded_b.release()
         cv2.destroyAllWindows()
         log("\n[DONE] Session ended")
         log_close()
