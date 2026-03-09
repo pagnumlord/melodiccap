@@ -67,22 +67,20 @@ from pathlib import Path
 CAM_A_INDEX = 3          # Sony ZV-1F (MSMF, 1280x720)
 CAM_B_INDEX = 0          # DroidCam USB (MSMF, 1920x1080)
 
-# ChArUco board: 10x5 dual-sheet board (printed, measured ~42mm squares)
-# Measured: between 1-5/8" (41.3mm) and 1-6/8" (42.9mm), using midpoint
+# ChArUco board: 10x5 dual-sheet board (DICT_4X4_50)
+# Measured: 1 and 11/16 inches = 42.86mm per square
 CHARUCO_COLS = 10
 CHARUCO_ROWS = 5
-CHARUCO_SQUARE_M = 0.042    # 42mm — midpoint of measured range
-CHARUCO_MARKER_M = 0.030    # 30mm (72% of square)
+CHARUCO_SQUARE_M = 0.04286  # 42.86mm (measured: 1 11/16")
+CHARUCO_MARKER_M = 0.0309   # 30.9mm (72% of square, proportional to 43mm->31mm design)
 
-# Floor ChArUco board: smaller board for floor calibration
+# Floor ChArUco board: smaller board for floor calibration (DICT_4X4_50, same as main)
 # (easier to place on floor within both cameras' view)
-# Try both orientations — set FLOOR_CHARUCO_COLS to the wider dimension
-# IMPORTANT: Uses DICT_5X5_50 to avoid marker ID collision with the main board
-# (main board uses DICT_4X4_50). Without this, markers 0-5 exist on BOTH boards
-# and detection will produce garbage when both boards are visible.
+# NOTE: Same dictionary as main board. Only have ONE board visible at a time
+# during calibration to prevent marker ID collision.
 FLOOR_CHARUCO_COLS = 4
 FLOOR_CHARUCO_ROWS = 3
-FLOOR_CHARUCO_SQUARE_M = 0.0635   # 63.5mm squares
+FLOOR_CHARUCO_SQUARE_M = 0.0635   # 63.5mm squares (2.5 inches, measured correct)
 FLOOR_CHARUCO_MARKER_M = 0.0476   # 47.6mm markers (75% of square)
 
 # Paths - relative to this script's parent (MelodicCapStudio/)
@@ -708,25 +706,19 @@ board_corners_3d = board.getChessboardCorners()
 BOARD_MAX_CORNERS = (CHARUCO_COLS - 1) * (CHARUCO_ROWS - 1)
 
 # Floor board (separate smaller board for floor calibration)
-# CRITICAL: Uses a DIFFERENT ArUco dictionary (DICT_5X5_50) to prevent marker ID
-# collision with the main board (DICT_4X4_50). Without this, IDs 0-5 overlap and
-# detection produces incorrect corners when both boards are visible simultaneously.
-# You MUST print the floor board using generate_boards.py which uses the matching dictionary.
-floor_aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_50)
-floor_detector = cv2.aruco.ArucoDetector(floor_aruco_dict, params)
-
+# Uses same DICT_4X4_50 as main board. Only show ONE board at a time during calibration.
 # Create both orientations — detection tries both and picks the winner
 floor_board_a = cv2.aruco.CharucoBoard(
     (FLOOR_CHARUCO_COLS, FLOOR_CHARUCO_ROWS),
     FLOOR_CHARUCO_SQUARE_M,
     FLOOR_CHARUCO_MARKER_M,
-    floor_aruco_dict
+    aruco_dict
 )
 floor_board_b = cv2.aruco.CharucoBoard(
     (FLOOR_CHARUCO_ROWS, FLOOR_CHARUCO_COLS),  # swapped orientation
     FLOOR_CHARUCO_SQUARE_M,
     FLOOR_CHARUCO_MARKER_M,
-    floor_aruco_dict
+    aruco_dict
 )
 FLOOR_BOARD_MAX_CORNERS = (FLOOR_CHARUCO_COLS - 1) * (FLOOR_CHARUCO_ROWS - 1)
 
@@ -768,10 +760,10 @@ def detect_charuco(frame):
 
 def detect_charuco_floor(frame, debug=False):
     """Detect ChArUco corners using the smaller floor board.
-    Uses DICT_5X5_50 (separate from main board's DICT_4X4_50) to prevent ID collision.
+    Both boards use DICT_4X4_50 — only show ONE board at a time.
     Tries both orientations and picks whichever finds more corners."""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    corners, ids, _ = floor_detector.detectMarkers(gray)
+    corners, ids, _ = detector.detectMarkers(gray)
 
     if ids is None or len(ids) < 2:
         if debug:
