@@ -582,7 +582,7 @@ class MelodicCapImporter:
     def analyze(self):
         """Analyze character and mocap data, compute scale factor."""
         log("=" * 60)
-        log("MELODICCAP RETARGETER v1.4 - ANALYSIS")
+        log("MELODICCAP RETARGETER v2.0 - ANALYSIS")
         log("=" * 60)
 
         # --- Armature scale check ---
@@ -1147,11 +1147,16 @@ class MelodicCapImporter:
                     elif state == 'PLANTED':
                         if frame_vel > foot_lift_vel:
                             if self.foot_state_frames[ik_bone] >= 2:
-                                # Confirmed lift
+                                # Confirmed lift — velocity sustained above threshold
                                 self.foot_state[ik_bone] = 'MOVING'
                                 self.foot_state_frames[ik_bone] = 0
+                            # else: keep counting high-velocity frames
                         else:
-                            self.foot_state_frames[ik_bone] = 0
+                            # Low velocity — reset the lift counter (foot still planted)
+                            # Don't reset to 0 here; only reset when we need to
+                            # track consecutive high-velocity frames for lift confirmation
+                            if self.foot_state_frames[ik_bone] > 0:
+                                self.foot_state_frames[ik_bone] = 0
 
                     # Apply locked position when planted
                     if self.foot_state[ik_bone] == 'PLANTED' and ik_bone in self.foot_locked_pos:

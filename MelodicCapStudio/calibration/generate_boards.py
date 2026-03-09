@@ -222,6 +222,85 @@ def generate_dual_sheet_board():
     return squares_x, squares_y, square_length_m, marker_length_m
 
 
+def generate_floor_board():
+    """Generate a 4x3 ChArUco board for floor calibration.
+
+    Uses DICT_5X5_50 (DIFFERENT from the main board's DICT_4X4_50) to prevent
+    marker ID collision. This is critical — without separate dictionaries, markers
+    0-5 exist on both boards and detection produces incorrect corners.
+
+    4 columns x 3 rows at 63.5mm each
+    Board area: 254mm x 190.5mm (fits on 8.5x11" portrait)
+    Interior corners: (4-1) * (3-1) = 6
+    """
+    squares_x = 4
+    squares_y = 3
+    square_length_m = 0.0635   # 63.5mm (2.5 inches)
+    marker_length_m = 0.0476   # 47.6mm (75% of square)
+
+    # DICT_5X5_50 — different from main board's DICT_4X4_50
+    dictionary = aruco.getPredefinedDictionary(aruco.DICT_5X5_50)
+    board = aruco.CharucoBoard(
+        (squares_x, squares_y), square_length_m, marker_length_m, dictionary
+    )
+
+    # Generate at 300 DPI for 8.5x11"
+    page_w_px = 2550  # 8.5" at 300dpi
+    page_h_px = 3300  # 11" at 300dpi
+
+    dpi = 300
+    sq_px = int(square_length_m * 1000 / 25.4 * dpi)  # ~750px per square
+    board_w_px = squares_x * sq_px
+    board_h_px = squares_y * sq_px
+
+    img = board.generateImage((board_w_px, board_h_px), marginSize=0, borderBits=1)
+
+    # Place on white page with centering
+    page = np.ones((page_h_px, page_w_px), dtype=np.uint8) * 255
+    offset_x = (page_w_px - board_w_px) // 2
+    offset_y = (page_h_px - board_h_px) // 2
+    page[offset_y:offset_y + board_h_px, offset_x:offset_x + board_w_px] = img
+
+    page_color = cv2.cvtColor(page, cv2.COLOR_GRAY2BGR)
+
+    # Title
+    cv2.putText(page_color, "MelodicCap FLOOR CALIBRATION Board",
+                (50, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 0), 3)
+    cv2.putText(page_color, f"4x3 squares | 63.5mm squares | 47.6mm markers | DICT_5X5_50 | 6 corners",
+                (50, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
+    cv2.putText(page_color, "IMPORTANT: This board uses DICT_5X5_50 (different from main board DICT_4X4_50)",
+                (50, 170), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 200), 2)
+
+    # Instructions at bottom
+    y_bottom = page_h_px - 160
+    cv2.putText(page_color, "FLOOR CALIBRATION: Place this board FLAT on the floor.",
+                (50, y_bottom), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 180), 2)
+    cv2.putText(page_color, "Both cameras must see it. Press F in capture to calibrate floor.",
+                (50, y_bottom + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 180), 2)
+    cv2.putText(page_color, "Mount on rigid flat surface. Measure actual square size with ruler.",
+                (50, y_bottom + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 180), 2)
+    cv2.putText(page_color, f"Print at 100% scale. Target: 63.5mm = 2.5 inches per square.",
+                (50, y_bottom + 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+
+    # Ruler marks
+    mm_per_px = 25.4 / dpi
+    for mm in range(0, 260, 10):
+        px = int(mm / mm_per_px)
+        x_start = offset_x
+        tick_len = 30 if mm % 50 == 0 else 15
+        cv2.line(page_color, (x_start + px, offset_y - 5), (x_start + px, offset_y - 5 - tick_len), (0, 0, 0), 2)
+        if mm % 50 == 0:
+            cv2.putText(page_color, f"{mm}mm", (x_start + px - 20, offset_y - 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
+
+    path = os.path.join(OUTPUT_DIR, "charuco_floor_4x3_DICT5X5.png")
+    cv2.imwrite(path, page_color)
+    print(f"Floor board saved: {path}")
+    print(f"  4x3 squares, 63.5mm each, DICT_5X5_50 (separate from main board)")
+
+    return squares_x, squares_y, square_length_m, marker_length_m
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("MELODICCAP CHARUCO BOARD GENERATOR")
@@ -232,6 +311,9 @@ if __name__ == "__main__":
 
     print("\n--- Option B: Two 8.5x11\" sheets (landscape, taped) ---")
     s2 = generate_dual_sheet_board()
+
+    print("\n--- Floor Calibration Board (DICT_5X5_50) ---")
+    sf = generate_floor_board()
 
     print("\n" + "=" * 60)
     print("CONFIGURATION VALUES FOR CAPTURE SCRIPT:")
@@ -248,5 +330,14 @@ if __name__ == "__main__":
     print(f"  CHARUCO_SQUARE_M = {s2[2]}  # MEASURE AND UPDATE!")
     print(f"  CHARUCO_MARKER_M = {s2[3]}  # scale proportionally")
 
+    print(f"\nFloor Board (separate DICT_5X5_50):")
+    print(f"  FLOOR_CHARUCO_COLS = {sf[0]}")
+    print(f"  FLOOR_CHARUCO_ROWS = {sf[1]}")
+    print(f"  FLOOR_CHARUCO_SQUARE_M = {sf[2]}  # MEASURE AND UPDATE!")
+    print(f"  FLOOR_CHARUCO_MARKER_M = {sf[3]}  # scale proportionally")
+
     print("\nREMINDER: Measure a printed square with a ruler!")
     print("If 35mm prints as 34.1mm, use 0.0341 not 0.035")
+    print("\nIMPORTANT: The floor board uses DICT_5X5_50, NOT DICT_4X4_50.")
+    print("You MUST print the new floor board (charuco_floor_4x3_DICT5X5.png).")
+    print("The old 4x3 board (if DICT_4X4_50) will NOT work for floor calibration.")
