@@ -1,0 +1,200 @@
+[INFO] Log file: C:\Users\ninja\Documents\MelodicCapStudio\MelodicCapFresh\melodiccap\MelodicCapStudio\logs\capture_session_20260304_214211.log
+[INFO] Session started: 2026-03-04T21:42:11.314758
+[INFO] Python: 3.12.6 (tags/v3.12.6:a4a2d2b, Sep  6 2024, 20:11:23) [MSC v.1940 64 bit (AMD64)]
+[INFO] OpenCV: 4.12.0
+[INFO] MediaPipe: 0.10.14
+[INFO] ============================================================
+[INFO] MELODICCAP STUDIO - MOTION CAPTURE v2.2
+[INFO] ============================================================
+[INFO] 
+  Configuration:
+[INFO]     Camera A index: 3
+[INFO]     Camera B index: 0
+[INFO]     Countdown: 10s
+[INFO]     Grace period: 30 frames
+[INFO]     Outlier threshold: 3.0m
+[INFO]     Min visibility: 0.3
+[INFO]     MediaPipe complexity: 1
+[INFO]     MediaPipe detection conf: 0.3
+[INFO]     MediaPipe tracking conf: 0.3
+[INFO]     Base dir: C:\Users\ninja\Documents\MelodicCapStudio\MelodicCapFresh\melodiccap\MelodicCapStudio
+[INFO]     Calibration file: C:\Users\ninja\Documents\MelodicCapStudio\MelodicCapFresh\melodiccap\MelodicCapStudio\calibration\stereo_calibration.json
+[INFO]     Takes dir: C:\Users\ninja\Documents\MelodicCapStudio\MelodicCapFresh\melodiccap\MelodicCapStudio\takes
+[INFO]     ChArUco board: 10x5 (36 max corners)
+[INFO] 
+[CAMERAS]
+[INFO]   Opening Camera A (index 3, MSMF)...
+[INFO]     Native: 1280x720 @ 30.0fps
+[INFO]   Opening Camera B (index 0, CAP_ANY)...
+[INFO]     Native: 1280x720 @ 30.0fps
+[INFO] 
+  Processing resolution: 1280x720
+[INFO]     Both cameras match - no resizing needed
+[INFO] 
+[CALIBRATION] Loaded (v5.3-robust, Stereo RMS: 0.4324, Baseline: 1.436m)
+[INFO] [FLOOR] Offset: 0.9995m
+[INFO] 
+[CONTROLS]
+[INFO]   C = Collect calibration frames (hold board visible to both cameras)
+[INFO]   S = Run stereo calibration (after collecting 15+ frames)
+[INFO]   F = Floor calibration (lay board flat on floor)
+[INFO]   R = Start/stop recording motion capture
+[INFO]   Q = Quit
+[INFO] [CAL] Collection started
+[INFO] [CAL] Frame 1: 36 common corners
+[INFO] [CAL] Frame 2: 36 common corners
+[INFO] [CAL] Frame 3: 36 common corners
+[INFO] [CAL] Frame 4: 36 common corners
+[INFO] [CAL] Frame 5: 35 common corners
+[INFO] [CAL] Frame 6: 35 common corners
+[INFO] [CAL] Frame 7: 36 common corners
+[INFO] [CAL] Frame 8: 36 common corners
+[INFO] [CAL] Frame 9: 36 common corners
+[INFO] [CAL] Frame 10: 35 common corners
+[INFO] [CAL] Frame 11: 36 common corners
+[INFO] [CAL] Frame 12: 35 common corners
+[INFO] [CAL] Frame 13: 35 common corners
+[INFO] [CAL] Frame 14: 36 common corners
+[INFO] [CAL] Frame 15: 36 common corners
+[INFO] [CAL] Frame 16: 35 common corners
+[INFO] [CAL] Frame 17: 36 common corners
+[INFO] [CAL] Frame 18: 36 common corners
+[INFO] [CAL] Frame 19: 36 common corners
+[INFO] [CAL] Frame 20: 35 common corners
+[INFO] [CAL] Frame 21: 36 common corners
+[INFO] [CAL] Frame 22: 36 common corners
+[INFO] [CAL] Frame 23: 36 common corners
+[INFO] [CAL] Frame 24: 36 common corners
+[INFO] [CAL] Frame 25: 36 common corners
+[INFO] [CAL] Frame 26: 36 common corners
+[INFO] [CAL] Frame 27: 36 common corners
+[INFO] [CAL] Frame 28: 36 common corners
+[INFO] [CAL] Frame 29: 36 common corners
+[INFO] [CAL] Frame 30: 36 common corners
+[INFO] [CAL] Frame 31: 36 common corners
+[INFO] [CAL] Frame 32: 36 common corners
+[INFO] [CAL] Frame 33: 36 common corners
+[INFO] [CAL] Frame 34: 36 common corners
+[INFO] [CAL] Frame 35: 36 common corners
+[INFO] [CAL] Frame 36: 36 common corners
+[INFO] [CAL] Frame 37: 36 common corners
+[INFO] [CAL] Frame 38: 36 common corners
+[INFO] [CAL] Frame 39: 36 common corners
+[INFO] [CAL] Frame 40: 36 common corners
+[INFO] [CAL] Frame 41: 36 common corners
+[INFO] [CAL] Frame 42: 35 common corners
+[INFO] [CAL] Frame 43: 36 common corners
+[INFO] [CAL] Frame 44: 36 common corners
+[INFO] [CAL] Frame 45: 35 common corners
+[INFO] [CAL] Frame 46: 36 common corners
+[INFO] [CAL] Frame 47: 36 common corners
+[INFO] [CAL] Frame 48: 36 common corners
+[INFO] [CAL] Frame 49: 36 common corners
+[INFO] [CAL] Frame 50: 36 common corners
+[INFO] [CAL] Frame 51: 36 common corners
+[INFO] [CAL] Frame 52: 36 common corners
+[INFO] [CAL] Frame 53: 36 common corners
+[INFO] [CAL] Frame 54: 36 common corners
+[INFO] [CAL] Frame 55: 36 common corners
+[INFO] [CAL] Frame 56: 36 common corners
+[INFO] [CAL] Frame 57: 36 common corners
+[INFO] [CAL] Frame 58: 36 common corners
+[INFO] [CAL] Frame 59: 36 common corners
+[INFO] [CAL] Frame 60: 36 common corners
+[INFO] [CAL] Frame 61: 36 common corners
+[INFO] [CAL] Frame 62: 36 common corners
+[INFO] [CAL] Frame 63: 36 common corners
+[INFO] [CAL] Frame 64: 36 common corners
+[INFO] [CAL] Frame 65: 36 common corners
+[INFO] [CAL] Frame 66: 36 common corners
+[INFO] [CAL] Collection stopped: 66 frames
+[INFO] ==================================================
+[INFO] STEREO CALIBRATION (iterative outlier rejection)
+[INFO] ==================================================
+[INFO]   Frame 0: 36 common corners
+[INFO]   Frame 1: 36 common corners
+[INFO]   Frame 2: 36 common corners
+[INFO]   Frame 3: 36 common corners
+[INFO]   Frame 4: 35 common corners
+[INFO]   Frame 5: 35 common corners
+[INFO]   Frame 6: 36 common corners
+[INFO]   Frame 7: 36 common corners
+[INFO]   Frame 8: 36 common corners
+[INFO]   Frame 9: 35 common corners
+[INFO]   Frame 10: 36 common corners
+[INFO]   Frame 11: 35 common corners
+[INFO]   Frame 12: 35 common corners
+[INFO]   Frame 13: 36 common corners
+[INFO]   Frame 14: 36 common corners
+[INFO]   Frame 15: 35 common corners
+[INFO]   Frame 16: 36 common corners
+[INFO]   Frame 17: 36 common corners
+[INFO]   Frame 18: 36 common corners
+[INFO]   Frame 19: 35 common corners
+[INFO]   Frame 20: 36 common corners
+[INFO]   Frame 21: 36 common corners
+[INFO]   Frame 22: 36 common corners
+[INFO]   Frame 23: 36 common corners
+[INFO]   Frame 24: 36 common corners
+[INFO]   Frame 25: 36 common corners
+[INFO]   Frame 26: 36 common corners
+[INFO]   Frame 27: 36 common corners
+[INFO]   Frame 28: 36 common corners
+[INFO]   Frame 29: 36 common corners
+[INFO]   Frame 30: 36 common corners
+[INFO]   Frame 31: 36 common corners
+[INFO]   Frame 32: 36 common corners
+[INFO]   Frame 33: 36 common corners
+[INFO]   Frame 34: 36 common corners
+[INFO]   Frame 35: 36 common corners
+[INFO]   Frame 36: 36 common corners
+[INFO]   Frame 37: 36 common corners
+[INFO]   Frame 38: 36 common corners
+[INFO]   Frame 39: 36 common corners
+[INFO]   Frame 40: 36 common corners
+[INFO]   Frame 41: 35 common corners
+[INFO]   Frame 42: 36 common corners
+[INFO]   Frame 43: 36 common corners
+[INFO]   Frame 44: 35 common corners
+[INFO]   Frame 45: 36 common corners
+[INFO]   Frame 46: 36 common corners
+[INFO]   Frame 47: 36 common corners
+[INFO]   Frame 48: 36 common corners
+[INFO]   Frame 49: 36 common corners
+[INFO]   Frame 50: 36 common corners
+[INFO]   Frame 51: 36 common corners
+[INFO]   Frame 52: 36 common corners
+[INFO]   Frame 53: 36 common corners
+[INFO]   Frame 54: 36 common corners
+[INFO]   Frame 55: 36 common corners
+[INFO]   Frame 56: 36 common corners
+[INFO]   Frame 57: 36 common corners
+[INFO]   Frame 58: 36 common corners
+[INFO]   Frame 59: 36 common corners
+[INFO]   Frame 60: 36 common corners
+[INFO]   Frame 61: 36 common corners
+[INFO]   Frame 62: 36 common corners
+[INFO]   Frame 63: 36 common corners
+[INFO]   Frame 64: 36 common corners
+[INFO]   Frame 65: 36 common corners
+[INFO] Valid pairs: 66/66
+[INFO] 
+--- Iteration 1/5 ---
+[INFO] Active frames: 66
+[INFO]   Using full 5-param distortion model: 2367 total corner observations
+[INFO]   Camera A RMS: 0.4537 (fx=679.7, fy=681.4)
+[INFO]   Camera B RMS: 0.3657 (fx=866.3, fy=862.7)
+[INFO]   Stereo RMS: 0.9251
+[INFO]   Baseline: 1.361m
+[INFO]   Stereo RMS 0.9251 is good, stopping iteration
+[INFO] 
+  BEST RESULT: Stereo RMS=0.9251, 66 frames, baseline=1.361m
+[WARN] 
+  WARNING: Existing calibration (RMS=0.4324) is better than new (RMS=0.9251)
+[WARN]   Saving new calibration anyway - old one is backed up
+[INFO]   Backup saved: C:\Users\ninja\Documents\MelodicCapStudio\MelodicCapFresh\melodiccap\MelodicCapStudio\calibration\stereo_calibration.json.bak
+[INFO] Saved: C:\Users\ninja\Documents\MelodicCapStudio\MelodicCapFresh\melodiccap\MelodicCapStudio\calibration\stereo_calibration.json
+[INFO] [FLOOR] Mode ON
+[INFO] [FLOOR] Mode OFF
+[INFO] 
+[DONE] Session ended

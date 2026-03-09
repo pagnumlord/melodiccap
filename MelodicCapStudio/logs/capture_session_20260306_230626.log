@@ -1,0 +1,45 @@
+[INFO] Log file: C:\Users\ninja\Documents\MelodicCapStudio\MelodicCapFresh\melodiccap\MelodicCapStudio\logs\capture_session_20260306_230626.log
+[INFO] Session started: 2026-03-06T23:06:26.383106
+[INFO] Python: 3.12.6 (tags/v3.12.6:a4a2d2b, Sep  6 2024, 20:11:23) [MSC v.1940 64 bit (AMD64)]
+[INFO] OpenCV: 4.12.0
+[INFO] MediaPipe: 0.10.14
+[INFO] ============================================================
+[INFO] MELODICCAP STUDIO - MOTION CAPTURE v2.2
+[INFO] ============================================================
+[INFO] 
+  Configuration:
+[INFO]     Camera A index: 3
+[INFO]     Camera B index: 0
+[INFO]     Countdown: 10s
+[INFO]     Grace period: 30 frames
+[INFO]     Outlier threshold: 3.0m
+[INFO]     Min visibility: 0.3
+[INFO]     MediaPipe complexity: 1
+[INFO]     MediaPipe detection conf: 0.3
+[INFO]     MediaPipe tracking conf: 0.3
+[INFO]     Base dir: C:\Users\ninja\Documents\MelodicCapStudio\MelodicCapFresh\melodiccap\MelodicCapStudio
+[INFO]     Calibration file: C:\Users\ninja\Documents\MelodicCapStudio\MelodicCapFresh\melodiccap\MelodicCapStudio\calibration\stereo_calibration.json
+[INFO]     Takes dir: C:\Users\ninja\Documents\MelodicCapStudio\MelodicCapFresh\melodiccap\MelodicCapStudio\takes
+[INFO]     ChArUco board: 10x5 (36 max corners)
+[INFO]     Floor board: 3x4 (6 max corners, 63.5mm squares)
+[INFO] 
+[CAMERAS]
+[INFO]   Opening Camera A (index 3, MSMF)...
+[INFO]     Native: 1280x720 @ 30.0fps
+[INFO]   Opening Camera B (index 0, CAP_ANY)...
+[INFO]     Native: 1280x720 @ 30.0fps
+[INFO] 
+  Processing resolution: 1280x720
+[INFO]     Both cameras match - no resizing needed
+[INFO] 
+[CALIBRATION] Loaded (vstudio-2.1-robust, Stereo RMS: 0.8763, Baseline: 1.317m)
+[WARN] [FLOOR] Not calibrated - press F with board on floor
+[INFO] 
+[CONTROLS]
+[INFO]   C = Collect calibration frames (hold board visible to both cameras)
+[INFO]   S = Run stereo calibration (after collecting 15+ frames)
+[INFO]   F = Floor calibration (lay board flat on floor)
+[INFO]   R = Start/stop recording motion capture
+[INFO]   Q = Quit
+[INFO] 
+[DONE] Session ended

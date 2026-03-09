@@ -1,0 +1,47 @@
+[INFO] Log file: C:\Users\ninja\Documents\MelodicCapStudio\MelodicCapFresh\melodiccap\MelodicCapStudio\logs\capture_session_20260309_190226.log
+[INFO] Session started: 2026-03-09T19:02:26.440467
+[INFO] Python: 3.12.6 (tags/v3.12.6:a4a2d2b, Sep  6 2024, 20:11:23) [MSC v.1940 64 bit (AMD64)]
+[INFO] OpenCV: 4.12.0
+[INFO] MediaPipe: 0.10.14
+[INFO] ============================================================
+[INFO] MELODICCAP STUDIO - MOTION CAPTURE v3.0
+[INFO] ============================================================
+[INFO] 
+  Configuration:
+[INFO]     Camera A index: 2
+[INFO]     Camera B index: 4
+[INFO]     Countdown: 10s
+[INFO]     Grace period: 30 frames
+[INFO]     Outlier threshold: 2.0m
+[INFO]     Min visibility: 0.3
+[INFO]     MediaPipe complexity: 1
+[INFO]     MediaPipe detection conf: 0.3
+[INFO]     MediaPipe tracking conf: 0.3
+[INFO]     Base dir: C:\Users\ninja\Documents\MelodicCapStudio\MelodicCapFresh\melodiccap\MelodicCapStudio
+[INFO]     Calibration file: C:\Users\ninja\Documents\MelodicCapStudio\MelodicCapFresh\melodiccap\MelodicCapStudio\calibration\stereo_calibration.json
+[INFO]     Takes dir: C:\Users\ninja\Documents\MelodicCapStudio\MelodicCapFresh\melodiccap\MelodicCapStudio\takes
+[INFO]     ChArUco board: 10x5 (36 max corners)
+[INFO]     Floor board: 4x3 (6 max corners, 63.5mm squares)
+[INFO]   MediaPipe model complexity: 1
+[INFO] 
+[CAMERAS]
+[INFO]   Opening Camera A (index 2, MSMF)...
+[INFO]     Native: 1024x576 @ 30.0fps
+[INFO]   Opening Camera B (index 4, CAP_ANY)...
+[INFO]     Native: 1280x720 @ 0.0fps
+[INFO] 
+  Processing resolution: 1024x576
+[INFO]     Camera B: will resize 1280x720 -> 1024x576
+[INFO] 
+[CALIBRATION] Loaded (vstudio-2.1-robust, Stereo RMS: 0.7458, Baseline: 1.327m)
+[WARN]   RESOLUTION MISMATCH: calibration was done at 1280x720 but cameras are now at 1024x576
+[WARN]   You MUST recalibrate (C then S) before recording!
+[INFO] 
+[CONTROLS]
+[INFO]   C = Collect calibration frames (hold board visible to both cameras)
+[INFO]   S = Run stereo calibration (after collecting 15+ frames)
+[INFO]   F = Floor calibration (lay board flat on floor)
+[INFO]   R = Start/stop recording motion capture
+[INFO]   Q = Quit
+[INFO] 
+[DONE] Session ended
