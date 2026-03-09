@@ -22,8 +22,8 @@ from datetime import datetime
 from pathlib import Path
 
 # Configuration
-CAM_A_INDEX = 2
-CAM_B_INDEX = 0
+CAM_A_INDEX = 3          # Sony ZV-1F (MSMF)
+CAM_B_INDEX = 0          # DroidCam USB
 
 # Match these to generate_boards.py output — MEASURE printed squares with ruler!
 # Option A (single sheet): COLS=5, ROWS=7, SQUARE=0.035, MARKER=0.025
