@@ -38,11 +38,21 @@ v2.0 changes:
 - Outlier filter: rejects landmarks > threshold from origin
 - Configurable camera indices via command-line args
 
+v3.1 changes (from v3.0):
+- Calibration quality gate: recording BLOCKED unless calibration passes verification
+- New V key: verify calibration by triangulating board corners and checking accuracy
+- Never overwrites better calibration: keeps existing if new RMS is worse
+- Auto-enters floor mode after stereo calibration succeeds
+- Continuous calibration health display in status bar
+- Floor calibration required before recording
+- Pipeline: Calibrate (C→S) → Floor (F) → Verify (V) → Record (R)
+
 Controls:
   C = Collect calibration frames
   S = Run stereo calibration
   F = Floor calibration
-  R = Record motion capture
+  V = Verify calibration (show board, checks triangulation accuracy)
+  R = Record motion capture (requires verified calibration + floor)
   Q = Quit
 """
 
@@ -91,6 +101,12 @@ LOGS_DIR = BASE_DIR / "logs"
 
 # Recording settings
 COUNTDOWN_SECONDS = 10
+
+# Calibration quality thresholds
+# Recording is BLOCKED unless calibration meets these criteria
+MAX_STEREO_RMS_FOR_RECORDING = 1.5   # Reject calibrations with RMS above this
+MAX_FLOOR_STD_FOR_RECORDING = 0.03   # Floor point spread must be < 3cm
+CALIBRATION_VERIFY_INTERVAL = 30.0   # Seconds between automatic verification checks
 
 # Grace period for tracking loss
 TRACKING_GRACE_FRAMES = 30
@@ -1106,13 +1122,14 @@ def run_stereo_calibration(frames_a, frames_b, max_iterations=5, outlier_thresho
                 existing = json.load(f)
             existing_rms = existing.get('rms_stereo', float('inf'))
             if existing_rms < best_rms:
-                log(f"\n  WARNING: Existing calibration (RMS={existing_rms:.4f}) is better than new (RMS={best_rms:.4f})", "WARN")
-                log(f"  Saving new calibration anyway - old one is backed up", "WARN")
-                # Backup existing calibration
-                backup_path = CALIBRATION_FILE.with_suffix('.json.bak')
-                with open(backup_path, 'w') as f:
-                    json.dump(existing, f, indent=2)
-                log(f"  Backup saved: {backup_path}")
+                log(f"\n  WARNING: Existing calibration (RMS={existing_rms:.4f}) is BETTER than new (RMS={best_rms:.4f})", "WARN")
+                log(f"  KEEPING existing calibration. New result NOT saved.", "WARN")
+                log(f"  To improve: try more varied board angles, move board more slowly,", "WARN")
+                log(f"  ensure 30+ frames, and check that both cameras see the full board.", "WARN")
+                # Preserve existing floor calibration and return existing data
+                return existing, (f"KEPT OLD (RMS={existing_rms:.4f} < new {best_rms:.4f}). "
+                                  f"New attempt: CamA:{best_result['ret_a']:.2f} CamB:{best_result['ret_b']:.2f} "
+                                  f"Stereo:{best_rms:.2f} Base:{best_result['baseline']:.2f}m ({best_result['num_frames']}f)")
         except (json.JSONDecodeError, IOError):
             pass  # No existing calibration or can't read it
 
@@ -1121,7 +1138,116 @@ def run_stereo_calibration(frames_a, frames_b, max_iterations=5, outlier_thresho
 
     log(f"Saved: {CALIBRATION_FILE}")
 
+    # Always backup after successful save
+    backup_path = CALIBRATION_FILE.with_suffix('.json.bak')
+    with open(backup_path, 'w') as f:
+        json.dump(data, f, indent=2)
+
     return data, f"CamA:{best_result['ret_a']:.2f} CamB:{best_result['ret_b']:.2f} Stereo:{best_rms:.2f} Base:{best_result['baseline']:.2f}m ({best_result['num_frames']}f)"
+
+
+def verify_calibration(frame_a, frame_b, calib_data):
+    """Quick calibration check: triangulate visible board corners and verify distances.
+
+    Returns:
+        (ok, report_dict) where ok=True means calibration looks good.
+        report_dict has: 'board_error_mm', 'baseline_m', 'rms', 'message'
+    """
+    cc_a, ci_a, _ = detect_charuco(frame_a)
+    cc_b, ci_b, _ = detect_charuco(frame_b)
+
+    if cc_a is None or cc_b is None:
+        return None, {'message': 'Board not visible in both cameras'}
+
+    common = set(ci_a.flatten()) & set(ci_b.flatten())
+    if len(common) < 4:
+        return None, {'message': f'Only {len(common)} common corners (need 4+)'}
+
+    K1 = np.array(calib_data['K1'])
+    D1 = np.array(calib_data['D1'])
+    K2 = np.array(calib_data['K2'])
+    D2 = np.array(calib_data['D2'])
+    R1 = np.array(calib_data['R1'])
+    R2 = np.array(calib_data['R2'])
+    P1 = np.array(calib_data['P1'])
+    P2 = np.array(calib_data['P2'])
+
+    pts_a = []
+    pts_b = []
+    corner_ids = []
+    ci_a_flat = ci_a.flatten()
+    ci_b_flat = ci_b.flatten()
+
+    for cid in sorted(common):
+        idx_a = np.where(ci_a_flat == cid)[0][0]
+        idx_b = np.where(ci_b_flat == cid)[0][0]
+        pts_a.append(cc_a[idx_a].flatten())
+        pts_b.append(cc_b[idx_b].flatten())
+        corner_ids.append(cid)
+
+    pts_a = np.array(pts_a, dtype=np.float32).reshape(-1, 1, 2)
+    pts_b = np.array(pts_b, dtype=np.float32).reshape(-1, 1, 2)
+
+    pts_a_rect = cv2.undistortPoints(pts_a, K1, D1, R=R1, P=P1)
+    pts_b_rect = cv2.undistortPoints(pts_b, K2, D2, R=R2, P=P2)
+
+    points_4d = cv2.triangulatePoints(P1, P2,
+                                       pts_a_rect.reshape(-1, 2).T,
+                                       pts_b_rect.reshape(-1, 2).T)
+    points_3d = (points_4d[:3] / points_4d[3]).T
+
+    # Compare triangulated distances between adjacent corners with known board dimensions.
+    # Adjacent charuco corners on the board are exactly CHARUCO_SQUARE_M apart.
+    expected = CHARUCO_SQUARE_M
+    errors_mm = []
+    corner_ids_arr = np.array(corner_ids)
+
+    # ChArUco corner grid: corner ID = row * (cols-1) + col
+    cols_minus_1 = CHARUCO_COLS - 1
+    for i, cid_i in enumerate(corner_ids):
+        for j, cid_j in enumerate(corner_ids):
+            if j <= i:
+                continue
+            # Check if these are horizontally adjacent
+            row_i, col_i = divmod(cid_i, cols_minus_1)
+            row_j, col_j = divmod(cid_j, cols_minus_1)
+            if row_i == row_j and abs(col_i - col_j) == 1:
+                dist = np.linalg.norm(points_3d[i] - points_3d[j])
+                err = abs(dist - expected) * 1000  # mm
+                errors_mm.append(err)
+            elif col_i == col_j and abs(row_i - row_j) == 1:
+                dist = np.linalg.norm(points_3d[i] - points_3d[j])
+                err = abs(dist - expected) * 1000  # mm
+                errors_mm.append(err)
+
+    rms = calib_data.get('rms_stereo', float('inf'))
+    baseline = calib_data.get('baseline_meters', 0)
+
+    if not errors_mm:
+        return None, {
+            'message': 'No adjacent corner pairs found to verify',
+            'rms': rms,
+            'baseline_m': baseline,
+        }
+
+    mean_err = np.mean(errors_mm)
+    max_err = np.max(errors_mm)
+
+    ok = mean_err < 10.0 and rms <= MAX_STEREO_RMS_FOR_RECORDING
+    quality = "GOOD" if mean_err < 5.0 else ("OK" if mean_err < 10.0 else "POOR")
+
+    report = {
+        'board_error_mm': round(mean_err, 1),
+        'board_error_max_mm': round(max_err, 1),
+        'num_pairs': len(errors_mm),
+        'rms': rms,
+        'baseline_m': baseline,
+        'quality': quality,
+        'ok': ok,
+        'message': f"Board error: {mean_err:.1f}mm avg, {max_err:.1f}mm max ({len(errors_mm)} pairs) — {quality}",
+    }
+
+    return ok, report
 
 
 def calibrate_floor(frame_a, frame_b, calib_data):
@@ -1690,7 +1816,7 @@ def main():
     log_init("session")
 
     log("=" * 60)
-    log("MELODICCAP STUDIO - MOTION CAPTURE v3.0")
+    log("MELODICCAP STUDIO - MOTION CAPTURE v3.1")
     log("=" * 60)
 
     log(f"\n  Configuration:")
@@ -1821,7 +1947,8 @@ def main():
     log("  C = Collect calibration frames (hold board visible to both cameras)")
     log("  S = Run stereo calibration (after collecting 15+ frames)")
     log("  F = Floor calibration (lay board flat on floor)")
-    log("  R = Start/stop recording motion capture")
+    log("  V = Verify calibration (show board to both cameras, checks accuracy)")
+    log("  R = Start/stop recording motion capture (requires verified calibration)")
     log("  Q = Quit")
 
     # Wrap cameras in threaded readers for parallel grabs during recording
@@ -1843,6 +1970,12 @@ def main():
     status = "Ready" if calib_data else "Press C to calibrate"
     recorded_frames = []
     record_start_time = 0
+
+    # Calibration health state
+    cal_verified = False           # True once verification passes
+    cal_verify_report = None       # Last verification result
+    last_verify_time = 0           # For throttling automatic checks
+    cal_health_str = ""            # Displayed in status bar
 
     # Kalman filters
     kalman_filters = {}
@@ -2091,7 +2224,9 @@ def main():
                     success, msg = calibrate_floor(frame_a, frame_b, calib_data)
                     if success:
                         floor_mode = False
-                        status = f"Floor OK: {msg}"
+                        cal_verified = False  # Re-verify with new floor offset
+                        cal_health_str = ""
+                        status = f"Floor OK: {msg} — Press V to verify, then R to record!"
                         log(f"[FLOOR] {msg}")
                     else:
                         status = f"Floor FAILED: {msg}"
@@ -2168,11 +2303,36 @@ def main():
                         cv2.putText(combined, "LOST!", (w//2-30, 30),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-            # Status bar
-            bar = np.zeros((40, combined.shape[1], 3), dtype=np.uint8)
-            cv2.putText(bar, status, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            cv2.putText(bar, f"Cal frames: {len(cal_frames_a)}", (combined.shape[1]-180, 28),
+            # Automatic calibration verification (when board visible, not recording, throttled)
+            if (not recording and not collecting_cal and not floor_mode
+                    and calib_data and board_a and board_b
+                    and time.time() - last_verify_time > CALIBRATION_VERIFY_INTERVAL):
+                last_verify_time = time.time()
+                ok, report = verify_calibration(frame_a, frame_b, calib_data)
+                if ok is not None:
+                    cal_verify_report = report
+                    if ok:
+                        cal_verified = True
+                        cal_health_str = f"CAL OK: {report['board_error_mm']}mm err, RMS={report['rms']:.3f}"
+                    else:
+                        cal_verified = False
+                        cal_health_str = f"CAL BAD: {report.get('board_error_mm', '?')}mm err"
+
+            # Status bar (two lines: status + calibration health)
+            bar_h = 60 if cal_health_str else 40
+            bar = np.zeros((bar_h, combined.shape[1], 3), dtype=np.uint8)
+            cv2.putText(bar, status, (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+            cv2.putText(bar, f"Cal frames: {len(cal_frames_a)}", (combined.shape[1]-180, 22),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
+            if cal_health_str:
+                health_color = (0, 255, 0) if cal_verified else (0, 100, 255)
+                cv2.putText(bar, cal_health_str, (10, 48),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, health_color, 1)
+                floor_status = "FLOOR OK" if calib_data and calib_data.get('floor_calibrated') else "NO FLOOR"
+                floor_color = (0, 255, 0) if calib_data and calib_data.get('floor_calibrated') else (0, 100, 255)
+                cv2.putText(bar, floor_status, (combined.shape[1]-120, 48),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, floor_color, 1)
 
             combined = np.vstack([combined, bar])
             cv2.imshow("MelodicCap Studio", combined)
@@ -2207,7 +2367,14 @@ def main():
                     result, msg = run_stereo_calibration(cal_frames_a, cal_frames_b)
                     if result:
                         calib_data = result
-                        status = f"SUCCESS! {msg}"
+                        cal_verified = False  # Must re-verify after recalibration
+                        cal_health_str = ""
+                        if calib_data.get('floor_calibrated'):
+                            status = f"SUCCESS! {msg} — Press V to verify, then R to record"
+                        else:
+                            status = f"SUCCESS! {msg} — NOW press F to calibrate floor!"
+                            floor_mode = True
+                            log("[FLOOR] Auto-entering floor mode after stereo calibration")
                     else:
                         status = f"FAILED: {msg}"
 
@@ -2219,9 +2386,39 @@ def main():
                     status = "FLOOR MODE - Lay board flat on floor" if floor_mode else "Floor mode off"
                     log(f"[FLOOR] Mode {'ON' if floor_mode else 'OFF'}")
 
+            elif key == ord('v'):
+                # Manual verification: show board to both cameras
+                if calib_data is None:
+                    status = "Calibrate cameras first!"
+                else:
+                    ok, report = verify_calibration(frame_a, frame_b, calib_data)
+                    if ok is None:
+                        status = f"VERIFY: {report['message']}"
+                        log(f"[VERIFY] {report['message']}")
+                    elif ok:
+                        cal_verified = True
+                        cal_verify_report = report
+                        cal_health_str = f"CAL OK: {report['board_error_mm']}mm err, RMS={report['rms']:.3f}"
+                        status = f"VERIFIED {report['quality']}! {report['message']}"
+                        log(f"[VERIFY] PASSED: {report['message']}")
+                    else:
+                        cal_verified = False
+                        cal_verify_report = report
+                        cal_health_str = f"CAL BAD: {report.get('board_error_mm', '?')}mm err, RMS={report.get('rms', '?')}"
+                        status = f"VERIFY FAILED: {report['message']} — Recalibrate!"
+                        log(f"[VERIFY] FAILED: {report['message']}", "WARN")
+
             elif key == ord('r'):
                 if calib_data is None:
                     status = "Calibrate cameras first!"
+                elif not calib_data.get('floor_calibrated', False):
+                    status = "Floor not calibrated! Press F with board on floor."
+                elif not cal_verified:
+                    rms = calib_data.get('rms_stereo', float('inf'))
+                    if rms > MAX_STEREO_RMS_FOR_RECORDING:
+                        status = f"RMS {rms:.2f} too high (max {MAX_STEREO_RMS_FOR_RECORDING}). Recalibrate!"
+                    else:
+                        status = "Press V with board visible to verify calibration first!"
                 elif recording:
                     recording = False
                     log("[REC] Recording stopped")
