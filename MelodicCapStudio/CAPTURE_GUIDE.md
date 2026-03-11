@@ -1,242 +1,245 @@
-# MelodicCap Studio - Capture Guide
+# MelodicCap Studio - Full Pipeline Guide (v3.1)
 
-## Prerequisites
+## Quick Reference
 
-### Hardware
-- **Camera A**: Sony ZV-1F (USB-C streaming to PC)
-- **Camera B**: Samsung S25 via DroidCam (USB or WiFi)
-- **ChArUco Board**: 4x3 grid, 63.5mm squares (print and mount on flat surface)
-- Both cameras should see the same area from different angles (~60-90 degrees apart)
-
-### Software Dependencies
 ```
-pip install opencv-python mediapipe numpy
-```
-
-If you already have these installed, you're good. Check with:
-```
-python -c "import cv2; import mediapipe; print('OK')"
+PULL → CAMERAS → CALIBRATE → FLOOR → VERIFY → RECORD → BLENDER IMPORT
 ```
 
 ---
 
-## Step 0: Pull the Latest Files
+## Step 0: Pull Latest Code
 
 ```powershell
 cd C:\Users\ninja\Documents\melodiccap
 git pull origin claude/ai-motion-capture-blender-bOcVi
 ```
 
-The capture scripts are in:
+The files you need:
 ```
-melodiccap/MelodicCapStudio/
-  capture/melodic_capture.py      <-- Main script (run this)
-  capture/robust_calibration.py   <-- Alternative calibration tool
-  calibration/                    <-- Calibration data saved here
-  takes/                          <-- Recorded takes saved here
-  logs/                           <-- Debug logs saved here
-  tools/                          <-- Validation/preview utilities
+MelodicCapStudio/
+  capture/melodic_capture.py       <-- Capture app (run this)
+  calibration/stereo_calibration.json  <-- Saved calibration
+  takes/                           <-- Recorded takes
+  logs/                            <-- Debug logs
   blender/melodiccap_retargeter.py <-- Blender addon
 ```
 
 ---
 
-## Step 1: Connect Your Cameras
+## Step 1: Connect Cameras
 
-1. **Sony ZV-1F**: Plug USB-C into PC. Set camera to USB streaming mode.
-2. **Samsung S25**: Open DroidCam on phone, connect via USB or WiFi.
+1. **Sony ZV-1F**: Plug USB-C, set to USB streaming mode
+2. **Samsung S25**: Open DroidCam, connect via USB or WiFi
 
-### Finding Camera Indices
-
-The script defaults to `CAM_A=2` (Sony) and `CAM_B=0` (DroidCam). If these don't match your setup, you can either:
-
-**Option A**: Pass indices as arguments:
-```powershell
-cd C:\Users\ninja\Documents\melodiccap\MelodicCapStudio
-python capture\melodic_capture.py 2 0
-```
-
-**Option B**: Edit the top of `capture/melodic_capture.py`:
-```python
-CAM_A_INDEX = 2          # Sony ZV-1F
-CAM_B_INDEX = 0          # DroidCam
-```
-
-If you're not sure which index is which, try different combinations. When the app opens, you'll see both camera feeds side by side - swap the numbers if they're backwards.
-
----
-
-## Step 2: Run the Capture App
+### Run the capture app:
 
 ```powershell
 cd C:\Users\ninja\Documents\melodiccap\MelodicCapStudio
-python capture\melodic_capture.py
+python capture\melodic_capture.py 3 0
 ```
 
-You'll see a split-screen window with both camera feeds and a status bar at the bottom.
+Replace `3 0` with your camera indices. If cameras appear swapped, swap the numbers.
 
-**Controls:**
-| Key | Action |
-|-----|--------|
-| **C** | Start/stop collecting calibration frames |
-| **S** | Run stereo calibration (after collecting frames) |
-| **F** | Floor calibration mode |
-| **R** | Start/stop recording motion capture |
-| **Q** | Quit |
+To find available cameras:
+```powershell
+python ..\detect_cameras.py
+```
 
 ---
 
-## Step 3: Calibrate Cameras (Stereo Calibration)
+## Step 2: Calibrate Stereo (Every Time Cameras Move)
 
-This teaches the system how your two cameras relate to each other in 3D space.
+**You must recalibrate every time a camera moves, even slightly.**
 
-1. Press **C** to start collecting calibration frames
-2. Hold your ChArUco board so **both cameras can see it** at the same time
-3. Move the board around slowly:
-   - Different angles (tilt left, right, up, down)
-   - Different distances (close, far)
-   - Different positions (left, center, right of frame)
-   - **KEY**: Try to cover the full area where you'll be performing
-4. The status bar shows how many frames have been captured
-   - Borders turn GREEN when both cameras see the board
-   - Aim for **15-25 frames** with varied positions
-5. Press **C** again to stop collecting
-6. Press **S** to run calibration
+1. Press **C** to start collecting
+2. Hold the 10x5 ChArUco board so **both** cameras see it
+3. Move the board **slowly** through varied positions:
+   - Tilt left/right/up/down
+   - Near and far
+   - Left, center, right of frame
+   - Rotate the board
+   - **30+ frames minimum**, 50+ is better
+4. Press **C** to stop collecting
+5. Press **S** to calibrate
 
-**What to look for in the output:**
+**Good result:**
 ```
---- Iteration 1/5 ---
-Active frames: 35
-  Camera A RMS: 0.08    <-- Good (< 0.5)
-  Camera B RMS: 0.10    <-- Good (< 0.5)
-  Stereo RMS: 2.40      <-- Will improve with outlier rejection
-  Removed frame 12 (error: 3.81)
-  Removed frame 28 (error: 2.95)
-
---- Iteration 2/5 ---
-Active frames: 33
-  Stereo RMS: 0.85      <-- Good after removing outliers!
-  Baseline: 1.44m       <-- Distance between cameras
+Stereo RMS: 0.75    <-- Under 1.0 is good
+Baseline: 1.32m     <-- Should match your camera spacing
 ```
 
-The calibration now uses **iterative outlier rejection**: it calibrates, checks per-frame
-reprojection error, removes the worst frames, and recalibrates. This dramatically
-improves results compared to single-pass calibration.
+**If RMS > 1.5:** Try again. More frames, slower movement, more varied angles.
 
-If final Stereo RMS is > 2.0 after all iterations, try again with more frames and more varied board positions.
+**If it says "KEPT OLD":** Your new calibration was worse than existing. This is a protection — try again with better technique.
 
 ---
 
-## Step 4: Floor Calibration
+## Step 3: Floor Calibration
 
-This tells the system where the ground plane is.
+After stereo calibration succeeds, the app **auto-enters floor mode**.
 
-1. **Lay your ChArUco board flat on the floor** where you'll be standing
-2. Make sure both cameras can see it clearly
-3. Press **F**
-4. The system will automatically detect the board and calculate the floor offset
+1. Lay a ChArUco board **flat on the floor** where you'll stand
+2. Both cameras must see the board
+3. The app detects it automatically and sets Z=0
 
-**What to look for:**
+**Good result:**
 ```
-Floor offset: 0.802m (std: 0.003m)
+Floor offset: 0.838m (std: 0.002m)
 ```
-- The offset is how high the floor is in the camera's coordinate system
-- Low std (< 0.01m) means the calibration is consistent
+
+Low std (< 0.01m) = good. If std > 0.05m, the board isn't flat or calibration is noisy.
+
+If you need to redo floor later: press **F** to toggle floor mode.
+
+---
+
+## Step 4: Verify Calibration
+
+1. Hold the ChArUco board visible to both cameras
+2. Press **V**
+
+The app triangulates the board corners and checks if the measured distances between corners match the real board dimensions.
+
+**Good result:**
+```
+VERIFIED GOOD! Board error: 3.2mm avg, 5.1mm max (15 pairs) — GOOD
+```
+
+**Quality ratings:**
+- **GOOD** (< 5mm error): Ready to record
+- **OK** (5-10mm error): Acceptable
+- **POOR** (> 10mm error): Recalibrate
+
+The status bar also shows calibration health continuously when the board is visible.
+
+**You cannot record until verification passes.**
 
 ---
 
 ## Step 5: Record a Take
 
 1. Stand in the capture area, visible to both cameras
-2. Press **R** to start the countdown (10 seconds)
-3. Get into A-pose (stand straight, arms slightly out) before countdown ends
-4. Perform your motion
-5. Press **R** again to stop recording
+2. Press **R** — 10-second countdown starts
+3. **Start in A-pose** (stand straight, arms slightly out from sides)
+4. Hold A-pose for 2-3 seconds (this becomes your reference frame)
+5. Perform your motion
+6. Press **R** to stop
 
-**For your test take, do this sequence:**
-1. A-pose for ~3 seconds
-2. Raise your LEFT arm only (tests L/R correctness)
-3. Raise your RIGHT arm only
+**Notes:**
+- The last 1.5 seconds are **automatically trimmed** (removes your movement toward the keyboard)
+- Watch for green "OK" on both cameras = good tracking
+- Red "LOST" = pose lost (stay in frame)
+- A quality report prints after each take
+
+**For test takes, do this sequence:**
+1. A-pose for 3 seconds
+2. Raise LEFT arm only
+3. Raise RIGHT arm only
 4. Raise both arms
-5. Walk a few steps forward
+5. Walk forward a few steps
 6. Walk back
 7. Return to A-pose
 
-**During recording, watch for:**
-- **Green "OK"** on both cameras = good tracking
-- **Red "LOST"** = camera lost your pose (try to stay in frame)
-- **Frame counter** in top-right shows recorded frames
-- **"pred:" count** = frames where tracking was lost but Kalman predicted
-- **"drop:" count** = frames completely lost (bad)
-
 ---
 
-## Step 6: Get Debug Data Back to Me
-
-After recording, the system saves:
-1. **Take file**: `MelodicCapStudio/takes/take_YYYYMMDD_HHMMSS.json`
-2. **Session log**: `MelodicCapStudio/logs/capture_session_YYYYMMDD_HHMMSS.log`
-3. **Calibration**: `MelodicCapStudio/calibration/stereo_calibration.json`
-
-### Push everything back via git:
+## Step 6: Push Data for Debugging
 
 ```powershell
 cd C:\Users\ninja\Documents\melodiccap
 git add MelodicCapStudio/takes/ MelodicCapStudio/logs/ MelodicCapStudio/calibration/
-git commit -m "New capture take with debug logs"
+git commit -m "New capture session"
 git push -u origin claude/ai-motion-capture-blender-bOcVi
 ```
-
-### What I can analyze from the logs:
-- **Per-landmark visibility scores** (which body parts had good/bad tracking)
-- **Frame timing** (inter-camera sync quality)
-- **Outlier counts** (how many bad triangulations were filtered)
-- **Camera loss patterns** (which camera lost tracking and when)
-- **Calibration quality** (RMS values, baseline, floor consistency)
 
 ---
 
 ## Step 7: Import in Blender
 
-1. Copy the updated addon to Blender:
-   - Source: `MelodicCapStudio/blender/melodiccap_retargeter.py`
-   - Destination: Blender addons folder (or install via Edit > Preferences > Add-ons)
+### Install the Addon
 
-2. In Blender:
-   - Select your JaxRigify armature
-   - Open the **MelodicCap** panel in the sidebar (N panel)
-   - Click **Import Take** and select your take JSON
-   - Watch the console for analysis output
+1. Open Blender
+2. Edit > Preferences > Add-ons > Install from Disk
+3. Select: `MelodicCapStudio/blender/melodiccap_retargeter.py`
+4. Enable the addon (check the box)
+
+If already installed, **reload** it:
+- In the addon list, disable then re-enable, OR
+- Blender > Edit > Preferences > Add-ons > find "MelodicCap" > remove, then reinstall
+
+### Import a Take
+
+1. Select your **JaxRigify armature** in the viewport
+2. Make sure armature scale is (1, 1, 1) — if not, Ctrl+A > Apply Scale
+3. Open the **N panel** (press N) > **MelodicCap** tab
+4. Settings to check:
+   - **Filter Outliers**: ON (default)
+   - **Ground Clamp Feet**: ON (default)
+   - **Pole Targets**: ON (keeps elbows/knees bending correctly)
+   - **IK Rotation**: ON (wrist/foot orientation)
+   - **Spine Animation**: ON (torso lean + twist)
+5. Click **Import Take**
+6. Select your `.json` take file
+7. Check the Blender console for the analysis log
+
+### What to Look For
+
+**In the console output:**
+```
+Scale factor: 1.0286          <-- Should be 0.5-2.0
+Outlier filter: 0 values replaced  <-- Low is good
+Frames processed: 269         <-- Should match your take
+Keyframes created: 8070       <-- Many = good
+```
+
+**In the viewport:**
+- Press Space to play animation
+- Character should track your movements
+- LEFT arm raise = character's LEFT arm raises (no mirroring)
+- Feet should stay planted when you stand still
+- Spine should lean/twist when you lean/twist
+
+### Troubleshooting Retarget
+
+| Problem | Fix |
+|---------|-----|
+| Arms fly off to sides | Check IK_parent=0 (addon sets this automatically) |
+| Everything mirrored | This shouldn't happen (v2.0 has correct mapping) |
+| Character too big/small | Check armature scale is (1,1,1), apply if not |
+| Feet go through floor | Enable "Ground Clamp Feet" in settings |
+| Jittery movement | Lower the "Max Landmark Speed" setting |
+| Jerky ending | Last 1.5s is auto-trimmed; if still bad, trim the take JSON |
 
 ---
 
-## Troubleshooting
+## Controls Reference (Capture App)
 
-### "FAILED to open Camera A/B"
-- Check USB connections
-- Try different camera indices: `python capture\melodic_capture.py 0 1` or `1 2` etc.
-- Make sure DroidCam is running on the phone
-- On Windows, close any other app using the cameras
+| Key | Action | Notes |
+|-----|--------|-------|
+| **C** | Collect/stop calibration frames | Hold board visible to both cameras |
+| **S** | Run stereo calibration | Need 8+ frames (30+ recommended) |
+| **F** | Toggle floor calibration mode | Lay board flat on floor |
+| **V** | Verify calibration | Show board, checks triangulation accuracy |
+| **R** | Start/stop recording | Blocked until verified + floor set |
+| **Q** | Quit | |
 
-### "Stereo RMS too high"
-- Collect more calibration frames (20+)
-- Vary board positions and angles more
-- Make sure the board is rigid (not bent/curved)
-- Both cameras must see the board simultaneously
+### Pipeline Order (enforced by software):
 
-### "Board not detected"
-- Better lighting (avoid harsh shadows)
-- Hold board steady
-- Make sure the full board is visible
-- Don't hold the board too far away
+```
+C → S (calibrate) → F (floor) → V (verify) → R (record)
+```
 
-### Low frame rate during recording
-- Close other applications
-- MediaPipe model_complexity=1 is a good balance
-- Reducing to 0 (lite) is faster but less accurate
-- Make sure cameras are running at 720p, not higher
+You cannot skip steps. Recording is blocked until calibration is verified and floor is set.
 
-### Character looks wrong in Blender after import
-- Make sure armature scale is (1, 1, 1) - apply scale if not
-- Try the "Diagnostic Dump" button to save rig info
-- Share the diagnostic log + take file + capture session log with me
+---
+
+## File Locations
+
+| File | What |
+|------|------|
+| `capture/melodic_capture.py` | Main capture + calibration app |
+| `blender/melodiccap_retargeter.py` | Blender addon (v2.0) |
+| `calibration/stereo_calibration.json` | Current stereo calibration |
+| `calibration/generate_boards.py` | Print new ChArUco boards |
+| `takes/take_*.json` | Recorded motion capture takes |
+| `logs/capture_session_*.log` | Debug logs from each session |

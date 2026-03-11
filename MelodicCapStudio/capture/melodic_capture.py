@@ -215,9 +215,10 @@ def postprocess_take(frames, log_fn=None):
     2. Bone-length stabilization (enforce consistent skeleton, ALWAYS applied)
     3. Biomechanical joint-angle constraints (prevent impossible poses)
     4. Temporal smoothing (5-frame Gaussian-weighted, not simple average)
-    5. Trim collapsed frames at end of take
-    6. Floor clamping (feet can't go below z=0)
-    7. Data quality report
+    5. Trim last 1.5s (junk motion from reaching for keyboard to stop)
+    6. Trim collapsed frames at end of take
+    7. Floor clamping (feet can't go below z=0)
+    8. Data quality report
 
     Modifies frames in-place and returns the (possibly trimmed) list.
     """
@@ -606,8 +607,29 @@ def postprocess_take(frames, log_fn=None):
                     re_corrections += 1
     _log(f"    Applied {re_corrections} post-smoothing bone corrections")
 
-    # --- Step 6: Trim collapsed frames ---
-    _log("\n  [Step 6] Trim collapsed frames (skeleton height < 70% of reference)")
+    # --- Step 6: Trim last 1.5 seconds (junk motion from reaching for keyboard) ---
+    _log("\n  [Step 6] Trim end-of-recording junk (last 1.5s)")
+    TRIM_END_SECONDS = 1.5
+
+    if len(frames) >= 2 and 'timestamp' in frames[-1]:
+        end_time = frames[-1]['timestamp']
+        cutoff_time = end_time - TRIM_END_SECONDS
+        trim_idx = len(frames)
+        for i in range(len(frames) - 1, -1, -1):
+            if frames[i].get('timestamp', 0) <= cutoff_time:
+                trim_idx = i + 1
+                break
+        if trim_idx < len(frames):
+            junk_trimmed = len(frames) - trim_idx
+            frames[:] = frames[:trim_idx]
+            _log(f"    Trimmed {junk_trimmed} frames ({TRIM_END_SECONDS}s) from end")
+        else:
+            _log(f"    Recording too short to trim")
+    else:
+        _log(f"    No timestamps available, skipping end trim")
+
+    # --- Step 6b: Trim collapsed frames ---
+    _log("\n  [Step 6b] Trim collapsed frames (skeleton height < 70% of reference)")
 
     ref_heights = []
     for f in frames[:5]:
@@ -650,6 +672,7 @@ def postprocess_take(frames, log_fn=None):
 
     # --- Step 7: Floor clamping ---
     _log("\n  [Step 7] Floor clamping (feet z >= 0)")
+
     floor_clamps = 0
     foot_landmarks = ['27', '28', '29', '30', '31', '32']
     for f in frames:
