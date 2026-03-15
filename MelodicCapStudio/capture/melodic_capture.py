@@ -1822,8 +1822,49 @@ def main():
                         help='Offline mode: process two video files instead of live cameras')
     parser.add_argument('--calib', type=str, default=None,
                         help='Path to calibration JSON (default: auto-detect)')
+    parser.add_argument('--list-cameras', action='store_true',
+                        help='List all available cameras and exit')
 
     args = parser.parse_args()
+
+    # List cameras mode
+    if args.list_cameras:
+        print("\nScanning camera indices 0-10...")
+        print("-" * 60)
+        for idx in range(11):
+            cap = cv2.VideoCapture(idx, cv2.CAP_MSMF)
+            if cap.isOpened():
+                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                backend = cap.getBackendName()
+                # Try to read a frame to confirm it's real
+                ret, frame = cap.read()
+                status = "OK" if ret else "OPEN but no frame"
+                cap.release()
+                print(f"  Index {idx}: {w}x{h} @ {fps:.0f}fps [{backend}] - {status}")
+            else:
+                cap.release()
+                # Also try CAP_ANY
+                cap2 = cv2.VideoCapture(idx, cv2.CAP_ANY)
+                if cap2.isOpened():
+                    w = int(cap2.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    h = int(cap2.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    fps = cap2.get(cv2.CAP_PROP_FPS)
+                    backend = cap2.getBackendName()
+                    ret, frame = cap2.read()
+                    status = "OK" if ret else "OPEN but no frame"
+                    cap2.release()
+                    print(f"  Index {idx}: {w}x{h} @ {fps:.0f}fps [{backend}] - {status} (CAP_ANY only)")
+                else:
+                    cap2.release()
+        print("-" * 60)
+        print("Tip: Sony ZV-1F typically shows as 1280x720 or 1920x1080 via MSMF")
+        print("     DroidCam typically shows as 1920x1080 via MSMF")
+        print(f"\nCurrent defaults: cam_a={CAM_A_INDEX}, cam_b={CAM_B_INDEX}")
+        print("Usage: python melodic_capture.py <sony_index> <droidcam_index>")
+        return
+
     cam_a = args.cam_a
     cam_b = args.cam_b
 
