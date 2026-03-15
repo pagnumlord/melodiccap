@@ -1829,25 +1829,44 @@ def main():
 
     # List cameras mode
     if args.list_cameras:
-        # First, try to get device names via Windows DirectShow (ffmpeg)
+        # Try to get device names via DirectShow (most reliable on Windows)
         device_names = {}
         try:
             import subprocess
-            # Use PowerShell to list video devices
-            ps_cmd = (
-                "Get-PnpDevice -Class Camera -Status OK | Select-Object -ExpandProperty FriendlyName; "
-                "Get-PnpDevice -Class Image -Status OK | Select-Object -ExpandProperty FriendlyName"
-            )
+            # Method 1: Use ffmpeg to list DirectShow devices
             result = subprocess.run(
-                ['powershell', '-Command', ps_cmd],
+                ['ffmpeg', '-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'],
                 capture_output=True, text=True, timeout=10
             )
-            if result.returncode == 0:
-                names = [n.strip() for n in result.stdout.strip().split('\n') if n.strip()]
-                print(f"\nWindows video devices: {names}")
-                # Map names to indices (order often matches OpenCV index order)
-                for i, name in enumerate(names):
+            # ffmpeg prints device list to stderr
+            output = result.stderr if result.stderr else ''
+            import re
+            # Parse lines like: [dshow @ ...] "Device Name" (video)
+            video_devices = []
+            for line in output.split('\n'):
+                match = re.search(r'"(.+?)"\s*\(video\)', line)
+                if match:
+                    video_devices.append(match.group(1))
+            if video_devices:
+                print(f"\nDirectShow video devices (in order):")
+                for i, name in enumerate(video_devices):
                     device_names[i] = name
+                    print(f"  [{i}] {name}")
+                print()
+            else:
+                # Method 2: PowerShell WMI fallback
+                ps_cmd = "Get-WmiObject Win32_PnPEntity | Where-Object { $_.PNPClass -eq 'Camera' -or $_.PNPClass -eq 'Image' } | Select-Object -ExpandProperty Name"
+                result2 = subprocess.run(
+                    ['powershell', '-Command', ps_cmd],
+                    capture_output=True, text=True, timeout=10
+                )
+                if result2.returncode == 0 and result2.stdout.strip():
+                    names = [n.strip() for n in result2.stdout.strip().split('\n') if n.strip()]
+                    print(f"\nWindows video devices: {names}")
+                    for i, name in enumerate(names):
+                        device_names[i] = name
+        except FileNotFoundError:
+            print("\n(ffmpeg not found - install ffmpeg to see device names)")
         except Exception as e:
             print(f"\n(Could not enumerate device names: {e})")
 
