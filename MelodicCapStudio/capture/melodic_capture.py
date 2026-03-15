@@ -75,7 +75,7 @@ from pathlib import Path
 # =============================================================================
 
 CAM_A_INDEX = 3          # Sony ZV-1F (MSMF, 1280x720)
-CAM_B_INDEX = 0          # DroidCam USB (MSMF, 1920x1080)
+CAM_B_INDEX = 2          # DroidCam USB (MSMF, 1024x576)
 
 # ChArUco board: 10x5 dual-sheet board (DICT_4X4_50)
 # Measured: 1 and 11/16 inches = 42.86mm per square
