@@ -1829,7 +1829,29 @@ def main():
 
     # List cameras mode
     if args.list_cameras:
-        print("\nScanning camera indices 0-10...")
+        # First, try to get device names via Windows DirectShow (ffmpeg)
+        device_names = {}
+        try:
+            import subprocess
+            # Use PowerShell to list video devices
+            ps_cmd = (
+                "Get-PnpDevice -Class Camera -Status OK | Select-Object -ExpandProperty FriendlyName; "
+                "Get-PnpDevice -Class Image -Status OK | Select-Object -ExpandProperty FriendlyName"
+            )
+            result = subprocess.run(
+                ['powershell', '-Command', ps_cmd],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0:
+                names = [n.strip() for n in result.stdout.strip().split('\n') if n.strip()]
+                print(f"\nWindows video devices: {names}")
+                # Map names to indices (order often matches OpenCV index order)
+                for i, name in enumerate(names):
+                    device_names[i] = name
+        except Exception as e:
+            print(f"\n(Could not enumerate device names: {e})")
+
+        print(f"\nScanning camera indices 0-10...")
         print("-" * 60)
         for idx in range(11):
             cap = cv2.VideoCapture(idx, cv2.CAP_MSMF)
@@ -1838,14 +1860,13 @@ def main():
                 h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 fps = cap.get(cv2.CAP_PROP_FPS)
                 backend = cap.getBackendName()
-                # Try to read a frame to confirm it's real
                 ret, frame = cap.read()
                 status = "OK" if ret else "OPEN but no frame"
                 cap.release()
-                print(f"  Index {idx}: {w}x{h} @ {fps:.0f}fps [{backend}] - {status}")
+                name_hint = f" <- {device_names[idx]}" if idx in device_names else ""
+                print(f"  Index {idx}: {w}x{h} @ {fps:.0f}fps [{backend}] - {status}{name_hint}")
             else:
                 cap.release()
-                # Also try CAP_ANY
                 cap2 = cv2.VideoCapture(idx, cv2.CAP_ANY)
                 if cap2.isOpened():
                     w = int(cap2.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -1855,12 +1876,11 @@ def main():
                     ret, frame = cap2.read()
                     status = "OK" if ret else "OPEN but no frame"
                     cap2.release()
-                    print(f"  Index {idx}: {w}x{h} @ {fps:.0f}fps [{backend}] - {status} (CAP_ANY only)")
+                    name_hint = f" <- {device_names[idx]}" if idx in device_names else ""
+                    print(f"  Index {idx}: {w}x{h} @ {fps:.0f}fps [{backend}] - {status} (CAP_ANY only){name_hint}")
                 else:
                     cap2.release()
         print("-" * 60)
-        print("Tip: Sony ZV-1F typically shows as 1280x720 or 1920x1080 via MSMF")
-        print("     DroidCam typically shows as 1920x1080 via MSMF")
         print(f"\nCurrent defaults: cam_a={CAM_A_INDEX}, cam_b={CAM_B_INDEX}")
         print("Usage: python melodic_capture.py <sony_index> <droidcam_index>")
         return
