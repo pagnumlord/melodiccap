@@ -53,6 +53,7 @@ Controls:
   F = Floor calibration
   V = Verify calibration (show board, checks triangulation accuracy)
   R = Record motion capture (requires verified calibration + floor)
+  D = Dump raw video from both cameras (for offline re-processing)
   Q = Quit
 """
 
@@ -97,6 +98,7 @@ FLOOR_CHARUCO_MARKER_M = 0.0476   # 47.6mm markers (75% of square)
 BASE_DIR = Path(__file__).parent.parent  # MelodicCapStudio/
 CALIBRATION_FILE = BASE_DIR / "calibration" / "stereo_calibration.json"
 TAKES_DIR = BASE_DIR / "takes"
+VIDEOS_DIR = BASE_DIR / "videos"
 LOGS_DIR = BASE_DIR / "logs"
 
 # Recording settings
@@ -2052,6 +2054,7 @@ def main():
     log("  F = Floor calibration (lay board flat on floor)")
     log("  V = Verify calibration (show board to both cameras, checks accuracy)")
     log("  R = Start/stop recording motion capture (requires verified calibration)")
+    log("  D = Start/stop raw video dump (saves .mp4 for offline re-processing)")
     log("  Q = Quit")
 
     # Wrap cameras in threaded readers for parallel grabs during recording
@@ -2073,6 +2076,15 @@ def main():
     status = "Ready" if calib_data else "Press C to calibrate"
     recorded_frames = []
     record_start_time = 0
+
+    # Raw video dump state
+    video_dumping = False
+    video_writer_a = None
+    video_writer_b = None
+    video_dump_start = 0
+    video_dump_frames = 0
+    video_file_a = None
+    video_file_b = None
 
     # Calibration health state
     cal_verified = False           # True once verification passes
@@ -2122,6 +2134,12 @@ def main():
 
             frame_count += 1
             grab_delay = t_grab_done - t_grab_a
+
+            # Write raw frames to video files if dumping
+            if video_dumping and video_writer_a and video_writer_b:
+                video_writer_a.write(frame_a)
+                video_writer_b.write(frame_b)
+                video_dump_frames += 1
 
             if recording:
                 frame_grab_delays.append(grab_delay)
@@ -2406,6 +2424,14 @@ def main():
                         cv2.putText(combined, "LOST!", (w//2-30, 30),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
+            # Video dump indicator
+            if video_dumping:
+                h, w = combined.shape[:2]
+                cv2.circle(combined, (30, 30), 12, (0, 165, 255), -1)  # Orange dot
+                elapsed = time.time() - video_dump_start
+                cv2.putText(combined, f"VID {video_dump_frames}f {elapsed:.1f}s", (50, 35),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1)
+
             # Automatic calibration verification (when board visible, not recording, throttled)
             if (not recording and not collecting_cal and not floor_mode
                     and calib_data and board_a and board_b
@@ -2650,10 +2676,67 @@ def main():
                     status = "GET READY..."
                     log("[REC] Countdown started")
 
+            elif key == ord('d'):
+                if video_dumping:
+                    # Stop video dump
+                    video_dumping = False
+                    if video_writer_a:
+                        video_writer_a.release()
+                        video_writer_a = None
+                    if video_writer_b:
+                        video_writer_b.release()
+                        video_writer_b = None
+                    elapsed = time.time() - video_dump_start
+                    log(f"[VID] Stopped: {video_dump_frames} frames in {elapsed:.1f}s")
+                    log(f"[VID] Camera A: {video_file_a}")
+                    log(f"[VID] Camera B: {video_file_b}")
+                    log(f"[VID] To process offline, run:")
+                    log(f'  python melodic_capture.py --offline "{video_file_a}" "{video_file_b}"')
+                    status = f"Video saved! {video_dump_frames}f — see console for offline command"
+                else:
+                    if recording:
+                        status = "Stop motion recording first (R) before video dump"
+                    else:
+                        # Start video dump
+                        VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        video_file_a = str(VIDEOS_DIR / f"cam_a_{timestamp}.mp4")
+                        video_file_b = str(VIDEOS_DIR / f"cam_b_{timestamp}.mp4")
+                        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                        fps_out = 30.0
+                        video_writer_a = cv2.VideoWriter(video_file_a, fourcc, fps_out, (PROC_W, PROC_H))
+                        video_writer_b = cv2.VideoWriter(video_file_b, fourcc, fps_out, (PROC_W, PROC_H))
+                        if video_writer_a.isOpened() and video_writer_b.isOpened():
+                            video_dumping = True
+                            video_dump_start = time.time()
+                            video_dump_frames = 0
+                            status = "VIDEO RECORDING — press D to stop"
+                            log(f"[VID] Started: {video_file_a}")
+                            log(f"[VID] Started: {video_file_b}")
+                        else:
+                            log("[VID] Failed to open video writers!", "ERROR")
+                            if video_writer_a:
+                                video_writer_a.release()
+                                video_writer_a = None
+                            if video_writer_b:
+                                video_writer_b.release()
+                                video_writer_b = None
+                            status = "Video dump failed — check console"
+
     except Exception as e:
         log(f"FATAL ERROR: {e}", "ERROR")
         log(traceback.format_exc(), "ERROR")
     finally:
+        # Release video writers if still active
+        if video_writer_a:
+            video_writer_a.release()
+            if video_dumping:
+                log(f"[VID] Auto-saved Camera A: {video_file_a}")
+        if video_writer_b:
+            video_writer_b.release()
+            if video_dumping:
+                log(f"[VID] Auto-saved Camera B: {video_file_b}")
+                log(f'[VID] To process: python melodic_capture.py --offline "{video_file_a}" "{video_file_b}"')
         mp_executor.shutdown(wait=False)
         threaded_a.release()
         threaded_b.release()
