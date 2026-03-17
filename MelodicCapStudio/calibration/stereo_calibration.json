@@ -163,9 +163,9 @@
   "rms_cam_b": 0.40036988029122206,
   "rms_stereo": 0.7918518144076693,
   "baseline_meters": 1.2165253851030449,
-  "floor_z_offset": 0.9199482798576355,
+  "floor_z_offset": -11.427848815917969,
   "floor_calibrated": true,
   "frames_used": 51,
-  "floor_z_std": 0.009059766307473183,
-  "floor_z_range": 0.022784650325775146
+  "floor_z_std": 3.7883877754211426,
+  "floor_z_range": 10.5672607421875
 }

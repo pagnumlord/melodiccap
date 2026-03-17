@@ -1,0 +1,203 @@
+[INFO] Log file: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\logs\capture_session_20260316_223457.log
+[INFO] Session started: 2026-03-16T22:34:57.133256
+[INFO] Python: 3.12.6 (tags/v3.12.6:a4a2d2b, Sep  6 2024, 20:11:23) [MSC v.1940 64 bit (AMD64)]
+[INFO] OpenCV: 4.12.0
+[INFO] MediaPipe: 0.10.14
+[INFO] ============================================================
+[INFO] MELODICCAP STUDIO - MOTION CAPTURE v3.1
+[INFO] ============================================================
+[INFO] 
+  Configuration:
+[INFO]     Camera A index: 3
+[INFO]     Camera B index: 0
+[INFO]     Countdown: 10s
+[INFO]     Grace period: 30 frames
+[INFO]     Outlier threshold: 2.0m
+[INFO]     Min visibility: 0.3
+[INFO]     MediaPipe complexity: 1
+[INFO]     MediaPipe detection conf: 0.3
+[INFO]     MediaPipe tracking conf: 0.3
+[INFO]     Base dir: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio
+[INFO]     Calibration file: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\calibration\stereo_calibration.json
+[INFO]     Takes dir: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\takes
+[INFO]     ChArUco board: 10x5 (36 max corners)
+[INFO]     Floor board: 4x3 (6 max corners, 63.5mm squares)
+[INFO]   MediaPipe model complexity: 1
+[INFO] 
+[CAMERAS]
+[INFO]   Opening Camera A (index 3, MSMF)...
+[INFO]     Native: 1280x720 @ 30.0fps
+[INFO]   Opening Camera B (index 0, CAP_ANY)...
+[INFO]     Native: 1280x720 @ 30.0fps
+[INFO] 
+  Processing resolution: 1280x720
+[INFO]     Both cameras match - no resizing needed
+[INFO] 
+[CALIBRATION] Loaded (vstudio-2.1-robust, Stereo RMS: 0.7919, Baseline: 1.217m)
+[INFO] [FLOOR] Offset: 0.9199m
+[INFO] 
+[CONTROLS]
+[INFO]   C = Collect calibration frames (hold board visible to both cameras)
+[INFO]   S = Run stereo calibration (after collecting 15+ frames)
+[INFO]   F = Floor calibration (lay board flat on floor)
+[INFO]   V = Verify calibration (show board to both cameras, checks accuracy)
+[INFO]   R = Start/stop recording motion capture (requires verified calibration)
+[INFO]   Q = Quit
+[INFO] [CAL] Collection started
+[INFO] [CAL] Frame 1: 35 common corners
+[INFO] [CAL] Frame 2: 36 common corners
+[INFO] [CAL] Frame 3: 36 common corners
+[INFO] [CAL] Frame 4: 35 common corners
+[INFO] [CAL] Frame 5: 35 common corners
+[INFO] [CAL] Frame 6: 35 common corners
+[INFO] [CAL] Frame 7: 35 common corners
+[INFO] [CAL] Frame 8: 35 common corners
+[INFO] [CAL] Frame 9: 36 common corners
+[INFO] [CAL] Frame 10: 35 common corners
+[INFO] [CAL] Frame 11: 36 common corners
+[INFO] [CAL] Frame 12: 35 common corners
+[INFO] [CAL] Frame 13: 35 common corners
+[INFO] [CAL] Frame 14: 35 common corners
+[INFO] [CAL] Frame 15: 36 common corners
+[INFO] [CAL] Frame 16: 35 common corners
+[INFO] [CAL] Frame 17: 36 common corners
+[INFO] [CAL] Frame 18: 35 common corners
+[INFO] [CAL] Frame 19: 35 common corners
+[INFO] [CAL] Frame 20: 35 common corners
+[INFO] [CAL] Frame 21: 36 common corners
+[INFO] [CAL] Frame 22: 35 common corners
+[INFO] [CAL] Frame 23: 35 common corners
+[INFO] [CAL] Frame 24: 35 common corners
+[INFO] [CAL] Frame 25: 35 common corners
+[INFO] [CAL] Frame 26: 36 common corners
+[INFO] [CAL] Frame 27: 36 common corners
+[INFO] [CAL] Frame 28: 35 common corners
+[INFO] [CAL] Frame 29: 35 common corners
+[INFO] [CAL] Frame 30: 35 common corners
+[INFO] [CAL] Frame 31: 36 common corners
+[INFO] [CAL] Frame 32: 35 common corners
+[INFO] [CAL] Frame 33: 36 common corners
+[INFO] [CAL] Frame 34: 36 common corners
+[INFO] [CAL] Frame 35: 36 common corners
+[INFO] [CAL] Frame 36: 36 common corners
+[INFO] [CAL] Frame 37: 36 common corners
+[INFO] [CAL] Frame 38: 36 common corners
+[INFO] [CAL] Frame 39: 35 common corners
+[INFO] [CAL] Frame 40: 36 common corners
+[INFO] [CAL] Frame 41: 35 common corners
+[INFO] [CAL] Frame 42: 36 common corners
+[INFO] [CAL] Frame 43: 35 common corners
+[INFO] [CAL] Frame 44: 35 common corners
+[INFO] [CAL] Frame 45: 35 common corners
+[INFO] [CAL] Frame 46: 36 common corners
+[INFO] [CAL] Frame 47: 36 common corners
+[INFO] [CAL] Frame 48: 36 common corners
+[INFO] [CAL] Frame 49: 36 common corners
+[INFO] [CAL] Frame 50: 35 common corners
+[INFO] [CAL] Collection stopped: 50 frames
+[INFO] ==================================================
+[INFO] STEREO CALIBRATION (iterative outlier rejection)
+[INFO] ==================================================
+[INFO]   Frame 0: 35 common corners
+[INFO]   Frame 1: 36 common corners
+[INFO]   Frame 2: 36 common corners
+[INFO]   Frame 3: 35 common corners
+[INFO]   Frame 4: 35 common corners
+[INFO]   Frame 5: 35 common corners
+[INFO]   Frame 6: 35 common corners
+[INFO]   Frame 7: 35 common corners
+[INFO]   Frame 8: 36 common corners
+[INFO]   Frame 9: 35 common corners
+[INFO]   Frame 10: 36 common corners
+[INFO]   Frame 11: 35 common corners
+[INFO]   Frame 12: 35 common corners
+[INFO]   Frame 13: 35 common corners
+[INFO]   Frame 14: 36 common corners
+[INFO]   Frame 15: 35 common corners
+[INFO]   Frame 16: 36 common corners
+[INFO]   Frame 17: 35 common corners
+[INFO]   Frame 18: 35 common corners
+[INFO]   Frame 19: 35 common corners
+[INFO]   Frame 20: 36 common corners
+[INFO]   Frame 21: 35 common corners
+[INFO]   Frame 22: 35 common corners
+[INFO]   Frame 23: 35 common corners
+[INFO]   Frame 24: 35 common corners
+[INFO]   Frame 25: 36 common corners
+[INFO]   Frame 26: 36 common corners
+[INFO]   Frame 27: 35 common corners
+[INFO]   Frame 28: 35 common corners
+[INFO]   Frame 29: 35 common corners
+[INFO]   Frame 30: 36 common corners
+[INFO]   Frame 31: 35 common corners
+[INFO]   Frame 32: 36 common corners
+[INFO]   Frame 33: 36 common corners
+[INFO]   Frame 34: 36 common corners
+[INFO]   Frame 35: 36 common corners
+[INFO]   Frame 36: 36 common corners
+[INFO]   Frame 37: 36 common corners
+[INFO]   Frame 38: 35 common corners
+[INFO]   Frame 39: 36 common corners
+[INFO]   Frame 40: 35 common corners
+[INFO]   Frame 41: 36 common corners
+[INFO]   Frame 42: 35 common corners
+[INFO]   Frame 43: 35 common corners
+[INFO]   Frame 44: 35 common corners
+[INFO]   Frame 45: 36 common corners
+[INFO]   Frame 46: 36 common corners
+[INFO]   Frame 47: 36 common corners
+[INFO]   Frame 48: 36 common corners
+[INFO]   Frame 49: 35 common corners
+[INFO] Valid pairs: 50/50
+[INFO] 
+--- Iteration 1/5 ---
+[INFO] Active frames: 50
+[INFO]   Using full 5-param distortion model: 1772 total corner observations
+[INFO]   Camera A RMS: 0.3866 (fx=729.0, fy=697.4)
+[INFO]   Camera B RMS: 0.3851 (fx=758.3, fy=793.5)
+[INFO]   Stereo RMS: 0.8619
+[INFO]   Baseline: 2.043m
+[INFO]   Stereo RMS 0.8619 is good, stopping iteration
+[INFO] 
+  BEST RESULT: Stereo RMS=0.8619, 50 frames, baseline=2.043m
+[WARN] 
+  WARNING: Existing calibration (RMS=0.7919) is BETTER than new (RMS=0.8619)
+[WARN]   KEEPING existing calibration. New result NOT saved.
+[WARN]   To improve: try more varied board angles, move board more slowly,
+[WARN]   ensure 30+ frames, and check that both cameras see the full board.
+[INFO] [FLOOR] Mode ON
+[INFO]   [FLOOR] Attempting floor calibration...
+[INFO]     [FLOOR DBG] Found 5 ArUco markers, IDs: [0, 1, 2, 3, 4]
+[INFO]     [FLOOR DBG] Best orientation: 4x3, charuco corners: 5
+[INFO]     [FLOOR DBG] Found 5 ArUco markers, IDs: [0, 1, 2, 3, 5]
+[INFO]     [FLOOR DBG] Best orientation: 4x3, charuco corners: 4
+[WARN] [FLOOR] Failed: Only 3 common corners
+[INFO]   [FLOOR] Attempting floor calibration...
+[INFO]     [FLOOR DBG] Found 5 ArUco markers, IDs: [1, 2, 3, 4, 5]
+[INFO]     [FLOOR DBG] Best orientation: 4x3, charuco corners: 4
+[INFO]     [FLOOR DBG] Found 5 ArUco markers, IDs: [0, 1, 3, 4, 5]
+[INFO]     [FLOOR DBG] Best orientation: 4x3, charuco corners: 4
+[WARN] [FLOOR] Failed: Only 3 common corners
+[INFO]   [FLOOR] Attempting floor calibration...
+[INFO]     [FLOOR DBG] Found 5 ArUco markers, IDs: [1, 2, 3, 4, 5]
+[INFO]     [FLOOR DBG] Best orientation: 4x3, charuco corners: 4
+[INFO]     [FLOOR DBG] Found 6 ArUco markers, IDs: [0, 1, 2, 3, 4, 5]
+[INFO]     [FLOOR DBG] Best orientation: 4x3, charuco corners: 6
+[INFO]   Floor calibration: 4 points
+[INFO]     Blender Z values: [ 6.048119 16.61538  12.400617 10.647283]
+[INFO]     Mean: 11.4278m, Std: 3.7884m, Range: 10.5673m
+[INFO]     Floor offset: -11.4278m
+[WARN]     WARNING: Floor point spread is high (3.7884m std). Board might not be flat or calibration is noisy.
+[INFO] [FLOOR] Floor offset: -11.428m (std: 3.788m)
+[INFO] [VERIFY] Board not visible in both cameras
+[INFO] [VERIFY] PASSED: Board error: 9.4mm avg, 15.5mm max (13 pairs) — OK
+[INFO] [REC] Countdown started
+[INFO] [REC] Recording started
+[INFO] [REC] Recording stopped
+[INFO] No frames recorded
+[INFO] [REC] Countdown started
+[INFO] [REC] Recording started
+[INFO] [REC] Recording stopped
+[INFO] No frames recorded
+[INFO] 
+[DONE] Session ended
