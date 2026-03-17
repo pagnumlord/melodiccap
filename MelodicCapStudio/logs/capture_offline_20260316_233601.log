@@ -1,0 +1,108 @@
+[INFO] Log file: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\logs\capture_offline_20260316_233601.log
+[INFO] Session started: 2026-03-16T23:36:01.757247
+[INFO] Python: 3.12.6 (tags/v3.12.6:a4a2d2b, Sep  6 2024, 20:11:23) [MSC v.1940 64 bit (AMD64)]
+[INFO] OpenCV: 4.12.0
+[INFO] MediaPipe: 0.10.14
+[INFO] ============================================================
+[INFO] MELODICCAP STUDIO - OFFLINE PROCESSING
+[INFO] ============================================================
+[INFO]   Calibration: RMS=0.6679, baseline=2.116m
+[INFO]   Video A: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\videos\cam_a_20260316_232706.mp4
+[INFO]     1280x720 @ 30.0fps, 1403 frames
+[INFO]   Video B: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\videos\cam_b_20260316_232706.mp4
+[INFO]     1280x720 @ 30.0fps, 1403 frames
+[INFO]   Processing resolution: 1280x720 (from calibration)
+[INFO] 
+  [SYNC] Scanning for flash sync...
+[INFO]     No flash detected — assuming simultaneous start
+[INFO]     Processing 1403 synchronized frames
+[INFO] 
+  Processing frames...
+[INFO]     Frame 100/1403 (5.0 fps, ETA 263s)
+[INFO]     Frame 200/1403 (5.0 fps, ETA 241s)
+[INFO]     Frame 300/1403 (5.0 fps, ETA 220s)
+[INFO]     Frame 400/1403 (5.0 fps, ETA 200s)
+[INFO]     Frame 500/1403 (5.0 fps, ETA 179s)
+[INFO]     Frame 600/1403 (5.0 fps, ETA 159s)
+[INFO]     Frame 700/1403 (5.0 fps, ETA 139s)
+[INFO]     Frame 800/1403 (5.0 fps, ETA 119s)
+[INFO]     Frame 900/1403 (5.1 fps, ETA 100s)
+[INFO]     Frame 1000/1403 (5.1 fps, ETA 80s)
+[INFO]     Frame 1100/1403 (5.1 fps, ETA 60s)
+[INFO]     Frame 1200/1403 (5.1 fps, ETA 40s)
+[INFO]     Frame 1300/1403 (5.1 fps, ETA 20s)
+[INFO]     Frame 1400/1403 (5.1 fps, ETA 1s)
+[INFO] 
+  Processing complete: 990 frames in 277.2s (3.6 fps)
+[INFO] ==================================================
+[INFO] POST-PROCESSING TAKE v3.0
+[INFO] ==================================================
+[INFO]   Actual FPS: 21.2
+[INFO] 
+  [Step 1] Adaptive velocity-based outlier rejection
+[INFO]     Replaced 2414 outlier positions
+[INFO]       right_eye_inner (4): 478 outliers
+[INFO]       left_foot_index (31): 416 outliers
+[INFO]       left_eye_inner (1): 402 outliers
+[INFO]       left_eye (2): 373 outliers
+[INFO]       left_eye_outer (3): 356 outliers
+[INFO] 
+  [Step 1b] Acceleration-based outlier rejection
+[INFO]     Replaced 22 acceleration-spike positions
+[INFO] 
+  [Step 2] Bone-length stabilization (strict enforcement)
+[INFO]     Reference bone lengths (median over all frames):
+[INFO]       shoulders      : 0.368m
+[INFO]       hips           : 0.210m
+[INFO]       l_upper_arm    : 0.309m
+[INFO]       l_forearm      : 0.283m
+[INFO]       r_upper_arm    : 0.314m
+[INFO]       r_forearm      : 0.283m
+[INFO]       l_thigh        : 0.432m
+[INFO]       l_shin         : 1.761m
+[INFO]       r_thigh        : 0.421m
+[INFO]       r_shin         : 0.410m
+[INFO]       l_torso        : 0.553m
+[INFO]       r_torso        : 0.550m
+[INFO]     Applied 3697 bone-length corrections
+[INFO] 
+  [Step 3] Biomechanical joint-angle constraints
+[INFO]     Fixed 3 joint-angle violations
+[INFO] 
+  [Step 4] Temporal smoothing (5-frame Gaussian-weighted)
+[INFO]     Smoothed 33 landmarks across 990 frames
+[INFO] 
+  [Step 5] Re-enforce bone lengths after smoothing
+[INFO]     Applied 1067 post-smoothing bone corrections
+[INFO] 
+  [Step 6] Trim end-of-recording junk (last 1.5s)
+[INFO]     Trimmed 45 frames (1.5s) from end
+[INFO] 
+  [Step 6b] Trim collapsed frames (skeleton height < 70% of reference)
+[INFO]     Could not measure reference height (missing nose/ankle)
+[INFO] 
+  [Step 7] Floor clamping (feet z >= 0)
+[INFO]     Clamped 0 foot positions to floor
+[INFO] 
+  DATA QUALITY REPORT:
+[INFO]     Input frames:  990
+[INFO]     Output frames: 945
+[INFO]     Velocity outliers fixed: 2414
+[INFO]     Acceleration outliers fixed: 22
+[INFO]     Bone corrections: 3697 (initial) + 1067 (post-smooth)
+[INFO]     Joint-angle fixes: 3
+[INFO]     Floor clamps: 0
+[INFO] 
+    Final bone-length consistency (should all be ~0%):
+[WARN] 
+    QUALITY: POOR (53 outliers/sec) — recalibrate with larger board
+[INFO] 
+============================================================
+[INFO] OFFLINE TAKE SAVED
+[INFO] ============================================================
+[INFO]   File: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\takes\take_offline_20260316_234041.json
+[INFO]   Size: 1.0 MB
+[INFO]   Frames: 945
+[INFO]   Duration: 45.2s
+[INFO]   Processing time: 277.2s
+[INFO]   Outliers filtered: 25563
