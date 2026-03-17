@@ -1,0 +1,215 @@
+[INFO] Log file: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\logs\capture_session_20260316_230954.log
+[INFO] Session started: 2026-03-16T23:09:54.946246
+[INFO] Python: 3.12.6 (tags/v3.12.6:a4a2d2b, Sep  6 2024, 20:11:23) [MSC v.1940 64 bit (AMD64)]
+[INFO] OpenCV: 4.12.0
+[INFO] MediaPipe: 0.10.14
+[INFO] ============================================================
+[INFO] MELODICCAP STUDIO - MOTION CAPTURE v3.1
+[INFO] ============================================================
+[INFO] 
+  Configuration:
+[INFO]     Camera A index: 3
+[INFO]     Camera B index: 0
+[INFO]     Countdown: 10s
+[INFO]     Grace period: 30 frames
+[INFO]     Outlier threshold: 2.0m
+[INFO]     Min visibility: 0.3
+[INFO]     MediaPipe complexity: 1
+[INFO]     MediaPipe detection conf: 0.3
+[INFO]     MediaPipe tracking conf: 0.3
+[INFO]     Base dir: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio
+[INFO]     Calibration file: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\calibration\stereo_calibration.json
+[INFO]     Takes dir: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\takes
+[INFO]     ChArUco board: 10x5 (36 max corners)
+[INFO]     Floor board: 4x3 (6 max corners, 63.5mm squares)
+[INFO]   MediaPipe model complexity: 1
+[INFO] 
+[CAMERAS]
+[INFO]   Opening Camera A (index 3, MSMF)...
+[INFO]     Native: 1280x720 @ 30.0fps
+[INFO]   Opening Camera B (index 0, CAP_ANY)...
+[INFO]     Native: 1280x720 @ 30.0fps
+[INFO] 
+  Processing resolution: 1280x720
+[INFO]     Both cameras match - no resizing needed
+[INFO] 
+[CALIBRATION] Loaded (vstudio-2.1-robust, Stereo RMS: 0.7919, Baseline: 1.217m)
+[INFO] [FLOOR] Offset: -11.4278m
+[INFO] 
+[CONTROLS]
+[INFO]   C = Collect calibration frames (hold board visible to both cameras)
+[INFO]   S = Run stereo calibration (after collecting 15+ frames)
+[INFO]   F = Floor calibration (lay board flat on floor)
+[INFO]   V = Verify calibration (show board to both cameras, checks accuracy)
+[INFO]   R = Start/stop recording motion capture (requires verified calibration)
+[INFO]   D = Start/stop raw video dump (saves .mp4 for offline re-processing)
+[INFO]   Q = Quit
+[INFO] [CAL] Collection started
+[INFO] [CAL] Frame 1: 36 common corners
+[INFO] [CAL] Frame 2: 35 common corners
+[INFO] [CAL] Frame 3: 35 common corners
+[INFO] [CAL] Frame 4: 36 common corners
+[INFO] [CAL] Frame 5: 36 common corners
+[INFO] [CAL] Frame 6: 35 common corners
+[INFO] [CAL] Frame 7: 36 common corners
+[INFO] [CAL] Frame 8: 36 common corners
+[INFO] [CAL] Frame 9: 35 common corners
+[INFO] [CAL] Frame 10: 35 common corners
+[INFO] [CAL] Frame 11: 36 common corners
+[INFO] [CAL] Frame 12: 36 common corners
+[INFO] [CAL] Frame 13: 35 common corners
+[INFO] [CAL] Frame 14: 36 common corners
+[INFO] [CAL] Frame 15: 36 common corners
+[INFO] [CAL] Frame 16: 35 common corners
+[INFO] [CAL] Frame 17: 35 common corners
+[INFO] [CAL] Frame 18: 36 common corners
+[INFO] [CAL] Frame 19: 35 common corners
+[INFO] [CAL] Frame 20: 35 common corners
+[INFO] [CAL] Frame 21: 35 common corners
+[INFO] [CAL] Frame 22: 35 common corners
+[INFO] [CAL] Frame 23: 36 common corners
+[INFO] [CAL] Frame 24: 36 common corners
+[INFO] [CAL] Frame 25: 36 common corners
+[INFO] [CAL] Frame 26: 36 common corners
+[INFO] [CAL] Frame 27: 36 common corners
+[INFO] [CAL] Frame 28: 35 common corners
+[INFO] [CAL] Frame 29: 36 common corners
+[INFO] [CAL] Frame 30: 36 common corners
+[INFO] [CAL] Frame 31: 35 common corners
+[INFO] [CAL] Frame 32: 36 common corners
+[INFO] [CAL] Frame 33: 35 common corners
+[INFO] [CAL] Frame 34: 35 common corners
+[INFO] [CAL] Frame 35: 35 common corners
+[INFO] [CAL] Frame 36: 36 common corners
+[INFO] [CAL] Frame 37: 35 common corners
+[INFO] [CAL] Frame 38: 35 common corners
+[INFO] [CAL] Frame 39: 35 common corners
+[INFO] [CAL] Frame 40: 36 common corners
+[INFO] [CAL] Frame 41: 35 common corners
+[INFO] [CAL] Frame 42: 35 common corners
+[INFO] [CAL] Frame 43: 36 common corners
+[INFO] [CAL] Frame 44: 35 common corners
+[INFO] [CAL] Frame 45: 35 common corners
+[INFO] [CAL] Frame 46: 35 common corners
+[INFO] [CAL] Frame 47: 36 common corners
+[INFO] [CAL] Frame 48: 35 common corners
+[INFO] [CAL] Frame 49: 35 common corners
+[INFO] [CAL] Frame 50: 36 common corners
+[INFO] [CAL] Frame 51: 35 common corners
+[INFO] [CAL] Frame 52: 36 common corners
+[INFO] [CAL] Collection stopped: 52 frames
+[INFO] ==================================================
+[INFO] STEREO CALIBRATION (iterative outlier rejection)
+[INFO] ==================================================
+[INFO]   Frame 0: 36 common corners
+[INFO]   Frame 1: 35 common corners
+[INFO]   Frame 2: 35 common corners
+[INFO]   Frame 3: 36 common corners
+[INFO]   Frame 4: 36 common corners
+[INFO]   Frame 5: 35 common corners
+[INFO]   Frame 6: 36 common corners
+[INFO]   Frame 7: 36 common corners
+[INFO]   Frame 8: 35 common corners
+[INFO]   Frame 9: 35 common corners
+[INFO]   Frame 10: 36 common corners
+[INFO]   Frame 11: 36 common corners
+[INFO]   Frame 12: 35 common corners
+[INFO]   Frame 13: 36 common corners
+[INFO]   Frame 14: 36 common corners
+[INFO]   Frame 15: 35 common corners
+[INFO]   Frame 16: 35 common corners
+[INFO]   Frame 17: 36 common corners
+[INFO]   Frame 18: 35 common corners
+[INFO]   Frame 19: 35 common corners
+[INFO]   Frame 20: 35 common corners
+[INFO]   Frame 21: 35 common corners
+[INFO]   Frame 22: 36 common corners
+[INFO]   Frame 23: 36 common corners
+[INFO]   Frame 24: 36 common corners
+[INFO]   Frame 25: 36 common corners
+[INFO]   Frame 26: 36 common corners
+[INFO]   Frame 27: 35 common corners
+[INFO]   Frame 28: 36 common corners
+[INFO]   Frame 29: 36 common corners
+[INFO]   Frame 30: 35 common corners
+[INFO]   Frame 31: 36 common corners
+[INFO]   Frame 32: 35 common corners
+[INFO]   Frame 33: 35 common corners
+[INFO]   Frame 34: 35 common corners
+[INFO]   Frame 35: 36 common corners
+[INFO]   Frame 36: 35 common corners
+[INFO]   Frame 37: 35 common corners
+[INFO]   Frame 38: 35 common corners
+[INFO]   Frame 39: 36 common corners
+[INFO]   Frame 40: 35 common corners
+[INFO]   Frame 41: 35 common corners
+[INFO]   Frame 42: 36 common corners
+[INFO]   Frame 43: 35 common corners
+[INFO]   Frame 44: 35 common corners
+[INFO]   Frame 45: 35 common corners
+[INFO]   Frame 46: 36 common corners
+[INFO]   Frame 47: 35 common corners
+[INFO]   Frame 48: 35 common corners
+[INFO]   Frame 49: 36 common corners
+[INFO]   Frame 50: 35 common corners
+[INFO]   Frame 51: 36 common corners
+[INFO] Valid pairs: 52/52
+[INFO] 
+--- Iteration 1/5 ---
+[INFO] Active frames: 52
+[INFO]   Using full 5-param distortion model: 1844 total corner observations
+[INFO]   Camera A RMS: 0.4187 (fx=726.4, fy=706.7)
+[INFO]   Camera B RMS: 0.3976 (fx=810.8, fy=816.2)
+[INFO]   Stereo RMS: 0.6679
+[INFO]   Baseline: 2.116m
+[INFO]   Stereo RMS 0.6679 is good, stopping iteration
+[INFO] 
+  BEST RESULT: Stereo RMS=0.6679, 52 frames, baseline=2.116m
+[INFO]   Previous calibration backed up to stereo_calibration.json.prev
+[INFO] Saved: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\calibration\stereo_calibration.json
+[INFO] [FLOOR] Auto-entering floor mode after stereo calibration
+[INFO]   [FLOOR] Attempting floor calibration...
+[INFO]     [FLOOR DBG] Found 5 ArUco markers, IDs: [0, 2, 3, 4, 5]
+[INFO]     [FLOOR DBG] Best orientation: 4x3, charuco corners: 5
+[INFO]     [FLOOR DBG] Found 5 ArUco markers, IDs: [0, 1, 2, 3, 5]
+[INFO]     [FLOOR DBG] Best orientation: 4x3, charuco corners: 4
+[WARN] [FLOOR] Failed: Only 3 common corners
+[INFO]   [FLOOR] Attempting floor calibration...
+[INFO]     [FLOOR DBG] Found 5 ArUco markers, IDs: [1, 2, 3, 4, 5]
+[INFO]     [FLOOR DBG] Best orientation: 4x3, charuco corners: 4
+[INFO]     [FLOOR DBG] Found 5 ArUco markers, IDs: [0, 1, 2, 3, 5]
+[INFO]     [FLOOR DBG] Best orientation: 4x3, charuco corners: 4
+[WARN] [FLOOR] Failed: Only 2 common corners
+[INFO]   [FLOOR] Attempting floor calibration...
+[INFO]     [FLOOR DBG] Found 5 ArUco markers, IDs: [1, 2, 3, 4, 5]
+[INFO]     [FLOOR DBG] Best orientation: 4x3, charuco corners: 4
+[INFO]     [FLOOR DBG] Found 6 ArUco markers, IDs: [0, 1, 2, 3, 4, 5]
+[INFO]     [FLOOR DBG] Best orientation: 4x3, charuco corners: 6
+[INFO]   Floor calibration: 4 points
+[INFO]     Blender Z values: [-0.89826465 -0.9396155  -0.93155354 -0.923393  ]
+[INFO]     Mean: -0.9232m, Std: 0.0155m, Range: 0.0414m
+[INFO]     Floor offset: 0.9232m
+[INFO] [FLOOR] Floor offset: 0.923m (std: 0.016m)
+[INFO] [VERIFY] Board not visible in both cameras
+[INFO] [VERIFY] PASSED: Board error: 0.7mm avg, 1.5mm max (5 pairs) — GOOD
+[INFO] [VERIFY] PASSED: Board error: 0.6mm avg, 1.8mm max (19 pairs) — GOOD
+[INFO] [VERIFY] PASSED: Board error: 0.6mm avg, 1.8mm max (24 pairs) — GOOD
+[INFO] [VERIFY] PASSED: Board error: 0.7mm avg, 2.2mm max (5 pairs) — GOOD
+[INFO] [VERIFY] PASSED: Board error: 0.9mm avg, 1.7mm max (8 pairs) — GOOD
+[INFO] [VERIFY] PASSED: Board error: 0.7mm avg, 2.0mm max (22 pairs) — GOOD
+[INFO] [VID] Started: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\videos\cam_a_20260316_232706.mp4
+[INFO] [VID] Started: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\videos\cam_b_20260316_232706.mp4
+[INFO] [VID] Stopped: 1403 frames in 26.9s
+[INFO] [VID] Camera A: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\videos\cam_a_20260316_232706.mp4
+[INFO] [VID] Camera B: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\videos\cam_b_20260316_232706.mp4
+[INFO] [VID] To process offline, run:
+[INFO]   python melodic_capture.py --offline "C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\videos\cam_a_20260316_232706.mp4" "C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\videos\cam_b_20260316_232706.mp4"
+[INFO] [VID] Started: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\videos\cam_a_20260316_232738.mp4
+[INFO] [VID] Started: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\videos\cam_b_20260316_232738.mp4
+[INFO] [VID] Stopped: 983 frames in 18.8s
+[INFO] [VID] Camera A: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\videos\cam_a_20260316_232738.mp4
+[INFO] [VID] Camera B: C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\videos\cam_b_20260316_232738.mp4
+[INFO] [VID] To process offline, run:
+[INFO]   python melodic_capture.py --offline "C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\videos\cam_a_20260316_232738.mp4" "C:\Users\ninja\Documents\melodiccap\MelodicCapStudio\videos\cam_b_20260316_232738.mp4"
+[INFO] 
+[DONE] Session ended
