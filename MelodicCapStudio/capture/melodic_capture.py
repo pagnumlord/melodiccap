@@ -1105,6 +1105,12 @@ def run_stereo_calibration(frames_a, frames_b, max_iterations=5, outlier_thresho
         if fx < img_w * 0.3 or fx > img_w * 3.0 or fy < img_w * 0.3 or fy > img_w * 3.0:
             log(f"\n  REJECTED: Camera {cam_name} focal length implausible (fx={fx:.1f}, fy={fy:.1f}) for {img_w}px width", "WARN")
             return None, f"Camera {cam_name} focal length implausible (fx={fx:.0f}). Calibration data insufficient."
+        # fx and fy should be within ~2% of each other (square pixels on modern sensors)
+        fx_fy_ratio = abs(fx - fy) / max(fx, fy)
+        if fx_fy_ratio > 0.03:
+            log(f"\n  WARNING: Camera {cam_name} fx/fy mismatch: fx={fx:.1f}, fy={fy:.1f} ({fx_fy_ratio*100:.1f}% off)", "WARN")
+            log(f"  This suggests poor board angle variety during calibration.", "WARN")
+            log(f"  Try: more tilted angles, move board through ALL four quadrants of both cameras.", "WARN")
 
     # Sanity check: baseline should be physically reasonable (0.1m - 5.0m)
     baseline = best_result['baseline']
@@ -1140,23 +1146,24 @@ def run_stereo_calibration(frames_a, frames_b, max_iterations=5, outlier_thresho
         'frames_used': best_result['num_frames'],
     }
 
-    # Protect against overwriting a better existing calibration
+    # Backup existing calibration before overwriting
     if CALIBRATION_FILE.exists():
         try:
             with open(CALIBRATION_FILE, 'r') as f:
                 existing = json.load(f)
             existing_rms = existing.get('rms_stereo', float('inf'))
+            # Always save new calibration — camera positions may have changed,
+            # making old calibration invalid regardless of its RMS number.
+            # Keep a backup of the previous calibration just in case.
+            prev_backup = CALIBRATION_FILE.with_suffix('.json.prev')
+            with open(prev_backup, 'w') as f:
+                json.dump(existing, f, indent=2)
+            log(f"  Previous calibration backed up to {prev_backup.name}")
             if existing_rms < best_rms:
-                log(f"\n  WARNING: Existing calibration (RMS={existing_rms:.4f}) is BETTER than new (RMS={best_rms:.4f})", "WARN")
-                log(f"  KEEPING existing calibration. New result NOT saved.", "WARN")
-                log(f"  To improve: try more varied board angles, move board more slowly,", "WARN")
-                log(f"  ensure 30+ frames, and check that both cameras see the full board.", "WARN")
-                # Preserve existing floor calibration and return existing data
-                return existing, (f"KEPT OLD (RMS={existing_rms:.4f} < new {best_rms:.4f}). "
-                                  f"New attempt: CamA:{best_result['ret_a']:.2f} CamB:{best_result['ret_b']:.2f} "
-                                  f"Stereo:{best_rms:.2f} Base:{best_result['baseline']:.2f}m ({best_result['num_frames']}f)")
+                log(f"  NOTE: Previous RMS ({existing_rms:.4f}) was lower than new ({best_rms:.4f})", "WARN")
+                log(f"  Saving new anyway — old calibration is invalid if cameras moved.", "WARN")
         except (json.JSONDecodeError, IOError):
-            pass  # No existing calibration or can't read it
+            pass
 
     with open(CALIBRATION_FILE, 'w') as f:
         json.dump(data, f, indent=2)
@@ -1334,9 +1341,11 @@ def calibrate_floor(frame_a, frame_b, calib_data):
     log(f"    Mean: {np.mean(blender_z):.4f}m, Std: {z_std:.4f}m, Range: {z_range:.4f}m")
     log(f"    Floor offset: {floor_offset:.4f}m")
 
-    if z_std > 0.05:
-        log(f"    WARNING: Floor point spread is high ({z_std:.4f}m std). "
-            "Board might not be flat or calibration is noisy.", "WARN")
+    if z_std > MAX_FLOOR_STD_FOR_RECORDING:
+        log(f"    REJECTED: Floor point spread too high ({z_std:.4f}m std, max {MAX_FLOOR_STD_FOR_RECORDING}m).", "WARN")
+        log(f"    This usually means the stereo calibration doesn't match the current camera positions.", "WARN")
+        log(f"    Recalibrate (C then S) with cameras in their current positions first.", "WARN")
+        return False, f"Floor std {z_std:.3f}m too high (max {MAX_FLOOR_STD_FOR_RECORDING}m). Recalibrate stereo first."
 
     calib_data['floor_z_offset'] = float(floor_offset)
     calib_data['floor_calibrated'] = True
@@ -2144,8 +2153,8 @@ def main():
             if recording:
                 frame_grab_delays.append(grab_delay)
 
-            # Detect ChArUco (skip during recording to save CPU)
-            if not recording:
+            # Detect ChArUco (skip during recording/video dump to save CPU)
+            if not recording and not video_dumping:
                 if floor_mode:
                     # Use smaller floor board for floor calibration
                     cc_a, ci_a, markers_a = detect_charuco_floor(frame_a)
@@ -2173,7 +2182,7 @@ def main():
             pose_a_valid = False
             pose_b_valid = False
 
-            if not collecting_cal and not floor_mode:
+            if not collecting_cal and not floor_mode and not video_dumping:
                 # Parallel MediaPipe processing via thread pool
                 rgb_a = cv2.cvtColor(frame_a, cv2.COLOR_BGR2RGB)
                 rgb_b = cv2.cvtColor(frame_b, cv2.COLOR_BGR2RGB)
@@ -2538,10 +2547,15 @@ def main():
                         log(f"[VERIFY] FAILED: {report['message']}", "WARN")
 
             elif key == ord('r'):
-                if calib_data is None:
+                if video_dumping:
+                    status = "Stop video dump first (D) before motion recording"
+                elif calib_data is None:
                     status = "Calibrate cameras first!"
                 elif not calib_data.get('floor_calibrated', False):
                     status = "Floor not calibrated! Press F with board on floor."
+                elif calib_data.get('floor_z_std', float('inf')) > MAX_FLOOR_STD_FOR_RECORDING:
+                    floor_std = calib_data.get('floor_z_std', 0)
+                    status = f"Floor std {floor_std:.3f}m too high! Recalibrate stereo (C→S) then floor (F)."
                 elif not cal_verified:
                     rms = calib_data.get('rms_stereo', float('inf'))
                     if rms > MAX_STEREO_RMS_FOR_RECORDING:

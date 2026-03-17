@@ -33,8 +33,9 @@ Target character: JaxRigify with JaxBody5 mesh, Blender 4.4.3.
 2. **Floor (F key)**: Lay floor board flat on ground, press F
 3. **Verify (V key)**: Hold MAIN board (big board) in view of both cameras — triangulates corners and checks accuracy. Target: < 5mm avg error.
 4. **Record (R key)**: Capture motion data (requires verified calibration + floor)
-5. **Post-process**: Automatic on save — velocity filter, bone enforcement, joint constraints, Gaussian smooth
-6. **Retarget in Blender**: Import JSON, addon retargets to JaxRigify
+5. **Video Dump (D key)**: Record raw .mp4 from both cameras for offline re-processing
+6. **Post-process**: Automatic on save — velocity filter, bone enforcement, joint constraints, Gaussian smooth
+7. **Retarget in Blender**: Import JSON, addon retargets to JaxRigify
 
 ## Key File Locations
 | File | Purpose |
