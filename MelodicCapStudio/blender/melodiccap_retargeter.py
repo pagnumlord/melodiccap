@@ -1505,14 +1505,90 @@ class MELODICCAP_OT_import(bpy.types.Operator, ImportHelper):
 
         log(f"\n  File: {self.filepath}")
         log(f"  Armature: {arm.name}")
+        log(f"  Blender version: {bpy.app.version_string}")
 
         try:
             with open(self.filepath, 'r') as f:
                 data = json.load(f)
         except Exception as e:
             self.report({'ERROR'}, f"Failed to load JSON: {e}")
+            log(f"  FAILED: {e}", "ERROR")
             log_close()
             return {'CANCELLED'}
+
+        # === TAKE DATA VALIDATION ===
+        log("\n  === TAKE DATA VALIDATION ===")
+        frames = data.get('frames', [])
+        version = data.get('version', 'unknown')
+        capture_mode = data.get('capture_mode', 'unknown')
+        duration = data.get('duration_seconds', 0)
+        frame_count = data.get('frame_count', len(frames))
+
+        log(f"  Version: {version}")
+        log(f"  Capture mode: {capture_mode}")
+        log(f"  Frame count (metadata): {frame_count}, actual: {len(frames)}")
+        log(f"  Duration: {duration:.1f}s")
+
+        if len(frames) == 0:
+            self.report({'ERROR'}, "Take file has NO frames!")
+            log("  FAILED: No frames in take data", "ERROR")
+            log_close()
+            return {'CANCELLED'}
+
+        if len(frames) < 10:
+            log(f"  WARNING: Very short take ({len(frames)} frames). Results may be poor.", "WARN")
+
+        # Check frame 0 has essential landmarks
+        f0_lms = frames[0].get('landmarks', {})
+        essential = [11, 12, 23, 24, 27, 28]  # shoulders, hips, ankles
+        missing = [str(lm) for lm in essential if str(lm) not in f0_lms and lm not in f0_lms]
+        if missing:
+            log(f"  WARNING: Frame 0 missing essential landmarks: {missing}", "WARN")
+            log(f"  Available landmarks in frame 0: {sorted(f0_lms.keys())}", "WARN")
+            if len(missing) > 3:
+                self.report({'ERROR'}, f"Frame 0 missing critical landmarks: {missing}. Bad take data.")
+                log_close()
+                return {'CANCELLED'}
+
+        # Check coordinate space sanity
+        hip_l = f0_lms.get('23') or f0_lms.get(23)
+        hip_r = f0_lms.get('24') or f0_lms.get(24)
+        if hip_l and hip_r:
+            hip_z = (hip_l[2] + hip_r[2]) / 2
+            log(f"  Hip Z at frame 0: {hip_z:.3f}m (should be ~0.8-1.2 for standing person)")
+            if hip_z < 0.2:
+                log(f"  WARNING: Hip Z very low ({hip_z:.3f}m). Floor calibration may be wrong.", "WARN")
+            if hip_z > 3.0:
+                log(f"  WARNING: Hip Z very high ({hip_z:.3f}m). Calibration may be wrong.", "WARN")
+            if hip_z < -0.5:
+                log(f"  ERROR: Hip Z negative ({hip_z:.3f}m). Floor offset is wrong or coords not in Blender space.", "ERROR")
+
+        # Calibration info
+        calib = data.get('calibration', {})
+        log(f"  Calibration: RMS={calib.get('rms_stereo', 'N/A')}, "
+            f"baseline={calib.get('baseline', 'N/A')}, "
+            f"floor_offset={calib.get('floor_offset', 'N/A')}")
+
+        # Check for outlier frames
+        total_outliers = data.get('total_outliers_filtered', 0)
+        predicted = data.get('predicted_frames', 0)
+        dropped = data.get('dropped_frames', 0)
+        log(f"  Outliers filtered: {total_outliers}, Predicted frames: {predicted}, Dropped: {dropped}")
+
+        # Landmark coverage summary
+        vis = data.get('landmark_visibility', {})
+        if vis:
+            log(f"  Landmark coverage (key landmarks):")
+            for lm_idx in ['11', '12', '15', '16', '23', '24', '27', '28']:
+                lm_data = vis.get(lm_idx, {})
+                coverage = lm_data.get('coverage_pct', 0)
+                name = lm_data.get('name', f'lm_{lm_idx}')
+                avg_vis = lm_data.get('avg_visibility', 0)
+                log(f"    [{lm_idx:>2s}] {name:20s}: coverage={coverage:.1f}%  vis={avg_vis:.3f}")
+                if coverage < 50:
+                    log(f"         WARNING: Low coverage! This landmark may cause issues.", "WARN")
+
+        log("  === END VALIDATION ===\n")
 
         settings = {
             'start_frame': context.scene.melodiccap_start_frame,

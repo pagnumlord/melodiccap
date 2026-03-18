@@ -223,15 +223,26 @@ def generate_dual_sheet_board():
 
 
 def generate_floor_board():
-    """Generate a 4x3 ChArUco board for floor calibration.
+    """Generate a LARGE high-contrast ChArUco floor board for floor calibration.
 
     Uses DICT_5X5_50 (DIFFERENT from the main board's DICT_4X4_50) to prevent
     marker ID collision. This is critical — without separate dictionaries, markers
     0-5 exist on both boards and detection produces incorrect corners.
 
-    4 columns x 3 rows at 63.5mm each
-    Board area: 254mm x 190.5mm (fits on 8.5x11" portrait)
-    Interior corners: (4-1) * (3-1) = 6
+    MAXIMIZED for letter paper (8.5x11") with 6mm printer border:
+    - Printable area: ~203.2mm x ~267.4mm (after 6mm border on all sides)
+    - 4x3 squares at 63.5mm = 254mm x 190.5mm (fits within printable area in landscape)
+    - Interior corners: (4-1) * (3-1) = 6
+    - High contrast with thick black border for detection from distance
+    - White surround helps ArUco detection algorithm
+
+    For small rooms where floor board must be visible to cameras 2-3m away,
+    bigger squares = easier detection. 63.5mm squares are nearly the max
+    that fits on letter paper.
+
+    TIP: Print in LANDSCAPE orientation to maximize board area.
+    If your printer adds a border, the board itself is 254x190.5mm which
+    still fits within the ~267x203mm printable area of landscape letter.
     """
     squares_x = 4
     squares_y = 3
@@ -256,47 +267,63 @@ def generate_floor_board():
     img = board.generateImage((board_w_px, board_h_px), marginSize=0, borderBits=1)
 
     # Place on white page with centering
-    page = np.ones((page_h_px, page_w_px), dtype=np.uint8) * 255
-    offset_x = (page_w_px - board_w_px) // 2
-    offset_y = (page_h_px - board_h_px) // 2
+    # Use LANDSCAPE orientation (swap w/h) to maximize board size
+    page_w_land = 3300   # 11" landscape width
+    page_h_land = 2550   # 8.5" landscape height
+
+    page = np.ones((page_h_land, page_w_land), dtype=np.uint8) * 255
+    offset_x = (page_w_land - board_w_px) // 2
+    offset_y = (page_h_land - board_h_px) // 2
+
+    # Add thick white border around the board for ArUco detection
+    # ArUco needs white space around markers for reliable edge detection
+    border_px = int(15 / 25.4 * dpi)  # 15mm white border
     page[offset_y:offset_y + board_h_px, offset_x:offset_x + board_w_px] = img
+
+    # Draw a thick black frame around the white border (helps camera see the board)
+    frame_thickness = 8
+    outer_x1 = offset_x - border_px
+    outer_y1 = offset_y - border_px
+    outer_x2 = offset_x + board_w_px + border_px
+    outer_y2 = offset_y + board_h_px + border_px
 
     page_color = cv2.cvtColor(page, cv2.COLOR_GRAY2BGR)
 
-    # Title
-    cv2.putText(page_color, "MelodicCap FLOOR CALIBRATION Board",
-                (50, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 0), 3)
-    cv2.putText(page_color, f"4x3 squares | 63.5mm squares | 47.6mm markers | DICT_5X5_50 | 6 corners",
-                (50, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
-    cv2.putText(page_color, "IMPORTANT: This board uses DICT_5X5_50 (different from main board DICT_4X4_50)",
-                (50, 170), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 200), 2)
+    # Black outer frame for high contrast (helps detection at distance)
+    cv2.rectangle(page_color, (outer_x1, outer_y1), (outer_x2, outer_y2), (0, 0, 0), frame_thickness)
 
-    # Instructions at bottom
-    y_bottom = page_h_px - 160
-    cv2.putText(page_color, "FLOOR CALIBRATION: Place this board FLAT on the floor.",
-                (50, y_bottom), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 180), 2)
-    cv2.putText(page_color, "Both cameras must see it. Press F in capture to calibrate floor.",
-                (50, y_bottom + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 180), 2)
-    cv2.putText(page_color, "Mount on rigid flat surface. Measure actual square size with ruler.",
-                (50, y_bottom + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 180), 2)
-    cv2.putText(page_color, f"Print at 100% scale. Target: 63.5mm = 2.5 inches per square.",
-                (50, y_bottom + 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+    # Corner markers (large L-shapes in corners for visual alignment)
+    corner_len = int(20 / 25.4 * dpi)  # 20mm corner marks
+    for cx, cy in [(outer_x1, outer_y1), (outer_x2, outer_y1), (outer_x1, outer_y2), (outer_x2, outer_y2)]:
+        dx = corner_len if cx == outer_x1 else -corner_len
+        dy = corner_len if cy == outer_y1 else -corner_len
+        cv2.line(page_color, (cx, cy), (cx + dx, cy), (0, 0, 0), 4)
+        cv2.line(page_color, (cx, cy), (cx, cy + dy), (0, 0, 0), 4)
 
-    # Ruler marks
+    # Title (minimal, outside the detection area)
+    cv2.putText(page_color, "FLOOR BOARD - DICT_5X5_50 - 4x3 @ 63.5mm",
+                (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
+    cv2.putText(page_color, "Print LANDSCAPE. Mount FLAT on floor. Measure squares with ruler.",
+                (50, page_h_land - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 180), 2)
+
+    # Ruler marks along top edge of board (for measurement verification)
     mm_per_px = 25.4 / dpi
+    ruler_y = offset_y - border_px - 30
     for mm in range(0, 260, 10):
         px = int(mm / mm_per_px)
         x_start = offset_x
-        tick_len = 30 if mm % 50 == 0 else 15
-        cv2.line(page_color, (x_start + px, offset_y - 5), (x_start + px, offset_y - 5 - tick_len), (0, 0, 0), 2)
+        tick_len = 25 if mm % 50 == 0 else 12
+        cv2.line(page_color, (x_start + px, ruler_y + tick_len), (x_start + px, ruler_y), (0, 0, 0), 2)
         if mm % 50 == 0:
-            cv2.putText(page_color, f"{mm}mm", (x_start + px - 20, offset_y - 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
+            cv2.putText(page_color, f"{mm}mm", (x_start + px - 20, ruler_y - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1)
 
     path = os.path.join(OUTPUT_DIR, "charuco_floor_4x3_DICT5X5.png")
     cv2.imwrite(path, page_color)
     print(f"Floor board saved: {path}")
     print(f"  4x3 squares, 63.5mm each, DICT_5X5_50 (separate from main board)")
+    print(f"  Print in LANDSCAPE orientation at 100% scale")
+    print(f"  High-contrast border for better detection at distance")
 
     return squares_x, squares_y, square_length_m, marker_length_m
 
