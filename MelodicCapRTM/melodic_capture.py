@@ -50,8 +50,10 @@ class Config:
     FRAME_HEIGHT = 720
     FPS = 30
 
-    # Paths — edit BASE_DIR for your system
-    BASE_DIR = Path(r"C:\Users\ninja\Documents\MelodicCapStudio\MelodicCapRTM")
+    # Paths — auto-detects based on where this script lives
+    # On your PC this resolves to C:\Users\ninja\Documents\MelodicCapStudio\MelodicCapRTM
+    # (assuming you cloned/copied this folder there)
+    BASE_DIR = Path(__file__).resolve().parent
     CALIBRATION_FILE = BASE_DIR / "calibration" / "stereo_calibration.json"
     TAKES_DIR = BASE_DIR / "takes"
 
