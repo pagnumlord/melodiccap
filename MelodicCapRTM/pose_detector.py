@@ -16,19 +16,13 @@ Hardware note:
 
 import numpy as np
 
-# Model configs: (model_name, input_size)
-# These are downloaded automatically by rtmlib on first use (~50-200MB)
-MODELS = {
-    'body': {
-        'fast': ('rtmpose-s', (256, 192)),
-        'balanced': ('rtmpose-m', (256, 192)),
-        'accurate': ('rtmpose-l', (256, 192)),
-    },
-    'wholebody': {
-        'fast': ('rtmw-l', (256, 192)),
-        'balanced': ('rtmw-l', (384, 288)),
-        'accurate': ('rtmw-x', (384, 288)),
-    },
+# Map our quality names to rtmlib's built-in mode names.
+# rtmlib 0.0.15 uses 'lightweight', 'balanced', 'performance' modes
+# with full URLs resolved internally — do NOT pass model name strings.
+QUALITY_TO_RTMLIB_MODE = {
+    'fast': 'lightweight',
+    'balanced': 'balanced',
+    'accurate': 'performance',
 }
 
 
@@ -52,27 +46,25 @@ class PoseDetector:
         self.quality = quality
         self.num_keypoints = 133 if mode == 'wholebody' else 17
 
-        model_name, input_size = MODELS[mode][quality]
+        rtmlib_mode = QUALITY_TO_RTMLIB_MODE[quality]
 
         if mode == 'wholebody':
             from rtmlib import Wholebody
             self.detector = Wholebody(
-                pose=model_name,
-                pose_input_size=input_size,
+                mode=rtmlib_mode,
                 backend=backend,
                 device=device,
             )
         else:
             from rtmlib import Body
             self.detector = Body(
-                pose=model_name,
-                pose_input_size=input_size,
+                mode=rtmlib_mode,
                 backend=backend,
                 device=device,
             )
 
-        print(f"[PoseDetector] mode={mode}, model={model_name}, "
-              f"input={input_size}, device={device}")
+        print(f"[PoseDetector] mode={mode}, rtmlib_mode={rtmlib_mode}, "
+              f"device={device}")
 
     def detect(self, frame):
         """
