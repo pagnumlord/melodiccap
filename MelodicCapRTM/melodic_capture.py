@@ -58,11 +58,11 @@ class Config:
     TAKES_DIR = BASE_DIR / "takes"
 
     # ChArUco board (must match your printed board)
-    # 7x5 board = 24 inner corners (much better for stereo calibration)
-    CHARUCO_SQUARES_X = 7
+    # 10x5 board, two letter pages taped on cardboard
+    CHARUCO_SQUARES_X = 10
     CHARUCO_SQUARES_Y = 5
-    CHARUCO_SQUARE_SIZE = 0.035  # 35mm in meters (adjust to your print)
-    CHARUCO_MARKER_SIZE = 0.026  # 26mm in meters (adjust to your print)
+    CHARUCO_SQUARE_SIZE = 0.043  # 43mm - measure yours to confirm
+    CHARUCO_MARKER_SIZE = 0.031  # 31mm
     ARUCO_DICT = cv2.aruco.DICT_4X4_50
 
     # Recording
