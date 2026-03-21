@@ -165,6 +165,9 @@ class StereoCalibration:
             'P1': self.P1.tolist(),
             'P2': self.P2.tolist(),
             'baseline_meters': float(np.linalg.norm(self.T)) if self.T is not None else 0,
+            'stereo_rms': getattr(self, '_stereo_rms', None),
+            'cam_a_rms': getattr(self, '_cam_a_rms', None),
+            'cam_b_rms': getattr(self, '_cam_b_rms', None),
             'floor_z_offset': float(self.floor_z_offset),
         }
 
@@ -191,6 +194,28 @@ class StereoCalibration:
 
         return charuco_corners, charuco_ids
 
+    def _check_spatial_coverage(self, all_corners, img_size, label):
+        """
+        Check if board positions cover enough of the frame.
+        Returns (ok, coverage_pct, message).
+        """
+        w, h = img_size
+        # Divide frame into a 3x3 grid, check which cells have board corners
+        grid = np.zeros((3, 3), dtype=bool)
+        for corners in all_corners:
+            for pt in corners.reshape(-1, 2):
+                col = min(int(pt[0] / (w / 3)), 2)
+                row = min(int(pt[1] / (h / 3)), 2)
+                grid[row, col] = True
+
+        coverage = grid.sum() / 9.0
+        if coverage < 0.33:
+            return False, coverage, (
+                f"Camera {label}: Board only covers {coverage:.0%} of frame. "
+                f"Move the board to more positions — top, bottom, left, right, center."
+            )
+        return True, coverage, f"Camera {label}: {coverage:.0%} spatial coverage"
+
     def calibrate_stereo(self, frames_a, frames_b):
         """
         Calibrate stereo cameras from synchronized frame pairs.
@@ -213,16 +238,19 @@ class StereoCalibration:
             ca, ia = self.detect_charuco(fa)
             cb, ib = self.detect_charuco(fb)
 
-            if ca is not None and cb is not None and len(ca) >= 4 and len(cb) >= 4:
+            if ca is not None and cb is not None and len(ca) >= 6 and len(cb) >= 6:
                 all_corners_a.append(ca)
                 all_ids_a.append(ia)
                 all_corners_b.append(cb)
                 all_ids_b.append(ib)
-                print(f"  Frame {i+1}: OK ({len(ca)} corners)")
+                print(f"  Frame {i+1}: OK ({len(ca)}/{len(cb)} corners A/B)")
             elif ca is not None and cb is not None:
-                print(f"  Frame {i+1}: Skipped (too few corners: A={len(ca)}, B={len(cb)})")
+                print(f"  Frame {i+1}: Skipped (too few corners: A={len(ca)}, B={len(cb)}, need 6+)")
             else:
-                print(f"  Frame {i+1}: Board not detected in both cameras")
+                detected = []
+                if ca is not None: detected.append(f"A={len(ca)}")
+                if cb is not None: detected.append(f"B={len(cb)}")
+                print(f"  Frame {i+1}: Board not detected in {'both cameras' if not detected else 'one camera'}")
 
         if len(all_corners_a) < 10:
             print(f"[ERROR] Not enough valid frames ({len(all_corners_a)}). Need at least 10.")
@@ -230,18 +258,44 @@ class StereoCalibration:
 
         img_size = (self.config.FRAME_WIDTH, self.config.FRAME_HEIGHT)
 
+        # Check spatial coverage before attempting calibration
+        ok_a, cov_a, msg_a = self._check_spatial_coverage(all_corners_a, img_size, "A")
+        ok_b, cov_b, msg_b = self._check_spatial_coverage(all_corners_b, img_size, "B")
+        print(f"\n  {msg_a}")
+        print(f"  {msg_b}")
+
+        if not ok_a or not ok_b:
+            print(f"\n[ERROR] Insufficient spatial coverage!")
+            print(f"  The board needs to appear in different parts of the frame.")
+            print(f"  Move it: left/right, up/down, near/far, and tilt it.")
+            print(f"  This is especially important for Camera B (DroidCam).")
+            return False
+
         # Calibrate camera A
         print("\n  Calibrating Camera A...")
-        ret_a, K1, D1, _, _ = cv2.aruco.calibrateCameraCharuco(
-            all_corners_a, all_ids_a, self.charuco_board, img_size, None, None
-        )
-        print(f"    RMS Error: {ret_a:.4f}")
+        try:
+            ret_a, K1, D1, _, _ = cv2.aruco.calibrateCameraCharuco(
+                all_corners_a, all_ids_a, self.charuco_board, img_size, None, None
+            )
+            print(f"    RMS Error: {ret_a:.4f}")
+        except cv2.error as e:
+            print(f"    [FAILED] Camera A calibration error: {e}")
+            print(f"    Board positions likely too similar. Move board more.")
+            return False
 
         # Calibrate camera B
         print("  Calibrating Camera B...")
-        ret_b, K2, D2, _, _ = cv2.aruco.calibrateCameraCharuco(
-            all_corners_b, all_ids_b, self.charuco_board, img_size, None, None
-        )
+        try:
+            ret_b, K2, D2, _, _ = cv2.aruco.calibrateCameraCharuco(
+                all_corners_b, all_ids_b, self.charuco_board, img_size, None, None
+            )
+            print(f"    RMS Error: {ret_b:.4f}")
+        except cv2.error as e:
+            print(f"    [FAILED] Camera B calibration error: {e}")
+            print(f"    Board positions from DroidCam likely too similar.")
+            print(f"    Make sure the board appears at different positions and angles")
+            print(f"    from DroidCam's perspective — not just the Sony's.")
+            return False
         print(f"    RMS Error: {ret_b:.4f}")
 
         # Build stereo correspondences
@@ -354,6 +408,9 @@ class StereoCalibration:
         self.P1, self.P2 = P1, P2
         self.is_calibrated = True
         self._cal_image_size = list(img_size)
+        self._stereo_rms = float(ret_stereo)
+        self._cam_a_rms = float(ret_a)
+        self._cam_b_rms = float(ret_b)
 
         print(f"\n[OK] Stereo calibration complete!")
         print(f"     Baseline: {baseline:.3f}m")
