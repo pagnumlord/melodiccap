@@ -349,52 +349,175 @@ class StereoCalibration:
 
         return points_3d
 
+    def detect_floor_debug(self, frame_a, frame_b):
+        """
+        Detect ChArUco board in both frames and return detailed debug info.
+
+        Returns:
+            dict with keys: corners_a, ids_a, corners_b, ids_b,
+                            markers_a_count, markers_b_count,
+                            charuco_a_count, charuco_b_count
+        """
+        gray_a = cv2.cvtColor(frame_a, cv2.COLOR_BGR2GRAY)
+        gray_b = cv2.cvtColor(frame_b, cv2.COLOR_BGR2GRAY)
+
+        # Detect ArUco markers first (raw markers, before ChArUco interpolation)
+        markers_a, marker_ids_a, _ = self.aruco_detector.detectMarkers(gray_a)
+        markers_b, marker_ids_b, _ = self.aruco_detector.detectMarkers(gray_b)
+
+        m_count_a = 0 if marker_ids_a is None else len(marker_ids_a)
+        m_count_b = 0 if marker_ids_b is None else len(marker_ids_b)
+
+        # Interpolate ChArUco corners
+        corners_a, ids_a = None, None
+        corners_b, ids_b = None, None
+
+        if marker_ids_a is not None and len(marker_ids_a) >= 2:
+            num_a, corners_a, ids_a = cv2.aruco.interpolateCornersCharuco(
+                markers_a, marker_ids_a, gray_a, self.charuco_board
+            )
+            if num_a < 3:
+                corners_a, ids_a = None, None
+
+        if marker_ids_b is not None and len(marker_ids_b) >= 2:
+            num_b, corners_b, ids_b = cv2.aruco.interpolateCornersCharuco(
+                markers_b, marker_ids_b, gray_b, self.charuco_board
+            )
+            if num_b < 3:
+                corners_b, ids_b = None, None
+
+        return {
+            'corners_a': corners_a, 'ids_a': ids_a,
+            'corners_b': corners_b, 'ids_b': ids_b,
+            'markers_a': markers_a, 'marker_ids_a': marker_ids_a,
+            'markers_b': markers_b, 'marker_ids_b': marker_ids_b,
+            'markers_a_count': m_count_a,
+            'markers_b_count': m_count_b,
+            'charuco_a_count': 0 if corners_a is None else len(corners_a),
+            'charuco_b_count': 0 if corners_b is None else len(corners_b),
+        }
+
+    def draw_floor_debug(self, display_a, display_b, debug_info):
+        """Draw floor calibration debug visuals on display frames."""
+        # Draw detected ArUco markers
+        if debug_info['marker_ids_a'] is not None:
+            cv2.aruco.drawDetectedMarkers(display_a, debug_info['markers_a'], debug_info['marker_ids_a'])
+        if debug_info['marker_ids_b'] is not None:
+            cv2.aruco.drawDetectedMarkers(display_b, debug_info['markers_b'], debug_info['marker_ids_b'])
+
+        # Draw ChArUco corners
+        if debug_info['corners_a'] is not None:
+            cv2.aruco.drawDetectedCornersCharuco(display_a, debug_info['corners_a'], debug_info['ids_a'])
+        if debug_info['corners_b'] is not None:
+            cv2.aruco.drawDetectedCornersCharuco(display_b, debug_info['corners_b'], debug_info['ids_b'])
+
+        # Status text per camera
+        ma = debug_info['markers_a_count']
+        ca = debug_info['charuco_a_count']
+        mb = debug_info['markers_b_count']
+        cb = debug_info['charuco_b_count']
+
+        color_a = (0, 255, 0) if ca >= 3 else (0, 0, 255)
+        color_b = (0, 255, 0) if cb >= 3 else (0, 0, 255)
+
+        cv2.putText(display_a, f"FLOOR CAL: {ma} markers, {ca} corners",
+                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_a, 2)
+        cv2.putText(display_b, f"FLOOR CAL: {mb} markers, {cb} corners",
+                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_b, 2)
+
     def calibrate_floor(self, frame_a, frame_b):
         """
         Calibrate floor plane from ChArUco board placed on ground.
+        Uses stereo triangulation if both cameras see the board,
+        falls back to single-camera solvePnP if only one does.
 
         Returns:
             (success, message)
         """
-        corners_a, ids_a = self.detect_charuco(frame_a)
-        corners_b, ids_b = self.detect_charuco(frame_b)
+        debug = self.detect_floor_debug(frame_a, frame_b)
+        corners_a, ids_a = debug['corners_a'], debug['ids_a']
+        corners_b, ids_b = debug['corners_b'], debug['ids_b']
 
-        if corners_a is None or corners_b is None:
-            return False, "Board not detected in both cameras"
+        both_detected = corners_a is not None and corners_b is not None
 
-        common_ids = set(ids_a.flatten()) & set(ids_b.flatten())
-        if len(common_ids) < 3:
-            return False, f"Not enough common corners ({len(common_ids)}). Hold board so both cameras see it."
+        if both_detected:
+            # Stereo triangulation path (best accuracy)
+            common_ids = set(ids_a.flatten()) & set(ids_b.flatten())
+            if len(common_ids) < 3:
+                return False, f"Not enough common corners ({len(common_ids)})"
 
-        pts_a = []
-        pts_b = []
+            pts_a = []
+            pts_b = []
+            ids_a_flat = ids_a.flatten()
+            ids_b_flat = ids_b.flatten()
 
-        ids_a_flat = ids_a.flatten()
-        ids_b_flat = ids_b.flatten()
+            for cid in sorted(common_ids):
+                idx_a = np.where(ids_a_flat == cid)[0][0]
+                idx_b = np.where(ids_b_flat == cid)[0][0]
+                pts_a.append(corners_a[idx_a].flatten())
+                pts_b.append(corners_b[idx_b].flatten())
 
-        for cid in sorted(common_ids):
-            idx_a = np.where(ids_a_flat == cid)[0][0]
-            idx_b = np.where(ids_b_flat == cid)[0][0]
-            pts_a.append(corners_a[idx_a].flatten())
-            pts_b.append(corners_b[idx_b].flatten())
+            floor_points = self.triangulate(pts_a, pts_b)
 
-        floor_points = self.triangulate(pts_a, pts_b)
+            if floor_points is None:
+                return False, "Triangulation failed"
 
-        if floor_points is None:
-            return False, "Triangulation failed"
+            centroid = np.mean(floor_points, axis=0)
+            centered = floor_points - centroid
+            _, _, vh = np.linalg.svd(centered)
+            normal = vh[2]
+            if normal[2] < 0:
+                normal = -normal
 
-        # Fit plane using SVD
-        centroid = np.mean(floor_points, axis=0)
-        centered = floor_points - centroid
-        _, _, vh = np.linalg.svd(centered)
-        normal = vh[2]
+            self.floor_z_offset = -centroid[2]
+            return True, f"Floor set via stereo (offset: {self.floor_z_offset:.3f}m, {len(common_ids)} corners)"
 
-        if normal[2] < 0:
-            normal = -normal
+        # Single-camera fallback using solvePnP
+        single_corners = corners_a if corners_a is not None else corners_b
+        single_ids = ids_a if corners_a is not None else ids_b
+        cam_label = "A" if corners_a is not None else "B"
+        K = self.K1 if corners_a is not None else self.K2
+        D = self.D1 if corners_a is not None else self.D2
 
-        self.floor_z_offset = -centroid[2]
+        if single_corners is None:
+            a_info = f"A: {debug['markers_a_count']} markers"
+            b_info = f"B: {debug['markers_b_count']} markers"
+            return False, f"Board not detected ({a_info}, {b_info}). Need 2+ markers per camera."
 
-        return True, f"Floor set (offset: {self.floor_z_offset:.3f}m)"
+        if len(single_corners) < 4:
+            return False, f"Only {len(single_corners)} corners in Camera {cam_label}, need 4+"
+
+        # Get 3D object points for detected corners
+        obj_pts = []
+        img_pts = []
+        board_corners = self.charuco_board.getChessboardCorners()
+        for i, cid in enumerate(single_ids.flatten()):
+            obj_pts.append(board_corners[cid])
+            img_pts.append(single_corners[i].flatten())
+
+        obj_pts = np.array(obj_pts, dtype=np.float32)
+        img_pts = np.array(img_pts, dtype=np.float32)
+
+        success, rvec, tvec = cv2.solvePnP(obj_pts, img_pts, K, D)
+        if not success:
+            return False, "solvePnP failed"
+
+        # The board is on the floor, so the board's Z=0 plane IS the floor.
+        # tvec gives translation from camera to board origin.
+        # We need the floor height in our stereo coordinate system.
+        R_cam, _ = cv2.Rodrigues(rvec)
+        # Board origin in camera coords
+        board_origin_cam = tvec.flatten()
+        # Board normal in camera coords (board Z-axis)
+        board_normal_cam = R_cam[:, 2]
+
+        # Convert to Blender coords: Z_blender = -Y_opencv + offset
+        # The floor height in blender coords is -board_origin_cam[1]
+        # (since board is at floor level)
+        floor_z_cv = board_origin_cam[1]  # OpenCV Y (downward)
+        self.floor_z_offset = floor_z_cv  # This negates the -Y in triangulate
+
+        return True, f"Floor set via Camera {cam_label} solvePnP (offset: {self.floor_z_offset:.3f}m, {len(single_corners)} corners)"
 
     def reset_filters(self):
         """Reset all Kalman filters (call at start of new take)."""

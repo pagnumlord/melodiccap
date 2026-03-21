@@ -216,6 +216,9 @@ class MelodicCapApp:
         self.collecting_cal_frames = False
         self._last_cal_time = 0
 
+        # Floor calibration mode
+        self.floor_cal_active = False
+
         # State
         self.running = True
         self._countdown_start = 0
@@ -292,7 +295,7 @@ class MelodicCapApp:
         print("\n[CONTROLS]")
         print("  C = Collect calibration frames (hold board steady)")
         print("  S = Run stereo calibration (after collecting frames)")
-        print("  F = Calibrate floor (place board on ground)")
+        print("  F = Calibrate floor (toggle mode - shows debug visuals)")
         print("  R = Start/Stop recording")
         print("  Q = Quit")
         print()
@@ -310,11 +313,11 @@ class MelodicCapApp:
                 print("[WARNING] Frame capture failed")
                 continue
 
-            # Only run pose detection when NOT collecting calibration frames
+            # Only run pose detection when NOT in calibration modes
             # (pose inference is expensive, skip it during calibration)
             det_a = None
             det_b = None
-            if not self.collecting_cal_frames:
+            if not self.collecting_cal_frames and not self.floor_cal_active:
                 det_a = self.detector.detect_single(
                     frame_a, min_confidence=self.config.MIN_KEYPOINT_CONFIDENCE
                 )
@@ -337,8 +340,30 @@ class MelodicCapApp:
                     self.calibration.reset_filters()
                     self.recorder.start()
 
+            # Floor calibration mode - show debug and auto-accept
+            if self.floor_cal_active:
+                debug = self.calibration.detect_floor_debug(frame_a, frame_b)
+                self.calibration.draw_floor_debug(display_a, display_b, debug)
+
+                # Auto-attempt calibration when we have enough corners
+                has_a = debug['charuco_a_count'] >= 3
+                has_b = debug['charuco_b_count'] >= 3
+                if has_a or has_b:
+                    success, msg = self.calibration.calibrate_floor(frame_a, frame_b)
+                    if success:
+                        self.calibration.save(self.config.CALIBRATION_FILE)
+                        print(f"  [OK] {msg}")
+                        self.floor_cal_active = False
+                    else:
+                        # Show status but keep trying
+                        draw_status(display_a, f"FLOOR: {msg}", (0, 165, 255))
+                        draw_status(display_b, f"FLOOR: {msg}", (0, 165, 255))
+                else:
+                    draw_status(display_a, "FLOOR: Place board on ground", (0, 255, 255))
+                    draw_status(display_b, "FLOOR: Place board on ground", (0, 255, 255))
+
             # Status text
-            if self.collecting_cal_frames:
+            elif self.collecting_cal_frames:
                 draw_status(display_a, f"CALIBRATING: {len(self.cal_frames_a)} frames", (0, 255, 255))
                 draw_status(display_b, f"CALIBRATING: {len(self.cal_frames_b)} frames", (0, 255, 255))
             elif self._countdown_active:
@@ -445,14 +470,15 @@ class MelodicCapApp:
             elif key == ord('f'):
                 if not self.calibration.is_calibrated:
                     print("\n[ERROR] Calibrate cameras first (press C)")
+                elif self.floor_cal_active:
+                    self.floor_cal_active = False
+                    print("\n[FLOOR] Cancelled.")
                 else:
-                    print("\n[FLOOR] Calibrating...")
-                    success, msg = self.calibration.calibrate_floor(frame_a, frame_b)
-                    if success:
-                        self.calibration.save(self.config.CALIBRATION_FILE)
-                        print(f"  [OK] {msg}")
-                    else:
-                        print(f"  [ERROR] {msg}")
+                    self.floor_cal_active = True
+                    print("\n[FLOOR] Floor calibration mode ON")
+                    print("  Place the ChArUco board flat on the ground.")
+                    print("  Debug markers will show on screen. Auto-accepts when detected.")
+                    print("  Press 'F' again to cancel.")
 
             elif key == ord('r'):
                 if not self.calibration.is_calibrated:
