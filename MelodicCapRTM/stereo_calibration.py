@@ -154,12 +154,14 @@ class StereoCalibration:
             ca, ia = self.detect_charuco(fa)
             cb, ib = self.detect_charuco(fb)
 
-            if ca is not None and cb is not None:
+            if ca is not None and cb is not None and len(ca) >= 4 and len(cb) >= 4:
                 all_corners_a.append(ca)
                 all_ids_a.append(ia)
                 all_corners_b.append(cb)
                 all_ids_b.append(ib)
                 print(f"  Frame {i+1}: OK ({len(ca)} corners)")
+            elif ca is not None and cb is not None:
+                print(f"  Frame {i+1}: Skipped (too few corners: A={len(ca)}, B={len(cb)})")
             else:
                 print(f"  Frame {i+1}: Board not detected in both cameras")
 
