@@ -234,18 +234,25 @@ class StereoCalibration:
         all_ids_a = []
         all_ids_b = []
 
+        MIN_CORNERS = 12  # per camera — need enough for good constraints
+
         for i, (fa, fb) in enumerate(zip(frames_a, frames_b)):
             ca, ia = self.detect_charuco(fa)
             cb, ib = self.detect_charuco(fb)
 
-            if ca is not None and cb is not None and len(ca) >= 6 and len(cb) >= 6:
-                all_corners_a.append(ca)
-                all_ids_a.append(ia)
-                all_corners_b.append(cb)
-                all_ids_b.append(ib)
-                print(f"  Frame {i+1}: OK ({len(ca)}/{len(cb)} corners A/B)")
+            if ca is not None and cb is not None and len(ca) >= MIN_CORNERS and len(cb) >= MIN_CORNERS:
+                # Also check common corners — need enough shared points for stereo
+                common = set(ia.flatten()) & set(ib.flatten())
+                if len(common) >= 8:
+                    all_corners_a.append(ca)
+                    all_ids_a.append(ia)
+                    all_corners_b.append(cb)
+                    all_ids_b.append(ib)
+                    print(f"  Frame {i+1}: OK ({len(ca)}/{len(cb)} corners, {len(common)} common)")
+                else:
+                    print(f"  Frame {i+1}: Skipped (only {len(common)} common corners, need 8+)")
             elif ca is not None and cb is not None:
-                print(f"  Frame {i+1}: Skipped (too few corners: A={len(ca)}, B={len(cb)}, need 6+)")
+                print(f"  Frame {i+1}: Skipped (too few corners: A={len(ca)}, B={len(cb)}, need {MIN_CORNERS}+)")
             else:
                 detected = []
                 if ca is not None: detected.append(f"A={len(ca)}")
@@ -308,7 +315,7 @@ class StereoCalibration:
             ids_b_set = set(ib.flatten())
             common = ids_a_set & ids_b_set
 
-            if len(common) < 4:
+            if len(common) < 8:
                 continue
 
             obj_pts = []
@@ -345,11 +352,11 @@ class StereoCalibration:
                 print(f"  [ERROR] Too few frames remaining ({len(cur_obj)}). Cannot calibrate.")
                 return False
 
-            ret_stereo, _, _, _, _, R, T, E, F = cv2.stereoCalibrate(
+            ret_stereo, K1, D1, K2, D2, R, T, E, F = cv2.stereoCalibrate(
                 cur_obj, cur_img_a, cur_img_b,
                 K1, D1, K2, D2, img_size,
-                criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6),
-                flags=cv2.CALIB_FIX_INTRINSIC
+                criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 300, 1e-7),
+                flags=cv2.CALIB_USE_INTRINSIC_GUESS
             )
             print(f"    Stereo RMS: {ret_stereo:.4f}")
 
