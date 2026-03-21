@@ -171,6 +171,32 @@ class MelodicCapApp:
                 device='cpu',
             )
 
+        # Check if CUDA is actually being used (onnxruntime may silently fall back)
+        if self.config.POSE_DEVICE == 'cuda':
+            try:
+                import onnxruntime as ort
+                sess_providers = ort.get_available_providers()
+                if 'CUDAExecutionProvider' not in sess_providers:
+                    print("[WARNING] CUDA provider not available, running on CPU")
+                    self.config.POSE_DEVICE = 'cpu'
+                else:
+                    # Test if CUDA actually loads (provider may be listed but fail)
+                    try:
+                        test_sess = ort.InferenceSession(
+                            str(next(Path.home().glob('.cache/rtmlib/**/*.onnx'))),
+                            providers=['CUDAExecutionProvider']
+                        )
+                        actual = test_sess.get_providers()
+                        del test_sess
+                        if 'CUDAExecutionProvider' not in actual:
+                            print("[WARNING] CUDA provider listed but failed to load — running on CPU")
+                            self.config.POSE_DEVICE = 'cpu'
+                    except Exception:
+                        print("[WARNING] CUDA provider failed to initialize — running on CPU")
+                        self.config.POSE_DEVICE = 'cpu'
+            except ImportError:
+                pass
+
         # Cameras
         self.cap_a = None
         self.cap_b = None
