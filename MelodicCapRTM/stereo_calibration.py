@@ -353,14 +353,24 @@ class StereoCalibration:
             )
             print(f"    Stereo RMS: {ret_stereo:.4f}")
 
-            # Compute per-frame reprojection errors
-            rvec_stereo = cv2.Rodrigues(R)[0]
+            # Compute per-frame reprojection errors using solvePnP per frame
             per_frame_errors = []
             for i in range(len(cur_obj)):
-                proj_a, _ = cv2.projectPoints(cur_obj[i], np.zeros(3), np.zeros(3), K1, D1)
-                err_a = np.mean(np.linalg.norm(proj_a.reshape(-1, 2) - cur_img_a[i], axis=1))
-                proj_b, _ = cv2.projectPoints(cur_obj[i], rvec_stereo, T, K2, D2)
-                err_b = np.mean(np.linalg.norm(proj_b.reshape(-1, 2) - cur_img_b[i], axis=1))
+                obj_f = cur_obj[i].reshape(-1, 1, 3)
+                # Camera A: find board pose, reproject, measure error
+                ok_a, rvec_a, tvec_a = cv2.solvePnP(obj_f, cur_img_a[i].reshape(-1, 1, 2), K1, D1)
+                if ok_a:
+                    proj_a, _ = cv2.projectPoints(obj_f, rvec_a, tvec_a, K1, D1)
+                    err_a = np.mean(np.linalg.norm(proj_a.reshape(-1, 2) - cur_img_a[i].reshape(-1, 2), axis=1))
+                else:
+                    err_a = 999.0
+                # Camera B: same
+                ok_b, rvec_b, tvec_b = cv2.solvePnP(obj_f, cur_img_b[i].reshape(-1, 1, 2), K2, D2)
+                if ok_b:
+                    proj_b, _ = cv2.projectPoints(obj_f, rvec_b, tvec_b, K2, D2)
+                    err_b = np.mean(np.linalg.norm(proj_b.reshape(-1, 2) - cur_img_b[i].reshape(-1, 2), axis=1))
+                else:
+                    err_b = 999.0
                 per_frame_errors.append((i, max(err_a, err_b)))
 
             # Sort by error, find frames above threshold
