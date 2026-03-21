@@ -106,7 +106,7 @@ class StereoCalibration:
             'P1': self.P1.tolist(),
             'P2': self.P2.tolist(),
             'baseline_meters': float(np.linalg.norm(self.T)) if self.T is not None else 0,
-            'floor_z_offset': self.floor_z_offset,
+            'floor_z_offset': float(self.floor_z_offset),
         }
 
         with open(filepath, 'w') as f:
@@ -120,14 +120,14 @@ class StereoCalibration:
 
         corners, ids, _ = self.aruco_detector.detectMarkers(gray)
 
-        if ids is None or len(ids) < 4:
+        if ids is None or len(ids) < 2:
             return None, None
 
         num, charuco_corners, charuco_ids = cv2.aruco.interpolateCornersCharuco(
             corners, ids, gray, self.charuco_board
         )
 
-        if num < 4:
+        if num < 3:
             return None, None
 
         return charuco_corners, charuco_ids
@@ -361,8 +361,8 @@ class StereoCalibration:
             return False, "Board not detected in both cameras"
 
         common_ids = set(ids_a.flatten()) & set(ids_b.flatten())
-        if len(common_ids) < 4:
-            return False, f"Not enough common corners ({len(common_ids)})"
+        if len(common_ids) < 3:
+            return False, f"Not enough common corners ({len(common_ids)}). Hold board so both cameras see it."
 
         pts_a = []
         pts_b = []

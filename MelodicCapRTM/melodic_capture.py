@@ -277,19 +277,24 @@ class MelodicCapApp:
                 print("[WARNING] Frame capture failed")
                 continue
 
-            # Run pose detection on both frames
-            det_a = self.detector.detect_single(
-                frame_a, min_confidence=self.config.MIN_KEYPOINT_CONFIDENCE
-            )
-            det_b = self.detector.detect_single(
-                frame_b, min_confidence=self.config.MIN_KEYPOINT_CONFIDENCE
-            )
+            # Only run pose detection when NOT collecting calibration frames
+            # (pose inference is expensive, skip it during calibration)
+            det_a = None
+            det_b = None
+            if not self.collecting_cal_frames:
+                det_a = self.detector.detect_single(
+                    frame_a, min_confidence=self.config.MIN_KEYPOINT_CONFIDENCE
+                )
+                det_b = self.detector.detect_single(
+                    frame_b, min_confidence=self.config.MIN_KEYPOINT_CONFIDENCE
+                )
 
             # Draw detections
             display_a = frame_a.copy()
             display_b = frame_b.copy()
-            draw_detections(display_a, det_a, self.config.MIN_KEYPOINT_CONFIDENCE)
-            draw_detections(display_b, det_b, self.config.MIN_KEYPOINT_CONFIDENCE)
+            if det_a is not None or det_b is not None:
+                draw_detections(display_a, det_a, self.config.MIN_KEYPOINT_CONFIDENCE)
+                draw_detections(display_b, det_b, self.config.MIN_KEYPOINT_CONFIDENCE)
 
             # Status text
             if self.collecting_cal_frames:
