@@ -328,15 +328,63 @@ class StereoCalibration:
             img_points_a.append(np.array(img_a, dtype=np.float32))
             img_points_b.append(np.array(img_b, dtype=np.float32))
 
-        # Stereo calibration
-        print("\n  Running stereo calibration...")
-        ret_stereo, _, _, _, _, R, T, E, F = cv2.stereoCalibrate(
-            obj_points, img_points_a, img_points_b,
-            K1, D1, K2, D2, img_size,
-            criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6),
-            flags=cv2.CALIB_FIX_INTRINSIC
-        )
-        print(f"    Stereo RMS Error: {ret_stereo:.4f}")
+        # ── Iterative Stereo Calibration ─────────────────────────────
+        # Run stereo calibration, compute per-frame reprojection errors,
+        # drop worst frames, repeat until RMS stabilizes or we run out of frames.
+        # This is similar to what Pose2Sim does with its calibration refinement.
+        MAX_ITERATIONS = 5
+        cur_obj = list(obj_points)
+        cur_img_a = list(img_points_a)
+        cur_img_b = list(img_points_b)
+
+        for iteration in range(MAX_ITERATIONS):
+            label = f"(pass {iteration + 1})" if iteration > 0 else ""
+            print(f"\n  Running stereo calibration {label}... ({len(cur_obj)} frames)")
+
+            if len(cur_obj) < 8:
+                print(f"  [ERROR] Too few frames remaining ({len(cur_obj)}). Cannot calibrate.")
+                return False
+
+            ret_stereo, _, _, _, _, R, T, E, F = cv2.stereoCalibrate(
+                cur_obj, cur_img_a, cur_img_b,
+                K1, D1, K2, D2, img_size,
+                criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6),
+                flags=cv2.CALIB_FIX_INTRINSIC
+            )
+            print(f"    Stereo RMS: {ret_stereo:.4f}")
+
+            # Compute per-frame reprojection errors
+            rvec_stereo = cv2.Rodrigues(R)[0]
+            per_frame_errors = []
+            for i in range(len(cur_obj)):
+                proj_a, _ = cv2.projectPoints(cur_obj[i], np.zeros(3), np.zeros(3), K1, D1)
+                err_a = np.mean(np.linalg.norm(proj_a.reshape(-1, 2) - cur_img_a[i], axis=1))
+                proj_b, _ = cv2.projectPoints(cur_obj[i], rvec_stereo, T, K2, D2)
+                err_b = np.mean(np.linalg.norm(proj_b.reshape(-1, 2) - cur_img_b[i], axis=1))
+                per_frame_errors.append((i, max(err_a, err_b)))
+
+            # Sort by error, find frames above threshold
+            per_frame_errors.sort(key=lambda x: x[1], reverse=True)
+            worst_error = per_frame_errors[0][1]
+
+            # If already good enough or no bad frames, stop iterating
+            if worst_error <= 2.0 or ret_stereo < 0.4:
+                break
+
+            # Drop frames with error > 3px (aggressive) or top 20% worst
+            threshold = max(3.0, np.percentile([e for _, e in per_frame_errors], 80))
+            keep_indices = [i for i, err in per_frame_errors if err <= threshold]
+
+            if len(keep_indices) < 8:
+                # Can't drop more, keep what we have
+                break
+
+            dropped = len(cur_obj) - len(keep_indices)
+            print(f"    Dropping {dropped} worst frames (threshold: {threshold:.1f}px, worst: {worst_error:.1f}px)")
+
+            cur_obj = [cur_obj[i] for i in sorted(keep_indices)]
+            cur_img_a = [cur_img_a[i] for i in sorted(keep_indices)]
+            cur_img_b = [cur_img_b[i] for i in sorted(keep_indices)]
 
         baseline = np.linalg.norm(T)
 
@@ -362,19 +410,6 @@ class StereoCalibration:
             quality_issues.append(f"Baseline {baseline:.3f}m is very small — poor depth resolution")
         elif baseline > 2.0:
             quality_issues.append(f"Baseline {baseline:.3f}m is very large — may lose close subjects")
-
-        # Compute per-frame reprojection errors to find bad frames
-        per_frame_errors = []
-        for i, (op, ia, ib) in enumerate(zip(obj_points, img_points_a, img_points_b)):
-            proj_a, _ = cv2.projectPoints(op, np.zeros(3), np.zeros(3), K1, D1)
-            err_a = np.mean(np.linalg.norm(proj_a.reshape(-1, 2) - ia, axis=1))
-            proj_b, _ = cv2.projectPoints(op, cv2.Rodrigues(R)[0].flatten(), T.flatten(), K2, D2)
-            err_b = np.mean(np.linalg.norm(proj_b.reshape(-1, 2) - ib, axis=1))
-            per_frame_errors.append((i, err_a, err_b))
-
-        bad_frames = [(i, ea, eb) for i, ea, eb in per_frame_errors if ea > 2.0 or eb > 2.0]
-        if bad_frames:
-            quality_issues.append(f"{len(bad_frames)} frames with reprojection error > 2px")
 
         if quality_issues:
             print(f"\n  ⚠ CALIBRATION QUALITY WARNINGS:")
@@ -786,6 +821,49 @@ class StereoCalibration:
         self.floor_z_offset = -(-board_origin_stereo[1])  # = board_origin_stereo[1]
 
         return True, f"Floor set via Camera {cam_label} solvePnP (offset: {self.floor_z_offset:.3f}m, {len(single_corners)} corners)"
+
+    def calibrate_floor_from_ankles(self, detections_a, detections_b):
+        """
+        Auto-detect floor level from ankle keypoints.
+        Stand still with feet flat on ground. Uses the lowest ankle Z
+        as floor reference (like FreeMoCap does).
+
+        Call this with several frames of standing data for best results.
+        Returns (success, message).
+        """
+        if not self.is_calibrated:
+            return False, "Not calibrated"
+
+        # COCO-WholeBody ankle indices
+        ANKLE_INDICES = [15, 16]  # left ankle, right ankle
+
+        ankle_points = []
+        for idx in ANKLE_INDICES:
+            if idx in detections_a and idx in detections_b:
+                px_a, py_a, conf_a = detections_a[idx]
+                px_b, py_b, conf_b = detections_b[idx]
+
+                if conf_a < 0.3 or conf_b < 0.3:
+                    continue
+
+                result = self.triangulate([[px_a, py_a]], [[px_b, py_b]])
+                if result is not None:
+                    ankle_points.append(result[0])
+
+        if not ankle_points:
+            return False, "No ankle keypoints detected"
+
+        # Floor is at the lowest ankle Z (before floor offset is applied,
+        # but triangulate() already applies current offset — so the Z values
+        # include whatever offset is currently set)
+        ankle_z_values = [pt[2] for pt in ankle_points]
+        min_z = min(ankle_z_values)
+
+        # Adjust offset so ankles sit at ~0.05m (ankle bone is ~5cm above floor)
+        adjustment = -(min_z - 0.05)
+        self.floor_z_offset += adjustment
+
+        return True, f"Floor set from ankles (adjustment: {adjustment:+.3f}m, new offset: {self.floor_z_offset:.3f}m)"
 
     def reset_filters(self):
         """Reset all Kalman filters and tracking state (call at start of new take)."""

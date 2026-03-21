@@ -360,7 +360,8 @@ class MelodicCapApp:
         print("\n[CONTROLS]")
         print("  C = Collect calibration frames (hold board steady)")
         print("  S = Run stereo calibration (after collecting frames)")
-        print("  F = Calibrate floor (toggle mode - shows debug visuals)")
+        print("  F = Calibrate floor with ChArUco board")
+        print("  G = Auto floor calibration from ankles (stand still, feet flat)")
         print("  R = Start/Stop recording")
         print("  Q = Quit")
         print()
@@ -544,6 +545,35 @@ class MelodicCapApp:
                     print("  Place the ChArUco board flat on the ground.")
                     print("  Debug markers will show on screen. Auto-accepts when detected.")
                     print("  Press 'F' again to cancel.")
+
+            elif key == ord('g'):
+                # Auto floor calibration from ankles
+                if not self.calibration.is_calibrated:
+                    print("\n[ERROR] Calibrate cameras first (press C)")
+                elif det_a is None or det_b is None:
+                    print("\n[ERROR] Stand in view of both cameras first")
+                else:
+                    print("\n[FLOOR-AUTO] Calibrating floor from ankle positions...")
+                    # Collect multiple frames for stability
+                    ankle_samples = []
+                    for _ in range(10):
+                        ret_sa, sample_a = self.cap_a.read()
+                        ret_sb, sample_b = self.cap_b.read()
+                        if ret_sa and ret_sb:
+                            sa = self.detector.detect_single(sample_a, min_confidence=self.config.MIN_KEYPOINT_CONFIDENCE)
+                            sb = self.detector.detect_single(sample_b, min_confidence=self.config.MIN_KEYPOINT_CONFIDENCE)
+                            if sa and sb:
+                                success, msg = self.calibration.calibrate_floor_from_ankles(sa, sb)
+                                if success:
+                                    ankle_samples.append(self.calibration.floor_z_offset)
+                    if ankle_samples:
+                        # Use median of all samples
+                        median_offset = float(np.median(ankle_samples))
+                        self.calibration.floor_z_offset = median_offset
+                        self.calibration.save(self.config.CALIBRATION_FILE)
+                        print(f"  [OK] Floor set from ankles (offset: {median_offset:.3f}m, {len(ankle_samples)} samples)")
+                    else:
+                        print("  [FAILED] Could not detect ankles. Stand still with feet visible.")
 
             elif key == ord('r'):
                 if not self.calibration.is_calibrated:
