@@ -301,6 +301,19 @@ def get_landmark(landmarks_3d, idx):
     return None
 
 
+def set_bone_world_position(rig, bone, world_pos):
+    """
+    Set a pose bone's location so its head ends up at world_pos.
+
+    bone.location is a DELTA from the bone's rest position in parent space.
+    Simply assigning armature-space coordinates would add the rest position
+    on top, causing stretching.
+    """
+    armature_pos = rig.matrix_world.inverted() @ world_pos
+    # Subtract rest-pose head position to get the correct delta
+    bone.location = armature_pos - Vector(bone.bone.head_local)
+
+
 def compute_midpoint(landmarks_3d, idx1, idx2):
     """Compute midpoint between two landmarks."""
     p1 = get_landmark(landmarks_3d, idx1)
@@ -483,7 +496,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
             torso = rig.pose.bones.get("torso")
             if torso and spine_points.get('hip_mid'):
                 pos = spine_points['hip_mid']
-                torso.location = rig.matrix_world.inverted() @ pos
+                set_bone_world_position(rig, torso, pos)
                 torso.keyframe_insert(data_path="location")
 
             # =====================
@@ -595,7 +608,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
                             prev_foot_pos[side] = pos.copy()
 
-                    bone.location = rig.matrix_world.inverted() @ pos
+                    set_bone_world_position(rig, bone, pos)
                     bone.keyframe_insert(data_path="location")
 
                 # Pole targets
@@ -612,7 +625,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         continue
 
                     pole_pos = compute_pole_position(p_root, p_mid, p_end)
-                    bone.location = rig.matrix_world.inverted() @ pole_pos
+                    set_bone_world_position(rig, bone, pole_pos)
                     bone.keyframe_insert(data_path="location")
 
         self.report({'INFO'},
