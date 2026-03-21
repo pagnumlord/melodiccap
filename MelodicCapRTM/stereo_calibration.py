@@ -16,6 +16,25 @@ from pathlib import Path
 from kalman import SimpleKalman
 
 
+# Reasonable limits for a human body in a room
+OUTLIER_MAX_DISTANCE = 3.0      # meters from body centroid
+OUTLIER_MAX_VELOCITY = 2.0      # meters per frame (at ~10fps = 20m/s, impossible for human)
+BONE_PAIRS_FOR_SCALE = [
+    # (parent_idx, child_idx, expected_length_meters, tolerance_ratio)
+    # COCO-WholeBody indices
+    (5, 7, 0.28, 0.4),    # left shoulder → left elbow
+    (7, 9, 0.25, 0.4),    # left elbow → left wrist
+    (6, 8, 0.28, 0.4),    # right shoulder → right elbow
+    (8, 10, 0.25, 0.4),   # right elbow → right wrist
+    (11, 13, 0.42, 0.4),  # left hip → left knee
+    (13, 15, 0.40, 0.4),  # left knee → left ankle
+    (12, 14, 0.42, 0.4),  # right hip → right knee
+    (14, 16, 0.40, 0.4),  # right knee → right ankle
+    (5, 6, 0.36, 0.4),    # shoulder width
+    (11, 12, 0.28, 0.4),  # hip width
+]
+
+
 class StereoCalibration:
     """Handles stereo camera calibration and 3D triangulation."""
 
@@ -45,6 +64,18 @@ class StereoCalibration:
         # Kalman filters for each landmark
         self.filters = {}
 
+        # Previous frame 3D points for velocity-based outlier rejection
+        self._prev_points = {}
+
+        # Calibration image size (for runtime validation)
+        self._cal_image_size = None
+
+        # Bone-length calibration (computed from first N good frames)
+        self._bone_lengths = {}        # {(parent, child): median_length}
+        self._bone_samples = {}        # {(parent, child): [lengths...]}
+        self._bone_cal_frames = 0
+        self._bone_cal_target = 30     # Collect this many frames then lock
+
         # ChArUco board setup
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(config.ARUCO_DICT)
         self.charuco_board = cv2.aruco.CharucoBoard(
@@ -58,6 +89,32 @@ class StereoCalibration:
         self.aruco_detector = cv2.aruco.ArucoDetector(
             self.aruco_dict, self.detector_params
         )
+
+    def validate_frame_resolution(self, frame_a, frame_b):
+        """
+        Check that actual frame resolution matches calibration.
+        Returns (ok, message). Call this once after cameras init.
+        """
+        issues = []
+        expected = (self.config.FRAME_WIDTH, self.config.FRAME_HEIGHT)
+
+        for label, frame in [("A", frame_a), ("B", frame_b)]:
+            h, w = frame.shape[:2]
+            actual = (w, h)
+            if actual != expected:
+                issues.append(
+                    f"Camera {label}: getting {w}x{h}, expected {expected[0]}x{expected[1]}"
+                )
+
+        if self._cal_image_size and self._cal_image_size != list(expected):
+            issues.append(
+                f"Calibration was done at {self._cal_image_size[0]}x{self._cal_image_size[1]}, "
+                f"config says {expected[0]}x{expected[1]}"
+            )
+
+        if issues:
+            return False, "RESOLUTION MISMATCH:\n  " + "\n  ".join(issues)
+        return True, "OK"
 
     def load(self, filepath):
         """Load calibration from JSON file."""
@@ -75,9 +132,11 @@ class StereoCalibration:
             self.P2 = np.array(data['P2'])
             self.floor_z_offset = data.get('floor_z_offset', 0.0)
 
+            self._cal_image_size = data.get('image_size', None)
             self.is_calibrated = True
             print(f"[OK] Loaded calibration from {filepath}")
             print(f"     Baseline: {data.get('baseline_meters', 'unknown')}m")
+            print(f"     Calibrated at: {self._cal_image_size[0]}x{self._cal_image_size[1]}" if self._cal_image_size else "     Calibrated at: unknown resolution")
             if self.floor_z_offset != 0.0:
                 print(f"     Floor offset: {self.floor_z_offset:.3f}m")
             return True
@@ -225,6 +284,61 @@ class StereoCalibration:
         )
         print(f"    Stereo RMS Error: {ret_stereo:.4f}")
 
+        baseline = np.linalg.norm(T)
+
+        # ── Quality Gate ──────────────────────────────────────────────
+        quality_issues = []
+
+        if ret_a > 1.0:
+            quality_issues.append(f"Camera A intrinsic RMS {ret_a:.3f} > 1.0 (bad)")
+        elif ret_a > 0.5:
+            quality_issues.append(f"Camera A intrinsic RMS {ret_a:.3f} > 0.5 (mediocre)")
+
+        if ret_b > 1.0:
+            quality_issues.append(f"Camera B intrinsic RMS {ret_b:.3f} > 1.0 (bad)")
+        elif ret_b > 0.5:
+            quality_issues.append(f"Camera B intrinsic RMS {ret_b:.3f} > 0.5 (mediocre)")
+
+        if ret_stereo > 1.0:
+            quality_issues.append(f"Stereo RMS {ret_stereo:.3f} > 1.0 (BAD — will produce stretched/jittery results)")
+        elif ret_stereo > 0.5:
+            quality_issues.append(f"Stereo RMS {ret_stereo:.3f} > 0.5 (mediocre — expect some jitter)")
+
+        if baseline < 0.05:
+            quality_issues.append(f"Baseline {baseline:.3f}m is very small — poor depth resolution")
+        elif baseline > 2.0:
+            quality_issues.append(f"Baseline {baseline:.3f}m is very large — may lose close subjects")
+
+        # Compute per-frame reprojection errors to find bad frames
+        per_frame_errors = []
+        for i, (op, ia, ib) in enumerate(zip(obj_points, img_points_a, img_points_b)):
+            proj_a, _ = cv2.projectPoints(op, np.zeros(3), np.zeros(3), K1, D1)
+            err_a = np.mean(np.linalg.norm(proj_a.reshape(-1, 2) - ia, axis=1))
+            proj_b, _ = cv2.projectPoints(op, cv2.Rodrigues(R)[0].flatten(), T.flatten(), K2, D2)
+            err_b = np.mean(np.linalg.norm(proj_b.reshape(-1, 2) - ib, axis=1))
+            per_frame_errors.append((i, err_a, err_b))
+
+        bad_frames = [(i, ea, eb) for i, ea, eb in per_frame_errors if ea > 2.0 or eb > 2.0]
+        if bad_frames:
+            quality_issues.append(f"{len(bad_frames)} frames with reprojection error > 2px")
+
+        if quality_issues:
+            print(f"\n  ⚠ CALIBRATION QUALITY WARNINGS:")
+            for issue in quality_issues:
+                print(f"    • {issue}")
+
+        # Reject truly terrible calibrations
+        if ret_stereo > 2.0:
+            print(f"\n  [REJECTED] Stereo RMS {ret_stereo:.3f} is too high.")
+            print(f"  Tips: Use fewer, higher-quality frames. Hold board steady.")
+            print(f"  Move slowly. Ensure both cameras see the board clearly.")
+            return False
+
+        if quality_issues and ret_stereo > 0.8:
+            print(f"\n  [WARNING] Calibration saved but quality is poor (RMS {ret_stereo:.3f}).")
+            print(f"  Consider recalibrating with 20-30 slow, deliberate frames.")
+            print(f"  Target: Stereo RMS < 0.5 for good mocap results.")
+
         # Stereo rectification
         print("  Computing rectification...")
         R1, R2, P1, P2, Q, _, _ = cv2.stereoRectify(
@@ -239,11 +353,17 @@ class StereoCalibration:
         self.R1, self.R2 = R1, R2
         self.P1, self.P2 = P1, P2
         self.is_calibrated = True
+        self._cal_image_size = list(img_size)
 
-        baseline = np.linalg.norm(T)
         print(f"\n[OK] Stereo calibration complete!")
         print(f"     Baseline: {baseline:.3f}m")
         print(f"     Stereo RMS: {ret_stereo:.4f}")
+        if ret_stereo < 0.5:
+            print(f"     Quality: GOOD")
+        elif ret_stereo < 0.8:
+            print(f"     Quality: ACCEPTABLE")
+        else:
+            print(f"     Quality: POOR — recalibrate for better results")
 
         return True
 
@@ -312,6 +432,8 @@ class StereoCalibration:
         # Find keypoints visible in both cameras
         common_indices = set(detections_a.keys()) & set(detections_b.keys())
 
+        # First pass: triangulate all valid keypoints
+        raw_points = {}
         for idx in common_indices:
             px_a, py_a, conf_a = detections_a[idx]
             px_b, py_b, conf_b = detections_b[idx]
@@ -322,11 +444,39 @@ class StereoCalibration:
 
             # Triangulate single point
             result = self.triangulate([[px_a, py_a]], [[px_b, py_b]])
+            if result is not None:
+                raw_points[idx] = result[0].tolist()
 
-            if result is None:
-                continue
+        # ── Outlier Rejection ─────────────────────────────────────
+        # Compute body centroid from core keypoints (hips + shoulders)
+        core_indices = {5, 6, 11, 12}  # COCO shoulders + hips
+        core_pts = [raw_points[i] for i in core_indices if i in raw_points]
+        if core_pts:
+            centroid = np.mean(core_pts, axis=0)
+        elif raw_points:
+            centroid = np.mean(list(raw_points.values()), axis=0)
+        else:
+            centroid = np.array([0.0, 0.0, 1.0])
 
-            pt_3d = result[0].tolist()
+        for idx, pt_3d in raw_points.items():
+            pt = np.array(pt_3d)
+
+            # Reject points too far from body centroid
+            dist = np.linalg.norm(pt - centroid)
+            if dist > OUTLIER_MAX_DISTANCE:
+                # Use previous frame's value if available
+                if idx in self._prev_points:
+                    pt_3d = self._prev_points[idx]
+                else:
+                    continue  # Skip entirely if no history
+
+            # Reject impossible frame-to-frame velocity
+            if idx in self._prev_points:
+                prev = np.array(self._prev_points[idx])
+                velocity = np.linalg.norm(pt - prev)
+                if velocity > OUTLIER_MAX_VELOCITY:
+                    # Use previous value instead of teleporting
+                    pt_3d = self._prev_points[idx]
 
             # Apply Kalman smoothing
             if smooth:
@@ -346,6 +496,59 @@ class StereoCalibration:
                 ]
 
             points_3d[idx] = pt_3d
+
+        # ── Bone-Length Constraint ─────────────────────────────────
+        # Like FreeMoCap/Pose2Sim: learn body proportions from first
+        # N frames, then enforce them to prevent stretching.
+        if self._bone_cal_frames < self._bone_cal_target:
+            # Learning phase: collect bone length samples
+            for parent, child, _, _ in BONE_PAIRS_FOR_SCALE:
+                if parent in points_3d and child in points_3d:
+                    length = np.linalg.norm(
+                        np.array(points_3d[parent]) - np.array(points_3d[child])
+                    )
+                    if 0.01 < length < 1.5:  # Only plausible lengths
+                        key = (parent, child)
+                        if key not in self._bone_samples:
+                            self._bone_samples[key] = []
+                        self._bone_samples[key].append(length)
+            self._bone_cal_frames += 1
+
+            if self._bone_cal_frames == self._bone_cal_target:
+                # Lock in median bone lengths
+                for key, samples in self._bone_samples.items():
+                    if len(samples) >= 10:
+                        self._bone_lengths[key] = float(np.median(samples))
+                if self._bone_lengths:
+                    print(f"[BONE CAL] Learned {len(self._bone_lengths)} bone lengths from {self._bone_cal_target} frames")
+                    for (p, c), length in sorted(self._bone_lengths.items()):
+                        print(f"    {p}->{c}: {length:.3f}m")
+        else:
+            # Enforcement phase: clamp bones that are too long/short
+            for parent, child, _, tolerance in BONE_PAIRS_FOR_SCALE:
+                key = (parent, child)
+                if key not in self._bone_lengths:
+                    continue
+                if parent not in points_3d or child not in points_3d:
+                    continue
+
+                p_pt = np.array(points_3d[parent])
+                c_pt = np.array(points_3d[child])
+                current_len = np.linalg.norm(c_pt - p_pt)
+                expected_len = self._bone_lengths[key]
+
+                if current_len < 0.001:
+                    continue
+
+                ratio = current_len / expected_len
+                if abs(ratio - 1.0) > tolerance:
+                    # Clamp: move child point to correct distance along same direction
+                    direction = (c_pt - p_pt) / current_len
+                    corrected = p_pt + direction * expected_len
+                    points_3d[child] = corrected.tolist()
+
+        # Store for next frame's velocity check
+        self._prev_points = dict(points_3d)
 
         return points_3d
 
@@ -502,25 +705,37 @@ class StereoCalibration:
         if not success:
             return False, "solvePnP failed"
 
-        # The board is on the floor, so the board's Z=0 plane IS the floor.
-        # tvec gives translation from camera to board origin.
-        # We need the floor height in our stereo coordinate system.
-        R_cam, _ = cv2.Rodrigues(rvec)
-        # Board origin in camera coords
+        # solvePnP gives board pose in THIS camera's coordinate frame.
+        # But triangulate() outputs in the STEREO system's frame (camera A).
+        # We must transform to camera A's frame first.
+        R_board, _ = cv2.Rodrigues(rvec)
         board_origin_cam = tvec.flatten()
-        # Board normal in camera coords (board Z-axis)
-        board_normal_cam = R_cam[:, 2]
 
-        # Convert to Blender coords: Z_blender = -Y_opencv + offset
-        # The floor height in blender coords is -board_origin_cam[1]
-        # (since board is at floor level)
-        floor_z_cv = board_origin_cam[1]  # OpenCV Y (downward)
-        self.floor_z_offset = floor_z_cv  # This negates the -Y in triangulate
+        if corners_a is not None:
+            # This IS camera A — board_origin is already in stereo frame
+            board_origin_stereo = board_origin_cam
+        else:
+            # This is camera B — transform to camera A's frame
+            # P_A = R * P_B + T  (stereo relationship)
+            if self.R is not None and self.T is not None:
+                board_origin_stereo = (self.R.T @ (board_origin_cam.reshape(3, 1) - self.T)).flatten()
+            else:
+                # No stereo extrinsics available, fall back to raw (will be approximate)
+                board_origin_stereo = board_origin_cam
+
+        # Convert to Blender coords: Z_blender = -Y_opencv
+        # The floor is where the board is, so offset = -(-Y) = Y
+        # (negate because triangulate() does Z = -Y_opencv, we want floor at Z=0)
+        self.floor_z_offset = -(-board_origin_stereo[1])  # = board_origin_stereo[1]
 
         return True, f"Floor set via Camera {cam_label} solvePnP (offset: {self.floor_z_offset:.3f}m, {len(single_corners)} corners)"
 
     def reset_filters(self):
-        """Reset all Kalman filters (call at start of new take)."""
+        """Reset all Kalman filters and tracking state (call at start of new take)."""
         for idx in self.filters:
             for f in self.filters[idx]:
                 f.reset()
+        self._prev_points = {}
+        self._bone_lengths = {}
+        self._bone_samples = {}
+        self._bone_cal_frames = 0

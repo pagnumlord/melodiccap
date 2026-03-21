@@ -260,6 +260,57 @@ class MelodicCapApp:
 
         return True
 
+    def _run_camera_diagnostics(self):
+        """Run startup diagnostics on both cameras. Reports actual resolution and timing."""
+        print("\n[CAMERA DIAGNOSTICS]")
+
+        for label, cap in [("A (Sony ZV-1F)", self.cap_a), ("B (DroidCam)", self.cap_b)]:
+            # Read actual resolution (what the camera is ACTUALLY delivering)
+            actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            actual_fps = cap.get(cv2.CAP_PROP_FPS)
+
+            expected_w = self.config.FRAME_WIDTH
+            expected_h = self.config.FRAME_HEIGHT
+
+            res_ok = (actual_w == expected_w and actual_h == expected_h)
+            res_status = "OK" if res_ok else "MISMATCH"
+
+            print(f"  Camera {label}:")
+            print(f"    Resolution: {actual_w}x{actual_h} (expected {expected_w}x{expected_h}) [{res_status}]")
+            print(f"    Reported FPS: {actual_fps:.1f}")
+
+            if not res_ok:
+                print(f"    !!! RESOLUTION MISMATCH — calibration will be INVALID")
+                print(f"    !!! Fix DroidCam settings or change FRAME_WIDTH/HEIGHT in config")
+
+            # Measure actual frame delivery timing (5 frames)
+            times = []
+            for _ in range(6):
+                t0 = time.time()
+                ret, _ = cap.read()
+                if ret:
+                    times.append(time.time() - t0)
+
+            if len(times) >= 2:
+                avg_ms = np.mean(times[1:]) * 1000  # Skip first (cold start)
+                max_ms = np.max(times[1:]) * 1000
+                print(f"    Frame read time: avg {avg_ms:.0f}ms, max {max_ms:.0f}ms")
+                if max_ms > 200:
+                    print(f"    !!! Slow frame delivery — may cause sync issues")
+
+        # Quick sync test: read both cameras and compare timing
+        t_a = time.time()
+        self.cap_a.read()
+        t_a = time.time() - t_a
+
+        t_b = time.time()
+        self.cap_b.read()
+        t_b = time.time() - t_b
+
+        sync_delta = abs(t_a - t_b) * 1000
+        print(f"  Frame sync delta: {sync_delta:.0f}ms {'(OK)' if sync_delta < 50 else '(HIGH — may cause triangulation errors)'}")
+
     def load_existing_calibration(self):
         """Try to load existing calibration."""
         if self.config.CALIBRATION_FILE.exists():
@@ -289,8 +340,22 @@ class MelodicCapApp:
             print("\n[FATAL] Could not initialize cameras. Exiting.")
             return
 
+        # ── Camera Diagnostics ────────────────────────────────────
+        self._run_camera_diagnostics()
+
         # Try to load existing calibration
         self.load_existing_calibration()
+
+        # Validate resolution matches calibration
+        if self.calibration.is_calibrated:
+            ret_a, test_a = self.cap_a.read()
+            ret_b, test_b = self.cap_b.read()
+            if ret_a and ret_b:
+                ok, msg = self.calibration.validate_frame_resolution(test_a, test_b)
+                if not ok:
+                    print(f"\n  !!! {msg}")
+                    print(f"  !!! Calibration will produce WRONG 3D results.")
+                    print(f"  !!! Recalibrate at current resolution, or fix camera settings.")
 
         print("\n[CONTROLS]")
         print("  C = Collect calibration frames (hold board steady)")
