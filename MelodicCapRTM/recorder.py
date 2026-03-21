@@ -67,18 +67,30 @@ class MocapRecorder:
 
         self.frames.append(frame_data)
 
-    def stop(self, detector_info="rtmw-l"):
+    def stop(self, detector_info="rtmw-l", trim_end=0.0):
         """
         Stop recording and save to file.
 
         Args:
             detector_info: string describing the pose detector used
+            trim_end: seconds to trim from the end of the recording
         """
         if not self.is_recording:
             return None
 
         self.is_recording = False
         duration = time.time() - self.start_time
+
+        # Trim end frames (removes walking-to-keyboard frames)
+        if trim_end > 0 and self.frames:
+            cutoff = duration - trim_end
+            original_count = len(self.frames)
+            self.frames = [f for f in self.frames if f["timestamp"] <= cutoff]
+            trimmed = original_count - len(self.frames)
+            if trimmed > 0:
+                print(f"  Trimmed {trimmed} frames ({trim_end:.1f}s) from end")
+            duration = cutoff
+
         fps = len(self.frames) / duration if duration > 0 else 0
 
         data = {

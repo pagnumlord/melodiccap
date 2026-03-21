@@ -58,11 +58,16 @@ class Config:
     TAKES_DIR = BASE_DIR / "takes"
 
     # ChArUco board (must match your printed board)
-    CHARUCO_SQUARES_X = 4
-    CHARUCO_SQUARES_Y = 3
-    CHARUCO_SQUARE_SIZE = 0.0635  # 63.5mm in meters
-    CHARUCO_MARKER_SIZE = 0.0476  # 47.6mm in meters
+    # 7x5 board = 24 inner corners (much better for stereo calibration)
+    CHARUCO_SQUARES_X = 7
+    CHARUCO_SQUARES_Y = 5
+    CHARUCO_SQUARE_SIZE = 0.035  # 35mm in meters (adjust to your print)
+    CHARUCO_MARKER_SIZE = 0.026  # 26mm in meters (adjust to your print)
     ARUCO_DICT = cv2.aruco.DICT_4X4_50
+
+    # Recording
+    RECORDING_COUNTDOWN = 5  # seconds before recording starts
+    RECORDING_TRIM_END = 2.0  # seconds to trim from end of recording
 
     # Pose detection
     POSE_MODE = 'wholebody'     # 'body' (17 kps, fast) or 'wholebody' (133 kps)
@@ -213,6 +218,8 @@ class MelodicCapApp:
 
         # State
         self.running = True
+        self._countdown_start = 0
+        self._countdown_active = False
 
     def init_cameras(self):
         """Initialize both cameras."""
@@ -322,10 +329,28 @@ class MelodicCapApp:
                 draw_detections(display_a, det_a, self.config.MIN_KEYPOINT_CONFIDENCE)
                 draw_detections(display_b, det_b, self.config.MIN_KEYPOINT_CONFIDENCE)
 
+            # Handle countdown → start recording transition
+            if self._countdown_active:
+                remaining = self.config.RECORDING_COUNTDOWN - (time.time() - self._countdown_start)
+                if remaining <= 0:
+                    self._countdown_active = False
+                    self.calibration.reset_filters()
+                    self.recorder.start()
+
             # Status text
             if self.collecting_cal_frames:
                 draw_status(display_a, f"CALIBRATING: {len(self.cal_frames_a)} frames", (0, 255, 255))
                 draw_status(display_b, f"CALIBRATING: {len(self.cal_frames_b)} frames", (0, 255, 255))
+            elif self._countdown_active:
+                remaining = self.config.RECORDING_COUNTDOWN - (time.time() - self._countdown_start)
+                secs = int(remaining) + 1
+                draw_status(display_a, f"STARTING IN {secs}...", (0, 255, 255))
+                draw_status(display_b, f"STARTING IN {secs}...", (0, 255, 255))
+                # Big countdown number in center
+                for disp in [display_a, display_b]:
+                    h, w = disp.shape[:2]
+                    cv2.putText(disp, str(secs), (w // 2 - 40, h // 2 + 40),
+                                cv2.FONT_HERSHEY_SIMPLEX, 4, (0, 255, 255), 8)
             elif self.recorder.is_recording:
                 draw_status(display_a, f"REC: {len(self.recorder.frames)}f", (0, 0, 255))
                 draw_status(display_b, f"REC: {len(self.recorder.frames)}f", (0, 0, 255))
@@ -432,12 +457,19 @@ class MelodicCapApp:
             elif key == ord('r'):
                 if not self.calibration.is_calibrated:
                     print("\n[ERROR] Calibrate cameras first (press C)")
+                elif self._countdown_active:
+                    # Cancel countdown
+                    self._countdown_active = False
+                    print("\n[RECORDING] Countdown cancelled.")
                 elif self.recorder.is_recording:
                     detector_info = f"{self.config.POSE_MODE}_{self.config.POSE_QUALITY}"
-                    self.recorder.stop(detector_info=detector_info)
+                    trim_secs = self.config.RECORDING_TRIM_END
+                    self.recorder.stop(detector_info=detector_info, trim_end=trim_secs)
                 else:
-                    self.calibration.reset_filters()
-                    self.recorder.start()
+                    # Start countdown
+                    self._countdown_active = True
+                    self._countdown_start = time.time()
+                    print(f"\n[RECORDING] Starting in {self.config.RECORDING_COUNTDOWN} seconds... (R to cancel)")
 
         # Cleanup
         if self.recorder.is_recording:
