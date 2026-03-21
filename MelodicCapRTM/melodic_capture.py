@@ -215,6 +215,8 @@ class MelodicCapApp:
         self.cal_frames_b = []
         self.collecting_cal_frames = False
         self._last_cal_time = 0
+        self._prev_cal_corners_a = None  # For stillness detection
+        self._prev_cal_corners_b = None
 
         # Floor calibration mode
         self.floor_cal_active = False
@@ -501,20 +503,56 @@ class MelodicCapApp:
                 if points_3d and self.recorder.is_recording:
                     self.recorder.add_frame(points_3d, det_a, det_b)
 
-            # Collecting calibration frames
+            # Collecting calibration frames — with stillness detection
             if self.collecting_cal_frames:
-                ca, _ = self.calibration.detect_charuco(frame_a)
-                cb, _ = self.calibration.detect_charuco(frame_b)
+                ca, ida = self.calibration.detect_charuco(frame_a)
+                cb, idb = self.calibration.detect_charuco(frame_b)
 
                 if ca is not None and cb is not None:
                     cv2.aruco.drawDetectedCornersCharuco(display_a, ca)
                     cv2.aruco.drawDetectedCornersCharuco(display_b, cb)
 
-                    if time.time() - self._last_cal_time > 0.5:
+                    # Check if board is still (corners haven't moved since last check)
+                    board_still = False
+                    STILL_THRESH = 2.0  # pixels — must move less than this
+                    if (self._prev_cal_corners_a is not None and
+                            self._prev_cal_corners_b is not None and
+                            len(ca) >= 6 and len(cb) >= 6):
+                        # Compare common corners between current and previous
+                        prev_a, prev_ida = self._prev_cal_corners_a
+                        prev_b, prev_idb = self._prev_cal_corners_b
+                        if prev_ida is not None and prev_idb is not None:
+                            common_a = set(ida.flatten()) & set(prev_ida.flatten())
+                            common_b = set(idb.flatten()) & set(prev_idb.flatten())
+                            if len(common_a) >= 4 and len(common_b) >= 4:
+                                # Compute max corner movement
+                                move_a = 0
+                                for cid in common_a:
+                                    idx_cur = np.where(ida.flatten() == cid)[0][0]
+                                    idx_prev = np.where(prev_ida.flatten() == cid)[0][0]
+                                    move_a = max(move_a, np.linalg.norm(ca[idx_cur].flatten() - prev_a[idx_prev].flatten()))
+                                move_b = 0
+                                for cid in common_b:
+                                    idx_cur = np.where(idb.flatten() == cid)[0][0]
+                                    idx_prev = np.where(prev_idb.flatten() == cid)[0][0]
+                                    move_b = max(move_b, np.linalg.norm(cb[idx_cur].flatten() - prev_b[idx_prev].flatten()))
+                                board_still = (move_a < STILL_THRESH and move_b < STILL_THRESH)
+
+                    self._prev_cal_corners_a = (ca, ida)
+                    self._prev_cal_corners_b = (cb, idb)
+
+                    if board_still and time.time() - self._last_cal_time > 0.5:
                         self.cal_frames_a.append(frame_a.copy())
                         self.cal_frames_b.append(frame_b.copy())
                         self._last_cal_time = time.time()
                         print(f"  Captured frame {len(self.cal_frames_a)}")
+                    elif not board_still and time.time() - self._last_cal_time > 2.0:
+                        # Show hint if user hasn't gotten a frame in a while
+                        draw_status(display_a, "HOLD STILL to capture", (0, 165, 255))
+                        draw_status(display_b, "HOLD STILL to capture", (0, 165, 255))
+                else:
+                    self._prev_cal_corners_a = None
+                    self._prev_cal_corners_b = None
 
             # FPS counter
             frame_count += 1
@@ -549,10 +587,13 @@ class MelodicCapApp:
             elif key == ord('c'):
                 if not self.collecting_cal_frames:
                     print("\n[CALIBRATION] Starting frame collection...")
-                    print("  Move the ChArUco board around. Collecting every 0.5s when visible.")
+                    print("  Hold the board STILL at each position — captures when stationary.")
+                    print("  Move to a new position, hold still, repeat. Cover the full frame.")
                     print("  Press 'S' when you have 20+ frames to run calibration.")
                     self.cal_frames_a = []
                     self.cal_frames_b = []
+                    self._prev_cal_corners_a = None
+                    self._prev_cal_corners_b = None
                     self.collecting_cal_frames = True
                 else:
                     print("\n[CALIBRATION] Stopped collecting.")
