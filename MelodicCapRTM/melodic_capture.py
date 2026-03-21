@@ -219,6 +219,10 @@ class MelodicCapApp:
         # Floor calibration mode
         self.floor_cal_active = False
 
+        # Auto floor calibration countdown
+        self._floor_auto_countdown = False
+        self._floor_auto_start = 0
+
         # State
         self.running = True
         self._countdown_start = 0
@@ -406,6 +410,31 @@ class MelodicCapApp:
                     self.calibration.reset_filters()
                     self.recorder.start()
 
+            # Handle auto floor calibration countdown → collect ankles
+            if self._floor_auto_countdown:
+                remaining = self.config.RECORDING_COUNTDOWN - (time.time() - self._floor_auto_start)
+                if remaining <= 0:
+                    self._floor_auto_countdown = False
+                    print("[FLOOR-AUTO] Collecting ankle samples...")
+                    ankle_samples = []
+                    for _ in range(15):
+                        ret_sa, sample_a = self.cap_a.read()
+                        ret_sb, sample_b = self.cap_b.read()
+                        if ret_sa and ret_sb:
+                            sa = self.detector.detect_single(sample_a, min_confidence=self.config.MIN_KEYPOINT_CONFIDENCE)
+                            sb = self.detector.detect_single(sample_b, min_confidence=self.config.MIN_KEYPOINT_CONFIDENCE)
+                            if sa and sb:
+                                success, msg = self.calibration.calibrate_floor_from_ankles(sa, sb)
+                                if success:
+                                    ankle_samples.append(self.calibration.floor_z_offset)
+                    if ankle_samples:
+                        median_offset = float(np.median(ankle_samples))
+                        self.calibration.floor_z_offset = median_offset
+                        self.calibration.save(self.config.CALIBRATION_FILE)
+                        print(f"  [OK] Floor set from ankles (offset: {median_offset:.3f}m, {len(ankle_samples)} samples)")
+                    else:
+                        print("  [FAILED] Ankles not detected. Make sure both cameras can see your feet.")
+
             # Floor calibration mode - show debug and auto-accept
             if self.floor_cal_active:
                 debug = self.calibration.detect_floor_debug(frame_a, frame_b)
@@ -429,6 +458,15 @@ class MelodicCapApp:
                     draw_status(display_b, "FLOOR: Place board on ground", (0, 255, 255))
 
             # Status text
+            elif self._floor_auto_countdown:
+                remaining = self.config.RECORDING_COUNTDOWN - (time.time() - self._floor_auto_start)
+                secs = int(remaining) + 1
+                draw_status(display_a, f"FLOOR CAL IN {secs}... stand still", (0, 255, 128))
+                draw_status(display_b, f"FLOOR CAL IN {secs}... stand still", (0, 255, 128))
+                for disp in [display_a, display_b]:
+                    h, w = disp.shape[:2]
+                    cv2.putText(disp, str(secs), (w // 2 - 40, h // 2 + 40),
+                                cv2.FONT_HERSHEY_SIMPLEX, 4, (0, 255, 128), 8)
             elif self.collecting_cal_frames:
                 draw_status(display_a, f"CALIBRATING: {len(self.cal_frames_a)} frames", (0, 255, 255))
                 draw_status(display_b, f"CALIBRATING: {len(self.cal_frames_b)} frames", (0, 255, 255))
@@ -547,33 +585,17 @@ class MelodicCapApp:
                     print("  Press 'F' again to cancel.")
 
             elif key == ord('g'):
-                # Auto floor calibration from ankles
+                # Auto floor calibration from ankles — with countdown
                 if not self.calibration.is_calibrated:
                     print("\n[ERROR] Calibrate cameras first (press C)")
-                elif det_a is None or det_b is None:
-                    print("\n[ERROR] Stand in view of both cameras first")
+                elif self._floor_auto_countdown:
+                    # Cancel
+                    self._floor_auto_countdown = False
+                    print("\n[FLOOR-AUTO] Cancelled.")
                 else:
-                    print("\n[FLOOR-AUTO] Calibrating floor from ankle positions...")
-                    # Collect multiple frames for stability
-                    ankle_samples = []
-                    for _ in range(10):
-                        ret_sa, sample_a = self.cap_a.read()
-                        ret_sb, sample_b = self.cap_b.read()
-                        if ret_sa and ret_sb:
-                            sa = self.detector.detect_single(sample_a, min_confidence=self.config.MIN_KEYPOINT_CONFIDENCE)
-                            sb = self.detector.detect_single(sample_b, min_confidence=self.config.MIN_KEYPOINT_CONFIDENCE)
-                            if sa and sb:
-                                success, msg = self.calibration.calibrate_floor_from_ankles(sa, sb)
-                                if success:
-                                    ankle_samples.append(self.calibration.floor_z_offset)
-                    if ankle_samples:
-                        # Use median of all samples
-                        median_offset = float(np.median(ankle_samples))
-                        self.calibration.floor_z_offset = median_offset
-                        self.calibration.save(self.config.CALIBRATION_FILE)
-                        print(f"  [OK] Floor set from ankles (offset: {median_offset:.3f}m, {len(ankle_samples)} samples)")
-                    else:
-                        print("  [FAILED] Could not detect ankles. Stand still with feet visible.")
+                    self._floor_auto_countdown = True
+                    self._floor_auto_start = time.time()
+                    print(f"\n[FLOOR-AUTO] Stand still with feet flat in {self.config.RECORDING_COUNTDOWN}s... (G to cancel)")
 
             elif key == ord('r'):
                 if not self.calibration.is_calibrated:
