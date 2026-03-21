@@ -8,7 +8,7 @@ Everything else (calibration, triangulation, recording) is the same proven pipel
 
 Hardware:
 - Camera A (Sony ZV-1F): default index 2
-- Camera B (Samsung S25 via DroidCam): default index 4
+- Camera B (Samsung S25 via DroidCam): default index 0
 - GPU: RTX 3060 Ti (CUDA acceleration for RTMW)
 
 Usage:
@@ -43,7 +43,7 @@ class Config:
 
     # Camera indices (change these to match your system)
     CAM_A_INDEX = 2  # Sony ZV-1F
-    CAM_B_INDEX = 4  # Samsung S25 DroidCam
+    CAM_B_INDEX = 0  # Samsung S25 DroidCam
 
     # Resolution
     FRAME_WIDTH = 1280
