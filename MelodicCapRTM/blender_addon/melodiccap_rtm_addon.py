@@ -1,5 +1,5 @@
 """
-MelodicCap RTM Blender Addon v1.0
+MelodicCap RTM Blender Addon v3.0
 ===================================
 Imports JSON motion capture data and retargets to JaxRigify armature.
 
@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (2, 0),
+    "version": (3, 0),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -208,24 +208,6 @@ POLE_TARGETS = {
     "thigh_ik_target.R": (LM.RIGHT_HIP, LM.RIGHT_KNEE, LM.RIGHT_ANKLE),
 }
 
-# Rest pose axes (direction bone points in rest pose, armature space)
-BONE_REST_AXES = {
-    "upper_arm_fk.L": Vector((1, 0, 0)),
-    "forearm_fk.L": Vector((1, 0, 0)),
-    "upper_arm_fk.R": Vector((-1, 0, 0)),
-    "forearm_fk.R": Vector((-1, 0, 0)),
-    "thigh_fk.L": Vector((0, 0, -1)),
-    "shin_fk.L": Vector((0, 0, -1)),
-    "foot_fk.L": Vector((0, 1, 0)),
-    "thigh_fk.R": Vector((0, 0, -1)),
-    "shin_fk.R": Vector((0, 0, -1)),
-    "foot_fk.R": Vector((0, 1, 0)),
-    "spine_fk": Vector((0, 0, 1)),
-    "spine_fk.001": Vector((0, 0, 1)),
-    "spine_fk.002": Vector((0, 0, 1)),
-    "spine_fk.003": Vector((0, 0, 1)),
-}
-
 # Finger FK mapping: bone_name -> (start_keypoint, end_keypoint)
 # Only used when wholebody (133 kp) data is available
 FINGER_FK_MAPPING = {
@@ -272,21 +254,48 @@ FINGER_FK_MAPPING = {
     "f_pinky.03.R": (LM.RIGHT_PINKY_DIP, LM.RIGHT_PINKY_TIP),
 }
 
-# Rest axes for finger bones (all point outward along the finger)
-FINGER_REST_AXES = {}
-for bone_name in FINGER_FK_MAPPING:
-    if ".L" in bone_name:
-        FINGER_REST_AXES[bone_name] = Vector((1, 0, 0))
-    else:
-        FINGER_REST_AXES[bone_name] = Vector((-1, 0, 0))
-# Thumbs have different rest orientation
-for side in [".L", ".R"]:
-    for seg in ["thumb.01", "thumb.02", "thumb.03"]:
-        name = seg + side
-        if side == ".L":
-            FINGER_REST_AXES[name] = Vector((0.7, 0.7, 0))
-        else:
-            FINGER_REST_AXES[name] = Vector((-0.7, 0.7, 0))
+# Which FK limb bones to SKIP in IK mode (IK solver handles these)
+LIMB_FK_BONES = {
+    "upper_arm_fk.L", "forearm_fk.L",
+    "upper_arm_fk.R", "forearm_fk.R",
+    "thigh_fk.L", "shin_fk.L",
+    "thigh_fk.R", "shin_fk.R",
+    "foot_fk.L", "foot_fk.R",
+}
+
+# Map IK target bones to their scale key
+IK_SCALE_KEY = {
+    "hand_ik.L": "arm.L",
+    "hand_ik.R": "arm.R",
+    "foot_ik.L": "leg.L",
+    "foot_ik.R": "leg.R",
+}
+
+
+# =============================================================================
+# DIAGNOSTIC LOGGER
+# =============================================================================
+
+class DiagLog:
+    """Prints diagnostic info to Blender's terminal (System Console)."""
+    PREFIX = "[MelodicCap]"
+
+    @staticmethod
+    def info(msg):
+        print(f"{DiagLog.PREFIX} {msg}")
+
+    @staticmethod
+    def data(label, value):
+        print(f"{DiagLog.PREFIX}   {label}: {value}")
+
+    @staticmethod
+    def section(title):
+        print(f"{DiagLog.PREFIX} ── {title} ──")
+
+    @staticmethod
+    def bone(name, kind, detail=""):
+        extra = f" | {detail}" if detail else ""
+        print(f"{DiagLog.PREFIX}   [{kind}] {name}{extra}")
 
 
 # =============================================================================
@@ -344,13 +353,6 @@ def compute_virtual_spine_points(landmarks_3d):
     }
 
 
-def compute_rotation(rest_axis, target_direction):
-    """Compute quaternion to rotate rest_axis to target_direction."""
-    rest_axis = rest_axis.normalized()
-    target_direction = target_direction.normalized()
-    return rest_axis.rotation_difference(target_direction)
-
-
 def compute_pole_position(p_root, p_mid, p_end, offset=0.3):
     """Compute pole target position for IK."""
     line_dir = (p_end - p_root).normalized()
@@ -365,11 +367,240 @@ def compute_pole_position(p_root, p_mid, p_end, offset=0.3):
 
 def has_hand_data(landmarks_3d):
     """Check if wholebody hand keypoints are present."""
-    # Check if any left hand keypoints exist (indices 91-111)
     for i in range(91, 112):
         if str(i) in landmarks_3d:
             return True
     return False
+
+
+# =============================================================================
+# PROPORTIONAL RETARGETING
+# =============================================================================
+
+def measure_rig_proportions(rig):
+    """Measure bone chain lengths from the rig's rest pose."""
+    props = {}
+
+    # Spine length (hip to shoulders)
+    spine_bones = ["spine_fk", "spine_fk.001", "spine_fk.002", "spine_fk.003"]
+    spine_len = 0.0
+    for name in spine_bones:
+        bone = rig.pose.bones.get(name)
+        if bone:
+            spine_len += (Vector(bone.bone.tail_local) - Vector(bone.bone.head_local)).length
+    props['spine'] = spine_len
+
+    # Arm and leg chain lengths
+    for side in ['.L', '.R']:
+        upper = rig.pose.bones.get(f"upper_arm_fk{side}")
+        forearm = rig.pose.bones.get(f"forearm_fk{side}")
+        if upper and forearm:
+            props[f'arm{side}'] = (
+                (Vector(upper.bone.tail_local) - Vector(upper.bone.head_local)).length +
+                (Vector(forearm.bone.tail_local) - Vector(forearm.bone.head_local)).length
+            )
+
+        thigh = rig.pose.bones.get(f"thigh_fk{side}")
+        shin = rig.pose.bones.get(f"shin_fk{side}")
+        if thigh and shin:
+            props[f'leg{side}'] = (
+                (Vector(thigh.bone.tail_local) - Vector(thigh.bone.head_local)).length +
+                (Vector(shin.bone.tail_local) - Vector(shin.bone.head_local)).length
+            )
+
+    # Hip center rest position
+    torso = rig.pose.bones.get("torso")
+    if torso:
+        props['hip_rest'] = Vector(torso.bone.head_local)
+
+    return props
+
+
+def measure_mocap_proportions(landmarks_3d):
+    """Measure body proportions from a mocap frame."""
+    props = {}
+
+    hip_mid = compute_midpoint(landmarks_3d, LM.LEFT_HIP, LM.RIGHT_HIP)
+    shoulder_mid = compute_midpoint(landmarks_3d, LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER)
+
+    if hip_mid and shoulder_mid:
+        props['spine'] = (shoulder_mid - hip_mid).length
+
+    for side_label, sh, el, wr in [
+        ('.L', LM.LEFT_SHOULDER, LM.LEFT_ELBOW, LM.LEFT_WRIST),
+        ('.R', LM.RIGHT_SHOULDER, LM.RIGHT_ELBOW, LM.RIGHT_WRIST),
+    ]:
+        p_sh = get_landmark(landmarks_3d, sh)
+        p_el = get_landmark(landmarks_3d, el)
+        p_wr = get_landmark(landmarks_3d, wr)
+        if p_sh and p_el and p_wr:
+            props[f'arm{side_label}'] = (p_el - p_sh).length + (p_wr - p_el).length
+
+    for side_label, hp, kn, an in [
+        ('.L', LM.LEFT_HIP, LM.LEFT_KNEE, LM.LEFT_ANKLE),
+        ('.R', LM.RIGHT_HIP, LM.RIGHT_KNEE, LM.RIGHT_ANKLE),
+    ]:
+        p_hp = get_landmark(landmarks_3d, hp)
+        p_kn = get_landmark(landmarks_3d, kn)
+        p_an = get_landmark(landmarks_3d, an)
+        if p_hp and p_kn and p_an:
+            props[f'leg{side_label}'] = (p_kn - p_hp).length + (p_an - p_kn).length
+
+    if hip_mid:
+        props['hip_pos'] = hip_mid
+
+    return props
+
+
+def compute_scale_factors(rig_props, mocap_props):
+    """Compute per-chain scale factors: rig_length / mocap_length."""
+    scales = {}
+
+    if rig_props.get('spine', 0) > 0.01 and mocap_props.get('spine', 0) > 0.01:
+        scales['global'] = rig_props['spine'] / mocap_props['spine']
+    else:
+        scales['global'] = 1.0
+
+    for key in ['arm.L', 'arm.R', 'leg.L', 'leg.R']:
+        if rig_props.get(key, 0) > 0.01 and mocap_props.get(key, 0) > 0.01:
+            scales[key] = rig_props[key] / mocap_props[key]
+        else:
+            scales[key] = scales['global']
+
+    return scales
+
+
+def scale_position(pos, hip_center_mocap, scale_factor):
+    """Scale a position relative to the mocap hip center."""
+    offset = pos - hip_center_mocap
+    return hip_center_mocap + offset * scale_factor
+
+
+# =============================================================================
+# TEMPORAL SMOOTHING
+# =============================================================================
+
+def smooth_frames(frames, window=5):
+    """Apply centered moving average to landmark positions."""
+    if window < 2 or len(frames) < window:
+        return frames
+
+    half = window // 2
+    smoothed = []
+
+    for i in range(len(frames)):
+        start = max(0, i - half)
+        end = min(len(frames), i + half + 1)
+
+        avg_landmarks = {}
+        count = 0
+        for j in range(start, end):
+            lm = frames[j].get('landmarks_3d', {})
+            if not lm:
+                continue
+            count += 1
+            for key, coords in lm.items():
+                if key not in avg_landmarks:
+                    avg_landmarks[key] = [0.0, 0.0, 0.0]
+                avg_landmarks[key][0] += coords[0]
+                avg_landmarks[key][1] += coords[1]
+                avg_landmarks[key][2] += coords[2]
+
+        if count > 0:
+            for key in avg_landmarks:
+                avg_landmarks[key] = [c / count for c in avg_landmarks[key]]
+
+        new_frame = dict(frames[i])
+        new_frame['landmarks_3d'] = avg_landmarks
+        smoothed.append(new_frame)
+
+    return smoothed
+
+
+# =============================================================================
+# FK ROTATION HELPERS
+# =============================================================================
+
+def compute_fk_rotation(bone, target_dir_armature):
+    """
+    Compute rotation_quaternion for a pose bone to point along target_dir.
+
+    rotation_quaternion is applied in bone-local space. The bone's Y axis
+    (0,1,0) points along its length at rest. bone.bone.matrix_local transforms
+    from bone-local to armature space.
+
+    For a root-level bone (or one whose parent is at rest):
+      final_dir = matrix_local @ pose_rotation @ (0,1,0)
+    So:
+      pose_rotation @ (0,1,0) = matrix_local.inv() @ target_dir
+      pose_rotation = (0,1,0).rotation_difference(matrix_local.inv() @ target_dir)
+    """
+    rest_inv = bone.bone.matrix_local.to_3x3().inverted()
+    target_local = (rest_inv @ target_dir_armature).normalized()
+    return Vector((0, 1, 0)).rotation_difference(target_local)
+
+
+def compute_spine_fk_chain(rig, spine_points, armature_inv_33):
+    """
+    Compute FK rotations for the spine chain with parent-space tracking.
+
+    Processes bones in order, tracking the cumulative posed rotation so each
+    child bone correctly accounts for its parent's pose.
+
+    Returns list of (bone, quaternion) pairs to apply.
+    """
+    spine_chain = [
+        ("spine_fk", 'hip_mid', 'spine_low'),
+        ("spine_fk.001", 'spine_low', 'spine_mid'),
+        ("spine_fk.002", 'spine_mid', 'chest'),
+        ("spine_fk.003", 'chest', 'shoulder_mid'),
+    ]
+
+    results = []
+
+    first_bone = rig.pose.bones.get("spine_fk")
+    if first_bone and first_bone.parent:
+        cumulative_quat = first_bone.parent.bone.matrix_local.to_quaternion()
+    elif first_bone:
+        cumulative_quat = Quaternion()
+    else:
+        return results
+
+    for bone_name, start_key, end_key in spine_chain:
+        bone = rig.pose.bones.get(bone_name)
+        if not bone:
+            continue
+
+        p_start = spine_points.get(start_key)
+        p_end = spine_points.get(end_key)
+        if p_start is None or p_end is None:
+            continue
+
+        # Target direction in armature space
+        target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
+
+        # This bone's rest rotation relative to its parent
+        if bone.parent:
+            rest_rel = (bone.parent.bone.matrix_local.to_quaternion().inverted()
+                        @ bone.bone.matrix_local.to_quaternion())
+        else:
+            rest_rel = bone.bone.matrix_local.to_quaternion()
+
+        # Effective orientation = cumulative parent posed + this bone's rest
+        effective = cumulative_quat @ rest_rel
+
+        # Target direction in this bone's effective local space
+        target_local = (effective.inverted() @ target_dir).normalized()
+
+        # Rotation from (0,1,0) to target in local space
+        pose_quat = Vector((0, 1, 0)).rotation_difference(target_local)
+
+        results.append((bone, pose_quat))
+
+        # Update cumulative for the next bone in chain
+        cumulative_quat = effective @ pose_quat
+
+    return results
 
 
 # =============================================================================
@@ -393,7 +624,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
     use_fk: bpy.props.BoolProperty(
         name="Use FK Rotations",
-        description="Apply rotations to FK bones",
+        description="Apply rotations to FK bones (spine, fingers; limbs skipped in IK mode)",
         default=True
     )
 
@@ -415,6 +646,14 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         default=0.02,
         min=0.0,
         max=0.1
+    )
+
+    smooth_window: bpy.props.IntProperty(
+        name="Smoothing Window",
+        description="Moving average window size (1 = off, 5 = moderate, 9 = heavy)",
+        default=5,
+        min=1,
+        max=15
     )
 
     def execute(self, context):
@@ -442,39 +681,93 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         format_name = data.get('format', 'mediapipe_legacy')
         fps = data.get('fps', 30)
 
-        if is_rtm:
-            print(f"[MelodicCap] Loading RTM format ({data.get('detector', 'unknown')})")
-        else:
-            print(f"[MelodicCap] Loading legacy MediaPipe format, converting indices...")
+        DiagLog.section("IMPORT START")
+        DiagLog.data("File", os.path.basename(self.filepath))
+        DiagLog.data("Format", format_name)
+        DiagLog.data("Detector", data.get('detector', 'unknown'))
+        DiagLog.data("Frames", len(frames))
+        DiagLog.data("FPS", fps)
+        DiagLog.data("IK mode", self.use_ik)
+        DiagLog.data("FK mode", self.use_fk)
+        DiagLog.data("Smoothing", self.smooth_window)
+        DiagLog.data("Rig", rig.name)
 
         # Switch to pose mode
         bpy.ops.object.mode_set(mode='POSE')
 
         # Set IK/FK sliders
+        ik_fk_count = 0
         for bone in rig.pose.bones:
             if "IK_FK" in bone.keys():
-                if self.use_ik:
-                    bone["IK_FK"] = 0.0
-                else:
-                    bone["IK_FK"] = 1.0
+                bone["IK_FK"] = 0.0 if self.use_ik else 1.0
+                ik_fk_count += 1
+        DiagLog.data("IK_FK sliders found", ik_fk_count)
 
-        # Check if hand data is available (first frame)
-        first_landmarks = frames[0].get('landmarks_3d', {})
+        # Convert legacy frames if needed
         if not is_rtm:
-            first_landmarks = _convert_mp_frame(first_landmarks)
-        finger_data_available = has_hand_data(first_landmarks)
+            DiagLog.info("Converting legacy MediaPipe indices...")
+            for i, f in enumerate(frames):
+                lm = f.get('landmarks_3d', {})
+                if lm:
+                    frames[i]['landmarks_3d'] = _convert_mp_frame(lm)
 
-        if finger_data_available and self.use_fingers:
-            print("[MelodicCap] Wholebody hand data detected — finger tracking enabled")
-        elif self.use_fingers and not finger_data_available:
-            print("[MelodicCap] No hand keypoint data — finger tracking disabled")
+        # Check hand data availability (first frame)
+        first_landmarks = frames[0].get('landmarks_3d', {})
+        finger_data_available = has_hand_data(first_landmarks)
+        DiagLog.data("Finger data available", finger_data_available)
+
+        # =====================
+        # TEMPORAL SMOOTHING
+        # =====================
+        if self.smooth_window > 1:
+            DiagLog.info(f"Applying {self.smooth_window}-frame moving average...")
+            frames = smooth_frames(frames, self.smooth_window)
+
+        # =====================
+        # PROPORTIONAL SCALING
+        # =====================
+        DiagLog.section("PROPORTIONAL RETARGETING")
+
+        rig_props = measure_rig_proportions(rig)
+        DiagLog.data("Rig spine length", f"{rig_props.get('spine', 0):.4f}")
+        DiagLog.data("Rig arm.L length", f"{rig_props.get('arm.L', 0):.4f}")
+        DiagLog.data("Rig arm.R length", f"{rig_props.get('arm.R', 0):.4f}")
+        DiagLog.data("Rig leg.L length", f"{rig_props.get('leg.L', 0):.4f}")
+        DiagLog.data("Rig leg.R length", f"{rig_props.get('leg.R', 0):.4f}")
+        if rig_props.get('hip_rest'):
+            DiagLog.data("Rig hip rest pos", f"{rig_props['hip_rest']}")
+
+        mocap_props = measure_mocap_proportions(first_landmarks)
+        DiagLog.data("Mocap spine length", f"{mocap_props.get('spine', 0):.4f}")
+        DiagLog.data("Mocap arm.L length", f"{mocap_props.get('arm.L', 0):.4f}")
+        DiagLog.data("Mocap arm.R length", f"{mocap_props.get('arm.R', 0):.4f}")
+        DiagLog.data("Mocap leg.L length", f"{mocap_props.get('leg.L', 0):.4f}")
+        DiagLog.data("Mocap leg.R length", f"{mocap_props.get('leg.R', 0):.4f}")
+        if mocap_props.get('hip_pos'):
+            DiagLog.data("Mocap hip pos (frame 0)", f"{mocap_props['hip_pos']}")
+
+        scales = compute_scale_factors(rig_props, mocap_props)
+        DiagLog.data("Scale global (spine)", f"{scales['global']:.3f}")
+        DiagLog.data("Scale arm.L", f"{scales.get('arm.L', 0):.3f}")
+        DiagLog.data("Scale arm.R", f"{scales.get('arm.R', 0):.3f}")
+        DiagLog.data("Scale leg.L", f"{scales.get('leg.L', 0):.3f}")
+        DiagLog.data("Scale leg.R", f"{scales.get('leg.R', 0):.3f}")
+
+        global_scale = scales['global']
+
+        # Precompute armature inverse matrix (3x3 for directions, 4x4 for positions)
+        armature_inv = rig.matrix_world.inverted()
+        armature_inv_33 = armature_inv.to_3x3()
 
         # Track previous foot positions for pinning
         prev_foot_pos = {"L": None, "R": None}
         pinned_foot_pos = {"L": None, "R": None}
 
+        DiagLog.section("PROCESSING FRAMES")
+        log_every = max(1, len(frames) // 10)
+
         # Process each frame
-        for frame_data in frames:
+        for frame_idx, frame_data in enumerate(frames):
             timestamp = frame_data.get('timestamp', 0)
             frame_num = int(timestamp * fps)
             context.scene.frame_set(frame_num)
@@ -483,75 +776,62 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
             if not landmarks_3d:
                 continue
 
-            # Convert legacy format
-            if not is_rtm:
-                landmarks_3d = _convert_mp_frame(landmarks_3d)
-
             # Compute virtual spine points
             spine_points = compute_virtual_spine_points(landmarks_3d)
+            hip_center = spine_points.get('hip_mid')
+
+            if frame_idx % log_every == 0:
+                DiagLog.info(f"Frame {frame_idx}/{len(frames)} (t={timestamp:.2f}s, blender={frame_num})")
+                if hip_center:
+                    DiagLog.data("  hip_center", f"({hip_center.x:.3f}, {hip_center.y:.3f}, {hip_center.z:.3f})")
 
             # =====================
-            # ROOT / TORSO POSITION
+            # ROOT / TORSO POSITION (scaled)
             # =====================
             torso = rig.pose.bones.get("torso")
-            if torso and spine_points.get('hip_mid'):
-                pos = spine_points['hip_mid']
-                set_bone_world_position(rig, torso, pos)
+            if torso and hip_center:
+                scaled_hip = hip_center.copy()
+                scaled_hip.z *= global_scale
+                mocap_hip_frame0 = mocap_props.get('hip_pos')
+                if mocap_hip_frame0:
+                    dx = hip_center.x - mocap_hip_frame0.x
+                    dy = hip_center.y - mocap_hip_frame0.y
+                    scaled_hip.x = mocap_hip_frame0.x * global_scale + dx * global_scale
+                    scaled_hip.y = mocap_hip_frame0.y * global_scale + dy * global_scale
+
+                set_bone_world_position(rig, torso, scaled_hip)
                 torso.keyframe_insert(data_path="location")
 
             # =====================
             # FK ROTATIONS
             # =====================
             if self.use_fk:
-                # Limbs
-                for bone_name, (start_idx, end_idx) in V2R_MAPPING.items():
-                    bone = rig.pose.bones.get(bone_name)
-                    if not bone:
-                        continue
-
-                    p_start = get_landmark(landmarks_3d, start_idx)
-                    p_end = get_landmark(landmarks_3d, end_idx)
-
-                    if p_start is None or p_end is None:
-                        continue
-
-                    direction = (p_end - p_start).normalized()
-                    rest_axis = BONE_REST_AXES.get(bone_name, Vector((0, 1, 0)))
-
-                    local_dir = rig.matrix_world.inverted().to_quaternion() @ direction
-
+                # --- Spine chain (proper parent-space tracking) ---
+                spine_results = compute_spine_fk_chain(rig, spine_points, armature_inv_33)
+                for bone, pose_quat in spine_results:
                     bone.rotation_mode = 'QUATERNION'
-                    bone.rotation_quaternion = compute_rotation(rest_axis, local_dir)
+                    bone.rotation_quaternion = pose_quat
                     bone.keyframe_insert(data_path="rotation_quaternion")
 
-                # Spine chain
-                spine_chain = [
-                    ("spine_fk", 'hip_mid', 'spine_low'),
-                    ("spine_fk.001", 'spine_low', 'spine_mid'),
-                    ("spine_fk.002", 'spine_mid', 'chest'),
-                    ("spine_fk.003", 'chest', 'shoulder_mid'),
-                ]
+                # --- Limb FK (only in FK mode, skipped when IK active) ---
+                if not self.use_ik:
+                    for bone_name, (start_idx, end_idx) in V2R_MAPPING.items():
+                        bone = rig.pose.bones.get(bone_name)
+                        if not bone:
+                            continue
 
-                for bone_name, start_key, end_key in spine_chain:
-                    bone = rig.pose.bones.get(bone_name)
-                    if not bone:
-                        continue
+                        p_start = get_landmark(landmarks_3d, start_idx)
+                        p_end = get_landmark(landmarks_3d, end_idx)
+                        if p_start is None or p_end is None:
+                            continue
 
-                    p_start = spine_points.get(start_key)
-                    p_end = spine_points.get(end_key)
+                        target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
 
-                    if p_start is None or p_end is None:
-                        continue
+                        bone.rotation_mode = 'QUATERNION'
+                        bone.rotation_quaternion = compute_fk_rotation(bone, target_dir)
+                        bone.keyframe_insert(data_path="rotation_quaternion")
 
-                    direction = (p_end - p_start).normalized()
-                    rest_axis = BONE_REST_AXES.get(bone_name, Vector((0, 0, 1)))
-                    local_dir = rig.matrix_world.inverted().to_quaternion() @ direction
-
-                    bone.rotation_mode = 'QUATERNION'
-                    bone.rotation_quaternion = compute_rotation(rest_axis, local_dir)
-                    bone.keyframe_insert(data_path="rotation_quaternion")
-
-                # Fingers (only with wholebody data)
+                # --- Fingers (wholebody data, uses simple FK) ---
                 if finger_data_available and self.use_fingers:
                     for bone_name, (start_idx, end_idx) in FINGER_FK_MAPPING.items():
                         bone = rig.pose.bones.get(bone_name)
@@ -560,22 +840,19 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
                         p_start = get_landmark(landmarks_3d, start_idx)
                         p_end = get_landmark(landmarks_3d, end_idx)
-
                         if p_start is None or p_end is None:
                             continue
 
-                        direction = (p_end - p_start).normalized()
-                        rest_axis = FINGER_REST_AXES.get(bone_name, Vector((1, 0, 0)))
-                        local_dir = rig.matrix_world.inverted().to_quaternion() @ direction
+                        target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
 
                         bone.rotation_mode = 'QUATERNION'
-                        bone.rotation_quaternion = compute_rotation(rest_axis, local_dir)
+                        bone.rotation_quaternion = compute_fk_rotation(bone, target_dir)
                         bone.keyframe_insert(data_path="rotation_quaternion")
 
             # =====================
-            # IK POSITIONS
+            # IK POSITIONS (proportionally scaled)
             # =====================
-            if self.use_ik:
+            if self.use_ik and hip_center:
                 for bone_name, landmark_idx in IK_TARGETS.items():
                     bone = rig.pose.bones.get(bone_name)
                     if not bone:
@@ -585,33 +862,44 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     if pos is None:
                         continue
 
-                    pos = pos.copy()
+                    # Scale position relative to hip center using chain-specific scale
+                    chain_key = IK_SCALE_KEY.get(bone_name, 'global')
+                    chain_scale = scales.get(chain_key, global_scale)
+                    pos = scale_position(pos, hip_center, chain_scale)
+
+                    # Also scale the hip center's own position (height + XY)
+                    pos_scaled = pos.copy()
+                    pos_scaled.z += (global_scale - 1.0) * hip_center.z
+                    mocap_hip_frame0 = mocap_props.get('hip_pos')
+                    if mocap_hip_frame0:
+                        pos_scaled.x += (global_scale - 1.0) * mocap_hip_frame0.x
+                        pos_scaled.y += (global_scale - 1.0) * mocap_hip_frame0.y
 
                     is_foot = "foot" in bone_name
                     side = "L" if ".L" in bone_name else "R"
 
                     if is_foot:
-                        if self.ground_clamp and pos.z < 0:
-                            pos.z = 0
+                        if self.ground_clamp and pos_scaled.z < 0:
+                            pos_scaled.z = 0
 
                         if self.pin_threshold > 0:
                             if prev_foot_pos[side] is not None:
-                                velocity = (pos - prev_foot_pos[side]).length
+                                velocity = (pos_scaled - prev_foot_pos[side]).length
 
-                                if velocity < self.pin_threshold and pos.z < 0.1:
+                                if velocity < self.pin_threshold and pos_scaled.z < 0.1:
                                     if pinned_foot_pos[side] is None:
-                                        pinned_foot_pos[side] = pos.copy()
+                                        pinned_foot_pos[side] = pos_scaled.copy()
                                         pinned_foot_pos[side].z = 0
-                                    pos = pinned_foot_pos[side]
+                                    pos_scaled = pinned_foot_pos[side]
                                 else:
                                     pinned_foot_pos[side] = None
 
-                            prev_foot_pos[side] = pos.copy()
+                            prev_foot_pos[side] = pos_scaled.copy()
 
-                    set_bone_world_position(rig, bone, pos)
+                    set_bone_world_position(rig, bone, pos_scaled)
                     bone.keyframe_insert(data_path="location")
 
-                # Pole targets
+                # Pole targets (also scaled)
                 for bone_name, (root_idx, mid_idx, end_idx) in POLE_TARGETS.items():
                     bone = rig.pose.bones.get(bone_name)
                     if not bone:
@@ -624,13 +912,35 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     if None in (p_root, p_mid, p_end):
                         continue
 
-                    pole_pos = compute_pole_position(p_root, p_mid, p_end)
+                    # Scale the joint positions before computing pole
+                    chain_key = 'arm.L' if 'arm' in bone_name and '.L' in bone_name else \
+                                'arm.R' if 'arm' in bone_name and '.R' in bone_name else \
+                                'leg.L' if 'thigh' in bone_name and '.L' in bone_name else \
+                                'leg.R' if 'thigh' in bone_name and '.R' in bone_name else 'global'
+                    cs = scales.get(chain_key, global_scale)
+                    p_root_s = scale_position(p_root, hip_center, cs)
+                    p_mid_s = scale_position(p_mid, hip_center, cs)
+                    p_end_s = scale_position(p_end, hip_center, cs)
+
+                    pole_pos = compute_pole_position(p_root_s, p_mid_s, p_end_s)
+
+                    # Apply same global offset as IK targets
+                    pole_pos.z += (global_scale - 1.0) * hip_center.z
+                    mocap_hip_frame0 = mocap_props.get('hip_pos')
+                    if mocap_hip_frame0:
+                        pole_pos.x += (global_scale - 1.0) * mocap_hip_frame0.x
+                        pole_pos.y += (global_scale - 1.0) * mocap_hip_frame0.y
+
                     set_bone_world_position(rig, bone, pole_pos)
                     bone.keyframe_insert(data_path="location")
 
+        DiagLog.section("IMPORT COMPLETE")
+        DiagLog.data("Total frames processed", len(frames))
+        DiagLog.data("Blender frame range", f"0 - {int(frames[-1].get('timestamp', 0) * fps)}")
+
         self.report({'INFO'},
                     f"Imported {len(frames)} frames from {os.path.basename(self.filepath)} "
-                    f"({format_name})")
+                    f"({format_name}, scale={global_scale:.2f}x)")
         return {'FINISHED'}
 
 
