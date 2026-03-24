@@ -1,5 +1,5 @@
 """
-MelodicCap RTM Blender Addon v3.1
+MelodicCap RTM Blender Addon v3.2
 ===================================
 Imports JSON motion capture data and retargets to JaxRigify armature.
 
@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (3, 1),
+    "version": (3, 2),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -630,8 +630,8 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
     use_fingers: bpy.props.BoolProperty(
         name="Use Finger Tracking",
-        description="Apply finger rotations from wholebody data (requires RTM format)",
-        default=True
+        description="Apply finger rotations from wholebody data (experimental, noisy at low FPS)",
+        default=False
     )
 
     ground_clamp: bpy.props.BoolProperty(
@@ -643,9 +643,17 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
     pin_threshold: bpy.props.FloatProperty(
         name="Foot Pin Threshold",
         description="Velocity threshold for foot pinning (0 = disabled)",
-        default=0.02,
+        default=0.03,
         min=0.0,
         max=0.1
+    )
+
+    foot_floor_height: bpy.props.FloatProperty(
+        name="Floor Contact Height",
+        description="Height below which feet are considered on the ground (meters)",
+        default=0.08,
+        min=0.0,
+        max=0.3
     )
 
     smooth_window: bpy.props.IntProperty(
@@ -803,6 +811,37 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                 torso.keyframe_insert(data_path="location")
 
             # =====================
+            # TORSO ROTATION (from shoulder line + hip line)
+            # =====================
+            if torso:
+                p_ls = get_landmark(landmarks_3d, LM.LEFT_SHOULDER)
+                p_rs = get_landmark(landmarks_3d, LM.RIGHT_SHOULDER)
+                p_lh = get_landmark(landmarks_3d, LM.LEFT_HIP)
+                p_rh = get_landmark(landmarks_3d, LM.RIGHT_HIP)
+
+                if p_ls and p_rs and p_lh and p_rh:
+                    # Average shoulder and hip lines for overall body facing
+                    shoulder_vec = (p_ls - p_rs)
+                    hip_vec = (p_lh - p_rh)
+                    body_right = ((shoulder_vec + hip_vec) / 2)
+                    body_right.z = 0  # Project to ground plane
+
+                    if body_right.length > 0.01:
+                        body_right = body_right.normalized()
+                        # Body "right" in Blender: rig faces -Y, so right = +X
+                        # Rotation angle = angle between body_right and +X axis
+                        import math
+                        angle = math.atan2(-body_right.y, body_right.x)
+
+                        # Apply as Z rotation on torso
+                        torso.rotation_mode = 'QUATERNION'
+                        torso.rotation_quaternion = Quaternion((0, 0, 1), angle)
+                        torso.keyframe_insert(data_path="rotation_quaternion")
+
+                        if frame_idx % log_every == 0:
+                            DiagLog.data("  torso_angle", f"{math.degrees(angle):.1f}°")
+
+            # =====================
             # FK ROTATIONS
             # =====================
             if self.use_fk:
@@ -858,6 +897,10 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
             # IK POSITIONS (proportionally scaled)
             # =====================
             if self.use_ik and hip_center:
+                # Get shoulder positions for arm scaling origin
+                p_shoulder_l = get_landmark(landmarks_3d, LM.LEFT_SHOULDER)
+                p_shoulder_r = get_landmark(landmarks_3d, LM.RIGHT_SHOULDER)
+
                 for bone_name, landmark_idx in IK_TARGETS.items():
                     bone = rig.pose.bones.get(bone_name)
                     if not bone:
@@ -867,10 +910,18 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     if pos is None:
                         continue
 
-                    # Scale position relative to hip center using chain-specific scale
+                    # Scale arms relative to shoulder (not hip) to prevent
+                    # tucking in when arms are extended.
+                    # Scale legs relative to hip (correct for leg reach).
                     chain_key = IK_SCALE_KEY.get(bone_name, 'global')
                     chain_scale = scales.get(chain_key, global_scale)
-                    pos = scale_position(pos, hip_center, chain_scale)
+
+                    if "hand" in bone_name and ".L" in bone_name and p_shoulder_l:
+                        pos = scale_position(pos, p_shoulder_l, chain_scale)
+                    elif "hand" in bone_name and ".R" in bone_name and p_shoulder_r:
+                        pos = scale_position(pos, p_shoulder_r, chain_scale)
+                    else:
+                        pos = scale_position(pos, hip_center, chain_scale)
 
                     # Also scale the hip center's own position (height + XY)
                     pos_scaled = pos.copy()
@@ -884,19 +935,26 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     side = "L" if ".L" in bone_name else "R"
 
                     if is_foot:
+                        # Ground clamp: never below floor
                         if self.ground_clamp and pos_scaled.z < 0:
                             pos_scaled.z = 0
 
+                        # Foot pinning: lock foot to ground when it's near
+                        # the floor AND moving slowly (contact phase).
                         if self.pin_threshold > 0:
+                            near_floor = pos_scaled.z < self.foot_floor_height
+
                             if prev_foot_pos[side] is not None:
                                 velocity = (pos_scaled - prev_foot_pos[side]).length
 
-                                if velocity < self.pin_threshold and pos_scaled.z < 0.1:
+                                if velocity < self.pin_threshold and near_floor:
+                                    # Foot is on the ground and stationary
                                     if pinned_foot_pos[side] is None:
                                         pinned_foot_pos[side] = pos_scaled.copy()
                                         pinned_foot_pos[side].z = 0
                                     pos_scaled = pinned_foot_pos[side]
-                                else:
+                                elif not near_floor or velocity > self.pin_threshold * 3:
+                                    # Foot lifted or moved significantly
                                     pinned_foot_pos[side] = None
 
                             prev_foot_pos[side] = pos_scaled.copy()
@@ -917,15 +975,22 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     if None in (p_root, p_mid, p_end):
                         continue
 
-                    # Scale the joint positions before computing pole
+                    # Scale joint positions — arms from shoulder, legs from hip
                     chain_key = 'arm.L' if 'arm' in bone_name and '.L' in bone_name else \
                                 'arm.R' if 'arm' in bone_name and '.R' in bone_name else \
                                 'leg.L' if 'thigh' in bone_name and '.L' in bone_name else \
                                 'leg.R' if 'thigh' in bone_name and '.R' in bone_name else 'global'
                     cs = scales.get(chain_key, global_scale)
-                    p_root_s = scale_position(p_root, hip_center, cs)
-                    p_mid_s = scale_position(p_mid, hip_center, cs)
-                    p_end_s = scale_position(p_end, hip_center, cs)
+
+                    if 'arm' in bone_name and '.L' in bone_name and p_shoulder_l:
+                        scale_origin = p_shoulder_l
+                    elif 'arm' in bone_name and '.R' in bone_name and p_shoulder_r:
+                        scale_origin = p_shoulder_r
+                    else:
+                        scale_origin = hip_center
+                    p_root_s = scale_position(p_root, scale_origin, cs)
+                    p_mid_s = scale_position(p_mid, scale_origin, cs)
+                    p_end_s = scale_position(p_end, scale_origin, cs)
 
                     pole_pos = compute_pole_position(p_root_s, p_mid_s, p_end_s)
 
