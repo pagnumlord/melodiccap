@@ -75,6 +75,11 @@ class Config:
     POSE_DEVICE = 'cuda'        # 'cuda' or 'cpu'
     MIN_KEYPOINT_CONFIDENCE = 0.3
 
+    # Skip face (23-90) and hand (91-132) keypoints during triangulation.
+    # Saves ~60% of triangulation work. Wholebody model still runs (for
+    # accurate wrist/ankle placement) but we don't triangulate fingers/face.
+    SKIP_FACE_HANDS = True      # Set False to record finger data
+
     # Smoothing
     KALMAN_PROCESS_NOISE = 1e-4
     KALMAN_MEASUREMENT_NOISE = 1e-2
@@ -158,6 +163,9 @@ class MelodicCapApp:
 
     def __init__(self):
         self.config = Config()
+
+        # Track if user wanted CUDA (to warn if we fell back)
+        self._cuda_was_requested = (self.config.POSE_DEVICE == 'cuda')
 
         # Initialize pose detector
         print("\n[INITIALIZING POSE DETECTOR]")
@@ -334,6 +342,11 @@ class MelodicCapApp:
         print("MELODICCAP RTM STUDIO")
         print(f"  Detector: {self.config.POSE_MODE} ({self.config.POSE_QUALITY})")
         print(f"  Device: {self.config.POSE_DEVICE}")
+        if self._cuda_was_requested and self.config.POSE_DEVICE == 'cpu':
+            print(f"  !! WARNING: CUDA was requested but FAILED — running on CPU !!")
+            print(f"  !! Expect 10-15 FPS instead of 30+ !!")
+        skip_fh = getattr(self.config, 'SKIP_FACE_HANDS', False)
+        print(f"  Skip face/hands: {skip_fh}")
         print("=" * 60)
 
         # Create directories
@@ -568,11 +581,24 @@ class MelodicCapApp:
                 cv2.resize(display_b, (640, 360))
             ])
 
-            # FPS bar at bottom
+            # FPS bar at bottom — shows model, device, FPS, and warnings
             bar = np.zeros((30, combined.shape[1], 3), dtype=np.uint8)
             mode_str = f"RTMW {self.config.POSE_QUALITY}" if self.config.POSE_MODE == 'wholebody' else f"RTMPose {self.config.POSE_QUALITY}"
-            cv2.putText(bar, f"{mode_str} | {self.config.POSE_DEVICE.upper()} | {display_fps:.0f} fps",
-                        (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+            device_str = self.config.POSE_DEVICE.upper()
+            skip_str = " | body-only" if getattr(self.config, 'SKIP_FACE_HANDS', False) else ""
+
+            # Warn if CUDA was requested but we fell back to CPU
+            if self._cuda_was_requested and self.config.POSE_DEVICE == 'cpu':
+                bar[:] = (0, 0, 80)  # dark red background
+                cv2.putText(bar, f"{mode_str} | !! CPU FALLBACK (CUDA FAILED) !! | {display_fps:.0f} fps{skip_str}",
+                            (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            elif display_fps < 15 and not self.collecting_cal_frames:
+                bar[:] = (0, 40, 80)  # dark orange background
+                cv2.putText(bar, f"{mode_str} | {device_str} | {display_fps:.0f} fps LOW{skip_str}",
+                            (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1)
+            else:
+                cv2.putText(bar, f"{mode_str} | {device_str} | {display_fps:.0f} fps{skip_str}",
+                            (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
             combined = np.vstack([combined, bar])
 
             cv2.imshow("MelodicCap RTM", combined)

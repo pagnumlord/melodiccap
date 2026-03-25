@@ -546,6 +546,12 @@ class StereoCalibration:
         # Find keypoints visible in both cameras
         common_indices = set(detections_a.keys()) & set(detections_b.keys())
 
+        # Optionally skip face (23-90) and hand (91-132) keypoints
+        # to reduce triangulation cost without losing body accuracy
+        skip_face_hands = getattr(self.config, 'SKIP_FACE_HANDS', False)
+        if skip_face_hands:
+            common_indices = {idx for idx in common_indices if idx <= 22}
+
         # First pass: triangulate all valid keypoints
         raw_points = {}
         for idx in common_indices:

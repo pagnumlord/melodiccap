@@ -658,8 +658,8 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
     smooth_window: bpy.props.IntProperty(
         name="Smoothing Window",
-        description="Moving average window size (1 = off, 5 = moderate, 9 = heavy)",
-        default=5,
+        description="Moving average window size (1 = off, 3 = light, 5 = moderate). Capture already applies Kalman filtering.",
+        default=3,
         min=1,
         max=15
     )
