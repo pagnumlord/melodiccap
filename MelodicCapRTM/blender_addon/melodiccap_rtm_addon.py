@@ -1,5 +1,5 @@
 """
-MelodicCap RTM Blender Addon v3.2
+MelodicCap RTM Blender Addon v3.3
 ===================================
 Imports JSON motion capture data and retargets to JaxRigify armature.
 
@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (3, 2),
+    "version": (3, 3),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -32,6 +32,7 @@ bl_info = {
 import bpy
 import json
 import os
+import math
 from mathutils import Vector, Quaternion, Matrix
 from bpy_extras.io_utils import ImportHelper
 
@@ -518,6 +519,166 @@ def smooth_frames(frames, window=5):
 
 
 # =============================================================================
+# BUTTERWORTH LOW-PASS FILTER
+# =============================================================================
+
+def butterworth_filter_landmarks(frames, fps, cutoff_body=4.0, cutoff_feet=2.0):
+    """
+    Apply a 2nd-order Butterworth low-pass filter to landmark positions.
+
+    Feet (ankles) get a lower cutoff to kill jitter since they need to be
+    stable on the ground. Everything else gets a moderate cutoff.
+
+    Uses forward-backward filtering (filtfilt equivalent) for zero phase lag.
+    """
+    if len(frames) < 5:
+        return frames
+
+    FOOT_INDICES = {str(LM.LEFT_ANKLE), str(LM.RIGHT_ANKLE),
+                    str(LM.LEFT_BIG_TOE), str(LM.RIGHT_BIG_TOE),
+                    str(LM.LEFT_SMALL_TOE), str(LM.RIGHT_SMALL_TOE),
+                    str(LM.LEFT_HEEL), str(LM.RIGHT_HEEL)}
+
+    # Collect all landmark keys
+    all_keys = set()
+    for f in frames:
+        all_keys.update(f.get('landmarks_3d', {}).keys())
+
+    # Build time series per landmark per axis
+    n = len(frames)
+
+    for key in all_keys:
+        cutoff = cutoff_feet if key in FOOT_INDICES else cutoff_body
+
+        # Extract XYZ series
+        series = [None] * n
+        for i, f in enumerate(frames):
+            lm = f.get('landmarks_3d', {})
+            if key in lm:
+                series[i] = lm[key]
+
+        # Skip if too many gaps
+        valid = [i for i in range(n) if series[i] is not None]
+        if len(valid) < 5:
+            continue
+
+        for axis in range(3):
+            vals = [series[i][axis] for i in valid]
+            filtered = _butter_lowpass_filtfilt(vals, cutoff, fps)
+            for j, i in enumerate(valid):
+                series[i][axis] = filtered[j]
+
+        # Write back
+        for i in valid:
+            frames[i]['landmarks_3d'][key] = series[i]
+
+    return frames
+
+
+def _butter_lowpass_filtfilt(data, cutoff, fs, order=2):
+    """
+    Zero-phase Butterworth filter implemented without scipy.
+
+    Uses cascaded biquad sections with forward-backward passes.
+    """
+    # Compute biquad coefficients for 2nd order Butterworth
+    nyq = fs / 2.0
+    wc = cutoff / nyq
+    if wc >= 1.0:
+        return data  # cutoff above nyquist, no filtering needed
+
+    # Bilinear transform: analog butterworth -> digital
+    warp = math.tan(math.pi * wc / 2.0)
+    k = warp * warp
+    norm = 1.0 / (1.0 + math.sqrt(2.0) * warp + k)
+
+    b0 = k * norm
+    b1 = 2.0 * b0
+    b2 = b0
+    a1 = 2.0 * (k - 1.0) * norm
+    a2 = (1.0 - math.sqrt(2.0) * warp + k) * norm
+
+    # Forward pass
+    y = list(data)
+    n = len(y)
+    if n < 3:
+        return y
+
+    # Pad edges to reduce transients
+    pad = min(3 * order, n - 1)
+    front_pad = [2.0 * y[0] - y[i] for i in range(pad, 0, -1)]
+    back_pad = [2.0 * y[-1] - y[-(i + 2)] for i in range(pad)]
+    padded = front_pad + y + back_pad
+
+    def _apply_filter(signal):
+        out = list(signal)
+        for i in range(2, len(out)):
+            out[i] = b0 * signal[i] + b1 * signal[i - 1] + b2 * signal[i - 2] \
+                     - a1 * out[i - 1] - a2 * out[i - 2]
+        return out
+
+    # Forward
+    fwd = _apply_filter(padded)
+    # Backward (reverse, filter, reverse)
+    fwd.reverse()
+    bwd = _apply_filter(fwd)
+    bwd.reverse()
+
+    # Strip padding
+    return bwd[pad:pad + n]
+
+
+# =============================================================================
+# HAND ROTATION FROM FOREARM
+# =============================================================================
+
+def compute_hand_rotation_from_forearm(elbow_pos, wrist_pos, side, spine_forward):
+    """
+    Compute a natural hand rotation from the forearm direction.
+
+    When there's no finger/hand tracking data, other mocap software derives
+    wrist rotation from the forearm vector with palms facing inward (relaxed pose).
+
+    Args:
+        elbow_pos: Vector - elbow world position
+        wrist_pos: Vector - wrist world position
+        side: 'L' or 'R'
+        spine_forward: Vector - torso forward direction (for palm orientation)
+
+    Returns:
+        Quaternion rotation for the hand_ik bone, or None
+    """
+    forearm_dir = (wrist_pos - elbow_pos)
+    if forearm_dir.length < 0.001:
+        return None
+    forearm_dir = forearm_dir.normalized()
+
+    # Palm normal: for a relaxed pose, palms face inward (toward the body).
+    # Cross forearm direction with spine_forward to get a palm-inward vector.
+    # For left hand: palm faces right (+X ish)
+    # For right hand: palm faces left (-X ish)
+    up_hint = spine_forward.cross(forearm_dir)
+    if up_hint.length < 0.001:
+        up_hint = Vector((0, 0, 1))
+    up_hint = up_hint.normalized()
+
+    if side == 'R':
+        up_hint = -up_hint
+
+    # Build rotation matrix: Y = forearm direction (along bone), Z = up, X = cross
+    y_axis = forearm_dir
+    x_axis = y_axis.cross(up_hint).normalized()
+    z_axis = x_axis.cross(y_axis).normalized()
+
+    rot_mat = Matrix((
+        (x_axis.x, y_axis.x, z_axis.x),
+        (x_axis.y, y_axis.y, z_axis.y),
+        (x_axis.z, y_axis.z, z_axis.z),
+    ))
+    return rot_mat.to_quaternion()
+
+
+# =============================================================================
 # FK ROTATION HELPERS
 # =============================================================================
 
@@ -664,6 +825,34 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         max=15
     )
 
+    butterworth: bpy.props.BoolProperty(
+        name="Butterworth Filter",
+        description="Apply Butterworth low-pass filter (reduces foot jitter significantly)",
+        default=True
+    )
+
+    butter_cutoff_body: bpy.props.FloatProperty(
+        name="Body Cutoff (Hz)",
+        description="Butterworth cutoff frequency for body joints",
+        default=4.0,
+        min=1.0,
+        max=15.0
+    )
+
+    butter_cutoff_feet: bpy.props.FloatProperty(
+        name="Feet Cutoff (Hz)",
+        description="Butterworth cutoff frequency for feet (lower = smoother)",
+        default=2.0,
+        min=0.5,
+        max=8.0
+    )
+
+    hand_rotation: bpy.props.BoolProperty(
+        name="Hand Rotation from Forearm",
+        description="Derive natural hand orientation from forearm direction (relaxed palms-inward pose)",
+        default=True
+    )
+
     def execute(self, context):
         rig = context.active_object
 
@@ -732,6 +921,17 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
             frames = smooth_frames(frames, self.smooth_window)
 
         # =====================
+        # BUTTERWORTH FILTER
+        # =====================
+        if self.butterworth:
+            DiagLog.info(f"Applying Butterworth filter (body={self.butter_cutoff_body}Hz, feet={self.butter_cutoff_feet}Hz)...")
+            frames = butterworth_filter_landmarks(
+                frames, fps,
+                cutoff_body=self.butter_cutoff_body,
+                cutoff_feet=self.butter_cutoff_feet
+            )
+
+        # =====================
         # PROPORTIONAL SCALING
         # =====================
         DiagLog.section("PROPORTIONAL RETARGETING")
@@ -762,6 +962,12 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         DiagLog.data("Scale leg.R", f"{scales.get('leg.R', 0):.3f}")
 
         global_scale = scales['global']
+
+        # Hip height is determined by leg length, not spine length.
+        # Use average leg scale for vertical positioning to prevent hunching.
+        leg_scale_avg = (scales.get('leg.L', global_scale) + scales.get('leg.R', global_scale)) / 2.0
+        hip_height_scale = leg_scale_avg
+        DiagLog.data("Hip height scale (leg avg)", f"{hip_height_scale:.3f}")
 
         # Precompute armature inverse matrix (3x3 for directions, 4x4 for positions)
         armature_inv = rig.matrix_world.inverted()
@@ -800,7 +1006,8 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
             torso = rig.pose.bones.get("torso")
             if torso and hip_center:
                 scaled_hip = hip_center.copy()
-                scaled_hip.z *= global_scale
+                # Use leg-based scale for height (prevents hunching from short mocap spine)
+                scaled_hip.z *= hip_height_scale
                 mocap_hip_frame0 = mocap_props.get('hip_pos')
                 if mocap_hip_frame0:
                     dx = hip_center.x - mocap_hip_frame0.x
@@ -831,7 +1038,6 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         body_right = body_right.normalized()
                         # Body "right" in Blender: rig faces -Y, so right = +X
                         # Rotation angle = angle between body_right and +X axis
-                        import math
                         angle = math.atan2(-body_right.y, body_right.x)
 
                         # Apply as Z rotation on torso
@@ -924,9 +1130,10 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     else:
                         pos = scale_position(pos, hip_center, chain_scale)
 
-                    # Also scale the hip center's own position (height + XY)
+                    # Scale the hip center's own position (height + XY)
+                    # Use hip_height_scale for Z to match the taller leg-based positioning
                     pos_scaled = pos.copy()
-                    pos_scaled.z += (global_scale - 1.0) * hip_center.z
+                    pos_scaled.z += (hip_height_scale - 1.0) * hip_center.z
                     mocap_hip_frame0 = mocap_props.get('hip_pos')
                     if mocap_hip_frame0:
                         pos_scaled.x += (global_scale - 1.0) * mocap_hip_frame0.x
@@ -964,6 +1171,25 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     set_bone_world_position(rig, bone, pos_scaled)
                     bone.keyframe_insert(data_path="location")
 
+                    # Hand rotation: derive from forearm direction
+                    if self.hand_rotation and "hand" in bone_name and not finger_data_available:
+                        side = "L" if ".L" in bone_name else "R"
+                        elbow_idx = LM.LEFT_ELBOW if side == "L" else LM.RIGHT_ELBOW
+                        wrist_idx = LM.LEFT_WRIST if side == "L" else LM.RIGHT_WRIST
+                        p_elbow = get_landmark(landmarks_3d, elbow_idx)
+                        p_wrist = get_landmark(landmarks_3d, wrist_idx)
+
+                        if p_elbow and p_wrist and spine_points.get('hip_mid') and spine_points.get('shoulder_mid'):
+                            spine_fwd = (spine_points['shoulder_mid'] - spine_points['hip_mid']).normalized()
+                            hand_quat = compute_hand_rotation_from_forearm(p_elbow, p_wrist, side, spine_fwd)
+                            if hand_quat:
+                                # Convert world rotation to bone-local rotation
+                                arm_quat = (armature_inv_33 @ Matrix.Identity(3)).to_quaternion()
+                                rest_inv = bone.bone.matrix_local.to_3x3().inverted().to_quaternion()
+                                bone.rotation_mode = 'QUATERNION'
+                                bone.rotation_quaternion = rest_inv @ arm_quat @ hand_quat
+                                bone.keyframe_insert(data_path="rotation_quaternion")
+
                 # Pole targets (also scaled)
                 for bone_name, (root_idx, mid_idx, end_idx) in POLE_TARGETS.items():
                     bone = rig.pose.bones.get(bone_name)
@@ -996,8 +1222,8 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
                     pole_pos = compute_pole_position(p_root_s, p_mid_s, p_end_s)
 
-                    # Apply same global offset as IK targets
-                    pole_pos.z += (global_scale - 1.0) * hip_center.z
+                    # Apply same height offset as IK targets
+                    pole_pos.z += (hip_height_scale - 1.0) * hip_center.z
                     mocap_hip_frame0 = mocap_props.get('hip_pos')
                     if mocap_hip_frame0:
                         pole_pos.x += (global_scale - 1.0) * mocap_hip_frame0.x
