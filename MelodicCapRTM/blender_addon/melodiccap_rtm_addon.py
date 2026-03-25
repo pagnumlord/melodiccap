@@ -641,11 +641,11 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
     )
 
     pin_threshold: bpy.props.FloatProperty(
-        name="Foot Pin Threshold",
-        description="Velocity threshold for foot pinning (0 = disabled)",
-        default=0.03,
+        name="Foot Pin Speed (m/s)",
+        description="Foot speed threshold for pinning in meters/second (0 = disabled). Normalized by FPS so it works at any frame rate.",
+        default=0.15,
         min=0.0,
-        max=0.1
+        max=1.0
     )
 
     foot_floor_height: bpy.props.FloatProperty(
@@ -769,6 +769,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
         # Track previous foot positions for pinning
         prev_foot_pos = {"L": None, "R": None}
+        prev_timestamp = 0
         pinned_foot_pos = {"L": None, "R": None}
 
         DiagLog.section("PROCESSING FRAMES")
@@ -939,22 +940,23 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         if self.ground_clamp and pos_scaled.z < 0:
                             pos_scaled.z = 0
 
-                        # Foot pinning: lock foot to ground when it's near
-                        # the floor AND moving slowly (contact phase).
+                        # Foot pinning: lock foot to ground when near floor
+                        # and moving slowly. Uses m/s (not m/frame) so it
+                        # works at any FPS — critical for 10 FPS captures.
                         if self.pin_threshold > 0:
                             near_floor = pos_scaled.z < self.foot_floor_height
+                            dt = timestamp - prev_timestamp if prev_timestamp > 0 else 0.033
 
-                            if prev_foot_pos[side] is not None:
-                                velocity = (pos_scaled - prev_foot_pos[side]).length
+                            if prev_foot_pos[side] is not None and dt > 0:
+                                dist = (pos_scaled - prev_foot_pos[side]).length
+                                speed = dist / dt  # meters per second
 
-                                if velocity < self.pin_threshold and near_floor:
-                                    # Foot is on the ground and stationary
+                                if speed < self.pin_threshold and near_floor:
                                     if pinned_foot_pos[side] is None:
                                         pinned_foot_pos[side] = pos_scaled.copy()
                                         pinned_foot_pos[side].z = 0
                                     pos_scaled = pinned_foot_pos[side]
-                                elif not near_floor or velocity > self.pin_threshold * 3:
-                                    # Foot lifted or moved significantly
+                                elif not near_floor or speed > self.pin_threshold * 3:
                                     pinned_foot_pos[side] = None
 
                             prev_foot_pos[side] = pos_scaled.copy()
@@ -1003,6 +1005,8 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
                     set_bone_world_position(rig, bone, pole_pos)
                     bone.keyframe_insert(data_path="location")
+
+            prev_timestamp = timestamp
 
         DiagLog.section("IMPORT COMPLETE")
         DiagLog.data("Total frames processed", len(frames))

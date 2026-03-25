@@ -70,15 +70,18 @@ class Config:
     RECORDING_TRIM_END = 2.0  # seconds to trim from end of recording
 
     # Pose detection
-    POSE_MODE = 'wholebody'     # 'body' (17 kps, fast) or 'wholebody' (133 kps)
+    # 'body' = RTMPose 17 keypoints (fast, all we need for IK)
+    # 'wholebody' = RTMW 133 keypoints (slower, adds fingers/face we don't use)
+    # Body mode gives 2-3x better FPS. Switch to wholebody only if you
+    # need finger data and have the GPU headroom.
+    POSE_MODE = 'body'
     POSE_QUALITY = 'balanced'   # 'fast', 'balanced', or 'accurate'
     POSE_DEVICE = 'cuda'        # 'cuda' or 'cpu'
     MIN_KEYPOINT_CONFIDENCE = 0.3
 
     # Skip face (23-90) and hand (91-132) keypoints during triangulation.
-    # Saves ~60% of triangulation work. Wholebody model still runs (for
-    # accurate wrist/ankle placement) but we don't triangulate fingers/face.
-    SKIP_FACE_HANDS = True      # Set False to record finger data
+    # Only relevant in wholebody mode. In body mode there's nothing to skip.
+    SKIP_FACE_HANDS = True
 
     # Smoothing
     KALMAN_PROCESS_NOISE = 1e-4
@@ -388,11 +391,16 @@ class MelodicCapApp:
         frame_count = 0
         fps_timer = time.time()
         display_fps = 0
+        timing_accum = {'cam': 0, 'infer': 0, 'tri': 0, 'total': 0, 'count': 0}
 
         while self.running:
+            t_loop = time.time()
+
             # Capture frames
+            t0 = time.time()
             ret_a, frame_a = self.cap_a.read()
             ret_b, frame_b = self.cap_b.read()
+            t_cam = time.time() - t0
 
             if not ret_a or not ret_b:
                 print("[WARNING] Frame capture failed")
@@ -402,13 +410,16 @@ class MelodicCapApp:
             # (pose inference is expensive, skip it during calibration)
             det_a = None
             det_b = None
+            t_infer = 0
             if not self.collecting_cal_frames and not self.floor_cal_active:
+                t0 = time.time()
                 det_a = self.detector.detect_single(
                     frame_a, min_confidence=self.config.MIN_KEYPOINT_CONFIDENCE
                 )
                 det_b = self.detector.detect_single(
                     frame_b, min_confidence=self.config.MIN_KEYPOINT_CONFIDENCE
                 )
+                t_infer = time.time() - t0
 
             # Draw detections
             display_a = frame_a.copy()
@@ -506,12 +517,15 @@ class MelodicCapApp:
                 draw_status(display_b, "NOT CALIBRATED (Press C)", (0, 165, 255))
 
             # If calibrated and both poses detected, do triangulation
+            t_tri = 0
             if (self.calibration.is_calibrated and
                     det_a is not None and det_b is not None):
 
+                t0 = time.time()
                 points_3d = self.calibration.triangulate_pose(
                     det_a, det_b, smooth=True
                 )
+                t_tri = time.time() - t0
 
                 if points_3d and self.recorder.is_recording:
                     self.recorder.add_frame(points_3d, det_a, det_b)
@@ -567,13 +581,26 @@ class MelodicCapApp:
                     self._prev_cal_corners_a = None
                     self._prev_cal_corners_b = None
 
-            # FPS counter
+            # FPS counter + timing breakdown
+            t_total = time.time() - t_loop
+            timing_accum['cam'] += t_cam
+            timing_accum['infer'] += t_infer
+            timing_accum['tri'] += t_tri
+            timing_accum['total'] += t_total
+            timing_accum['count'] += 1
             frame_count += 1
             elapsed = time.time() - fps_timer
             if elapsed >= 1.0:
                 display_fps = frame_count / elapsed
+                n = timing_accum['count'] or 1
+                avg_cam = timing_accum['cam'] / n * 1000
+                avg_infer = timing_accum['infer'] / n * 1000
+                avg_tri = timing_accum['tri'] / n * 1000
+                avg_total = timing_accum['total'] / n * 1000
+                print(f"[TIMING] {display_fps:.1f} fps | cam:{avg_cam:.0f}ms infer:{avg_infer:.0f}ms tri:{avg_tri:.0f}ms total:{avg_total:.0f}ms")
                 frame_count = 0
                 fps_timer = time.time()
+                timing_accum = {'cam': 0, 'infer': 0, 'tri': 0, 'total': 0, 'count': 0}
 
             # Display
             combined = np.hstack([
