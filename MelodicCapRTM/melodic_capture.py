@@ -27,6 +27,7 @@ import numpy as np
 import time
 import sys
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 from keypoint_map import LM, BODY_SKELETON
 from pose_detector import PoseDetector
@@ -75,7 +76,7 @@ class Config:
     # Body mode gives 2-3x better FPS. Switch to wholebody only if you
     # need finger data and have the GPU headroom.
     POSE_MODE = 'body'
-    POSE_QUALITY = 'balanced'   # 'fast', 'balanced', or 'accurate'
+    POSE_QUALITY = 'fast'       # 'fast' (lightweight, best FPS), 'balanced', or 'accurate'
     POSE_DEVICE = 'cuda'        # 'cuda' or 'cpu'
     MIN_KEYPOINT_CONFIDENCE = 0.3
 
@@ -169,6 +170,9 @@ class MelodicCapApp:
 
         # Track if user wanted CUDA (to warn if we fell back)
         self._cuda_was_requested = (self.config.POSE_DEVICE == 'cuda')
+
+        # Thread pool for parallel inference on both cameras
+        self._infer_pool = ThreadPoolExecutor(max_workers=2)
 
         # Initialize pose detector
         print("\n[INITIALIZING POSE DETECTOR]")
@@ -396,10 +400,12 @@ class MelodicCapApp:
         while self.running:
             t_loop = time.time()
 
-            # Capture frames
+            # Capture frames from both cameras in parallel
             t0 = time.time()
-            ret_a, frame_a = self.cap_a.read()
-            ret_b, frame_b = self.cap_b.read()
+            fut_a = self._infer_pool.submit(self.cap_a.read)
+            fut_b = self._infer_pool.submit(self.cap_b.read)
+            ret_a, frame_a = fut_a.result()
+            ret_b, frame_b = fut_b.result()
             t_cam = time.time() - t0
 
             if not ret_a or not ret_b:
@@ -413,12 +419,17 @@ class MelodicCapApp:
             t_infer = 0
             if not self.collecting_cal_frames and not self.floor_cal_active:
                 t0 = time.time()
-                det_a = self.detector.detect_single(
-                    frame_a, min_confidence=self.config.MIN_KEYPOINT_CONFIDENCE
+                # Run both cameras' inference in parallel — overlaps CPU
+                # preprocessing of camera B with GPU inference of camera A
+                min_conf = self.config.MIN_KEYPOINT_CONFIDENCE
+                future_a = self._infer_pool.submit(
+                    self.detector.detect_single, frame_a, min_conf
                 )
-                det_b = self.detector.detect_single(
-                    frame_b, min_confidence=self.config.MIN_KEYPOINT_CONFIDENCE
+                future_b = self._infer_pool.submit(
+                    self.detector.detect_single, frame_b, min_conf
                 )
+                det_a = future_a.result()
+                det_b = future_b.result()
                 t_infer = time.time() - t0
 
             # Draw detections
@@ -712,6 +723,7 @@ class MelodicCapApp:
         if self.recorder.is_recording:
             self.recorder.stop()
 
+        self._infer_pool.shutdown(wait=False)
         self.cap_a.release()
         self.cap_b.release()
         cv2.destroyAllWindows()
