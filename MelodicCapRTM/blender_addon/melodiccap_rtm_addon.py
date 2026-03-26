@@ -925,7 +925,8 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         armature_inv_33 = armature_inv.to_3x3()
 
         # Track previous foot positions for pinning
-        prev_foot_pos = {"L": None, "R": None}
+        # raw = pre-pin position (for speed calc), final = post-pin (for output)
+        prev_foot_raw = {"L": None, "R": None}
         prev_timestamp = 0
         pinned_foot_pos = {"L": None, "R": None}
 
@@ -1108,14 +1109,18 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         # Foot pinning: lock foot to ground when near floor
                         # and moving slowly. Uses m/s (not m/frame) so it
                         # works at any FPS — critical for 10 FPS captures.
+                        #
+                        # CRITICAL: speed is computed from RAW (pre-pin) positions.
+                        # Using post-pin positions causes oscillation: pin→Z=0,
+                        # next frame speed from Z=0 is huge→unpin, repeat.
                         foot_speed = 0.0
                         foot_pinned = False
                         if self.pin_threshold > 0:
                             near_floor = pos_scaled.z < self.foot_floor_height
                             dt = timestamp - prev_timestamp if prev_timestamp > 0 else 0.033
 
-                            if prev_foot_pos[side] is not None and dt > 0:
-                                dist = (pos_scaled - prev_foot_pos[side]).length
+                            if prev_foot_raw[side] is not None and dt > 0:
+                                dist = (pos_scaled - prev_foot_raw[side]).length
                                 foot_speed = dist / dt  # meters per second
 
                                 if foot_speed < self.pin_threshold and near_floor:
@@ -1127,7 +1132,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 elif not near_floor or foot_speed > self.pin_threshold * 3:
                                     pinned_foot_pos[side] = None
 
-                            prev_foot_pos[side] = pos_scaled.copy()
+                            prev_foot_raw[side] = raw_pos.copy()
 
                         # Collect diagnostic data
                         foot_diag[side].append({
