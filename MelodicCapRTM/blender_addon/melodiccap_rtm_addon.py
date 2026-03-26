@@ -1103,9 +1103,39 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
             # IK POSITIONS (proportionally scaled)
             # =====================
             if self.use_ik and hip_center:
-                # Get shoulder positions for arm vector scaling
+                # Evaluate rig to get actual shoulder positions after torso+spine FK.
+                # This ensures arm IK targets are relative to where the rig's shoulder
+                # ACTUALLY is, avoiding mismatch from spine curvature/height scaling.
+                bpy.context.view_layer.update()
+
+                # Read rig's evaluated shoulder world positions
+                upper_arm_L = rig.pose.bones.get("upper_arm_fk.L")
+                upper_arm_R = rig.pose.bones.get("upper_arm_fk.R")
+                rig_shoulder_L = (rig.matrix_world @ upper_arm_L.matrix).to_translation() if upper_arm_L else None
+                rig_shoulder_R = (rig.matrix_world @ upper_arm_R.matrix).to_translation() if upper_arm_R else None
+
+                # Mocap shoulder positions for arm vector computation
                 p_shoulder_l = get_landmark(landmarks_3d, LM.LEFT_SHOULDER)
                 p_shoulder_r = get_landmark(landmarks_3d, LM.RIGHT_SHOULDER)
+
+                # Arm diagnostics (log every Nth frame)
+                if frame_idx % log_every == 0:
+                    for side_label, rig_sh, mocap_sh in [
+                        ("L", rig_shoulder_L, p_shoulder_l),
+                        ("R", rig_shoulder_R, p_shoulder_r),
+                    ]:
+                        wrist_idx = LM.LEFT_WRIST if side_label == "L" else LM.RIGHT_WRIST
+                        p_wr = get_landmark(landmarks_3d, wrist_idx)
+                        arm_len = rig_props.get(f'arm.{side_label}', 0)
+                        if rig_sh and mocap_sh and p_wr:
+                            arm_vec = p_wr - mocap_sh
+                            arm_scale = scales.get(f'arm.{side_label}', global_scale)
+                            target = rig_sh + arm_vec * arm_scale
+                            dist = (target - rig_sh).length
+                            DiagLog.data(f"  arm.{side_label}",
+                                f"rig_sh=({rig_sh.x:.3f},{rig_sh.y:.3f},{rig_sh.z:.3f}) "
+                                f"target_dist={dist:.4f} rig_arm_len={arm_len:.4f} "
+                                f"ratio={dist/arm_len:.3f}" if arm_len > 0 else "no data")
 
                 for bone_name, landmark_idx in IK_TARGETS.items():
                     bone = rig.pose.bones.get(bone_name)
@@ -1120,31 +1150,37 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     chain_scale = scales.get(chain_key, global_scale)
 
                     if "hand" in bone_name:
-                        # Arms: scale only the arm vector (shoulder→wrist), not the
-                        # full hip→wrist distance. Scaling from hip shrinks the shoulder
-                        # width component and pulls elbows in. Instead: position the
-                        # shoulder with global scaling, then extend arm vector by arm_scale.
-                        shoulder = p_shoulder_l if ".L" in bone_name else p_shoulder_r
-                        if shoulder:
-                            # Scale shoulder position from hip (same as torso scaling)
-                            shoulder_scaled = scale_position(shoulder, hip_center, global_scale)
-                            # Scale only the arm vector by arm_scale
-                            arm_vec = pos - shoulder
-                            pos = shoulder_scaled + arm_vec * chain_scale
+                        # Arms: compute wrist target relative to the rig's ACTUAL
+                        # evaluated shoulder position. Previous approaches computed
+                        # the target from mocap coordinates with scaling, but the
+                        # rig's shoulder ends up at a different position due to spine
+                        # curvature and height scaling. This mismatch shortened the
+                        # effective arm reach, causing permanent elbow bending.
+                        side = "L" if ".L" in bone_name else "R"
+                        rig_sh = rig_shoulder_L if side == "L" else rig_shoulder_R
+                        mocap_sh = p_shoulder_l if side == "L" else p_shoulder_r
+                        if rig_sh and mocap_sh:
+                            arm_vec = pos - mocap_sh
+                            pos_scaled = rig_sh + arm_vec * chain_scale
                         else:
-                            pos = scale_position(pos, hip_center, global_scale)
+                            pos = scale_position(pos, hip_center, chain_scale)
+                            pos_scaled = pos.copy()
+                            pos_scaled.z += (hip_height_scale - 1.0) * hip_center.z
+                            mocap_hip_frame0 = mocap_props.get('hip_pos')
+                            if mocap_hip_frame0:
+                                pos_scaled.x += (global_scale - 1.0) * mocap_hip_frame0.x
+                                pos_scaled.y += (global_scale - 1.0) * mocap_hip_frame0.y
                     else:
                         # Legs: scale from hip_center (correct for leg reach)
                         pos = scale_position(pos, hip_center, chain_scale)
 
-                    # Scale the hip center's own position (height + XY)
-                    # Use hip_height_scale for Z to match the taller leg-based positioning
-                    pos_scaled = pos.copy()
-                    pos_scaled.z += (hip_height_scale - 1.0) * hip_center.z
-                    mocap_hip_frame0 = mocap_props.get('hip_pos')
-                    if mocap_hip_frame0:
-                        pos_scaled.x += (global_scale - 1.0) * mocap_hip_frame0.x
-                        pos_scaled.y += (global_scale - 1.0) * mocap_hip_frame0.y
+                        # Height/XY offset for leg IK targets
+                        pos_scaled = pos.copy()
+                        pos_scaled.z += (hip_height_scale - 1.0) * hip_center.z
+                        mocap_hip_frame0 = mocap_props.get('hip_pos')
+                        if mocap_hip_frame0:
+                            pos_scaled.x += (global_scale - 1.0) * mocap_hip_frame0.x
+                            pos_scaled.y += (global_scale - 1.0) * mocap_hip_frame0.y
 
                     is_foot = "foot" in bone_name
                     side = "L" if ".L" in bone_name else "R"
@@ -1208,6 +1244,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                             'speed': foot_speed,
                             'pinned': foot_pinned,
                             'clamped': raw_z < 0,
+                            'blend_t': unpin_blend[side],
                         })
 
                     set_bone_world_position(rig, bone, pos_scaled)
@@ -1250,12 +1287,19 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     cs = scales.get(chain_key, global_scale)
 
                     if is_arm:
-                        # Arm poles: scale shoulder from hip by global_scale,
-                        # then scale elbow/wrist from shoulder by arm_scale
-                        # (consistent with hand IK shoulder-based scaling)
-                        p_root_s = scale_position(p_root, hip_center, global_scale)
-                        p_mid_s = p_root_s + (p_mid - p_root) * cs
-                        p_end_s = p_root_s + (p_end - p_root) * cs
+                        # Arm poles: use rig's actual shoulder position (same as hand IK).
+                        # Scale arm joint positions (elbow, wrist) from mocap shoulder
+                        # by arm_scale, then offset to rig's evaluated shoulder.
+                        side = "L" if ".L" in bone_name else "R"
+                        rig_sh = rig_shoulder_L if side == "L" else rig_shoulder_R
+                        if rig_sh:
+                            p_root_s = rig_sh
+                            p_mid_s = rig_sh + (p_mid - p_root) * cs
+                            p_end_s = rig_sh + (p_end - p_root) * cs
+                        else:
+                            p_root_s = scale_position(p_root, hip_center, global_scale)
+                            p_mid_s = p_root_s + (p_mid - p_root) * cs
+                            p_end_s = p_root_s + (p_end - p_root) * cs
                     else:
                         p_root_s = scale_position(p_root, hip_center, cs)
                         p_mid_s = scale_position(p_mid, hip_center, cs)
@@ -1263,12 +1307,14 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
                     pole_pos = compute_pole_position(p_root_s, p_mid_s, p_end_s)
 
-                    # Apply same height offset as IK targets
-                    pole_pos.z += (hip_height_scale - 1.0) * hip_center.z
-                    mocap_hip_frame0 = mocap_props.get('hip_pos')
-                    if mocap_hip_frame0:
-                        pole_pos.x += (global_scale - 1.0) * mocap_hip_frame0.x
-                        pole_pos.y += (global_scale - 1.0) * mocap_hip_frame0.y
+                    if not (is_arm and (rig_shoulder_L or rig_shoulder_R)):
+                        # Only apply height/XY offset for non-arm poles (legs).
+                        # Arm poles already use the rig's evaluated position.
+                        pole_pos.z += (hip_height_scale - 1.0) * hip_center.z
+                        mocap_hip_frame0 = mocap_props.get('hip_pos')
+                        if mocap_hip_frame0:
+                            pole_pos.x += (global_scale - 1.0) * mocap_hip_frame0.x
+                            pole_pos.y += (global_scale - 1.0) * mocap_hip_frame0.y
 
                     set_bone_world_position(rig, bone, pole_pos)
                     bone.keyframe_insert(data_path="location")
@@ -1347,6 +1393,34 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     delta = z_vals[i] - z_vals[i-1]
                     DiagLog.info(f"    f{e['frame']:3d}: deltaZ={delta:+.4f} Z={e['raw_z']:+.4f} "
                                  f"spd={e['speed']:.3f}")
+
+            # Print pin/unpin transitions (where pinned state changes)
+            transitions = []
+            for i in range(1, len(entries)):
+                prev_pin = entries[i-1]['pinned']
+                cur_pin = entries[i]['pinned']
+                blend = entries[i].get('blend_t', 0)
+                if prev_pin != cur_pin or (0 < blend < 1):
+                    transitions.append(i)
+            if transitions:
+                DiagLog.info(f"    --- Pin/Unpin transitions ({len(transitions)} frames) ---")
+                for i in transitions[:30]:  # cap output
+                    e = entries[i]
+                    prev_e = entries[i-1]
+                    state = "PINNED" if e['pinned'] else "FREE"
+                    prev_state = "PINNED" if prev_e['pinned'] else "FREE"
+                    blend_t = e.get('blend_t', 0)
+                    # Show position jump
+                    dx = e['final_x'] - prev_e['final_x']
+                    dy = e['final_y'] - prev_e['final_y']
+                    dz = e['final_z'] - prev_e['final_z']
+                    jump = math.sqrt(dx*dx + dy*dy + dz*dz)
+                    DiagLog.info(
+                        f"    f{e['frame']:3d}: {prev_state}->{state} "
+                        f"blend={blend_t:.2f} spd={e['speed']:.3f} "
+                        f"rawZ={e['raw_z']:+.4f} finalZ={e['final_z']:+.4f} "
+                        f"jump={jump:.4f}m"
+                    )
 
         DiagLog.section("IMPORT COMPLETE")
         DiagLog.data("Total frames processed", len(frames))
