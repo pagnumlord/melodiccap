@@ -1023,31 +1023,44 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     spine_fk.keyframe_insert(data_path="rotation_quaternion")
 
                 # --- Head/Neck FK from face keypoints ---
-                # Compute head direction from ear midpoint → nose vector
+                # Neck: point from shoulder_mid toward ear_mid (upward direction)
+                # Head: do NOT apply compute_fk_rotation — the head bone Y axis
+                # points up, and ear_mid→nose is horizontal. Applying it rotates
+                # the head to face the ground. Neck rotation alone captures head
+                # tilt and some turn. Head yaw needs relative rotation (future).
                 p_nose = get_landmark(landmarks_3d, LM.NOSE)
                 p_lear = get_landmark(landmarks_3d, LM.LEFT_EAR)
                 p_rear = get_landmark(landmarks_3d, LM.RIGHT_EAR)
 
-                if p_nose and p_lear and p_rear:
+                if p_lear and p_rear:
                     ear_mid = (p_lear + p_rear) / 2.0
-                    head_fwd = (p_nose - ear_mid)
-                    if head_fwd.length > 0.001:
-                        head_fwd = (armature_inv_33 @ head_fwd).normalized()
 
-                        # Neck: point from shoulder_mid toward ear_mid
-                        neck_bone = rig.pose.bones.get("neck")
-                        if neck_bone and spine_points.get('shoulder_mid'):
-                            neck_dir = (armature_inv_33 @ (ear_mid - spine_points['shoulder_mid'])).normalized()
-                            neck_bone.rotation_mode = 'QUATERNION'
-                            neck_bone.rotation_quaternion = compute_fk_rotation(neck_bone, neck_dir)
-                            neck_bone.keyframe_insert(data_path="rotation_quaternion")
+                    neck_bone = rig.pose.bones.get("neck")
+                    if neck_bone and spine_points.get('shoulder_mid'):
+                        neck_dir = (armature_inv_33 @ (ear_mid - spine_points['shoulder_mid'])).normalized()
+                        neck_bone.rotation_mode = 'QUATERNION'
+                        neck_bone.rotation_quaternion = compute_fk_rotation(neck_bone, neck_dir)
+                        neck_bone.keyframe_insert(data_path="rotation_quaternion")
 
-                        # Head: point along nose direction (forward look)
-                        head_bone = rig.pose.bones.get("head")
-                        if head_bone:
-                            # Head direction = ear_mid → nose (forward facing)
+                    # Head yaw: rotate head around its up axis based on
+                    # ear line vs shoulder line (head turn relative to torso)
+                    head_bone = rig.pose.bones.get("head")
+                    if head_bone and p_nose:
+                        p_ls = get_landmark(landmarks_3d, LM.LEFT_SHOULDER)
+                        p_rs = get_landmark(landmarks_3d, LM.RIGHT_SHOULDER)
+                        if p_ls and p_rs:
+                            # Ear line angle vs shoulder line angle = head yaw
+                            ear_vec = p_lear - p_rear
+                            shoulder_vec = p_ls - p_rs
+                            ear_angle = math.atan2(ear_vec.y, ear_vec.x)
+                            shoulder_angle = math.atan2(shoulder_vec.y, shoulder_vec.x)
+                            head_yaw = ear_angle - shoulder_angle
+                            # Clamp to reasonable range (avoid wild rotations)
+                            head_yaw = max(-0.7, min(0.7, head_yaw))
+
+                            # Apply as rotation around bone's local Y axis (up)
                             head_bone.rotation_mode = 'QUATERNION'
-                            head_bone.rotation_quaternion = compute_fk_rotation(head_bone, head_fwd)
+                            head_bone.rotation_quaternion = Quaternion((0, 1, 0), head_yaw)
                             head_bone.keyframe_insert(data_path="rotation_quaternion")
 
                 # --- Limb FK (only in FK mode, skipped when IK active) ---
@@ -1090,6 +1103,10 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
             # IK POSITIONS (proportionally scaled)
             # =====================
             if self.use_ik and hip_center:
+                # Get shoulder positions for arm vector scaling
+                p_shoulder_l = get_landmark(landmarks_3d, LM.LEFT_SHOULDER)
+                p_shoulder_r = get_landmark(landmarks_3d, LM.RIGHT_SHOULDER)
+
                 for bone_name, landmark_idx in IK_TARGETS.items():
                     bone = rig.pose.bones.get(bone_name)
                     if not bone:
@@ -1099,13 +1116,26 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     if pos is None:
                         continue
 
-                    # Scale ALL IK targets from hip_center using per-chain scale.
-                    # Previous approach scaled arms from mocap shoulder, but the rig's
-                    # shoulder moves differently (torso repositioning + hip_height_scale),
-                    # creating a mismatch that pulled elbows inward.
                     chain_key = IK_SCALE_KEY.get(bone_name, 'global')
                     chain_scale = scales.get(chain_key, global_scale)
-                    pos = scale_position(pos, hip_center, chain_scale)
+
+                    if "hand" in bone_name:
+                        # Arms: scale only the arm vector (shoulder→wrist), not the
+                        # full hip→wrist distance. Scaling from hip shrinks the shoulder
+                        # width component and pulls elbows in. Instead: position the
+                        # shoulder with global scaling, then extend arm vector by arm_scale.
+                        shoulder = p_shoulder_l if ".L" in bone_name else p_shoulder_r
+                        if shoulder:
+                            # Scale shoulder position from hip (same as torso scaling)
+                            shoulder_scaled = scale_position(shoulder, hip_center, global_scale)
+                            # Scale only the arm vector by arm_scale
+                            arm_vec = pos - shoulder
+                            pos = shoulder_scaled + arm_vec * chain_scale
+                        else:
+                            pos = scale_position(pos, hip_center, global_scale)
+                    else:
+                        # Legs: scale from hip_center (correct for leg reach)
+                        pos = scale_position(pos, hip_center, chain_scale)
 
                     # Scale the hip center's own position (height + XY)
                     # Use hip_height_scale for Z to match the taller leg-based positioning
@@ -1212,16 +1242,24 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     if None in (p_root, p_mid, p_end):
                         continue
 
-                    # Scale all pole targets from hip_center (consistent with IK targets)
-                    chain_key = 'arm.L' if 'arm' in bone_name and '.L' in bone_name else \
-                                'arm.R' if 'arm' in bone_name and '.R' in bone_name else \
+                    is_arm = 'arm' in bone_name
+                    chain_key = 'arm.L' if is_arm and '.L' in bone_name else \
+                                'arm.R' if is_arm and '.R' in bone_name else \
                                 'leg.L' if 'thigh' in bone_name and '.L' in bone_name else \
                                 'leg.R' if 'thigh' in bone_name and '.R' in bone_name else 'global'
                     cs = scales.get(chain_key, global_scale)
 
-                    p_root_s = scale_position(p_root, hip_center, cs)
-                    p_mid_s = scale_position(p_mid, hip_center, cs)
-                    p_end_s = scale_position(p_end, hip_center, cs)
+                    if is_arm:
+                        # Arm poles: scale shoulder from hip by global_scale,
+                        # then scale elbow/wrist from shoulder by arm_scale
+                        # (consistent with hand IK shoulder-based scaling)
+                        p_root_s = scale_position(p_root, hip_center, global_scale)
+                        p_mid_s = p_root_s + (p_mid - p_root) * cs
+                        p_end_s = p_root_s + (p_end - p_root) * cs
+                    else:
+                        p_root_s = scale_position(p_root, hip_center, cs)
+                        p_mid_s = scale_position(p_mid, hip_center, cs)
+                        p_end_s = scale_position(p_end, hip_center, cs)
 
                     pole_pos = compute_pole_position(p_root_s, p_mid_s, p_end_s)
 
