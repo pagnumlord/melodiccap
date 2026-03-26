@@ -537,7 +537,8 @@ def butterworth_filter_landmarks(frames, fps, cutoff_body=4.0, cutoff_feet=2.0):
     FOOT_INDICES = {str(LM.LEFT_ANKLE), str(LM.RIGHT_ANKLE),
                     str(LM.LEFT_BIG_TOE), str(LM.RIGHT_BIG_TOE),
                     str(LM.LEFT_SMALL_TOE), str(LM.RIGHT_SMALL_TOE),
-                    str(LM.LEFT_HEEL), str(LM.RIGHT_HEEL)}
+                    str(LM.LEFT_HEEL), str(LM.RIGHT_HEEL),
+                    str(LM.LEFT_KNEE), str(LM.RIGHT_KNEE)}
 
     # Collect all landmark keys
     all_keys = set()
@@ -626,56 +627,6 @@ def _butter_lowpass_filtfilt(data, cutoff, fs, order=2):
 
     # Strip padding
     return bwd[pad:pad + n]
-
-
-# =============================================================================
-# HAND ROTATION FROM FOREARM
-# =============================================================================
-
-def compute_hand_rotation_from_forearm(elbow_pos, wrist_pos, side, spine_forward):
-    """
-    Compute a natural hand rotation from the forearm direction.
-
-    When there's no finger/hand tracking data, other mocap software derives
-    wrist rotation from the forearm vector with palms facing inward (relaxed pose).
-
-    Args:
-        elbow_pos: Vector - elbow world position
-        wrist_pos: Vector - wrist world position
-        side: 'L' or 'R'
-        spine_forward: Vector - torso forward direction (for palm orientation)
-
-    Returns:
-        Quaternion rotation for the hand_ik bone, or None
-    """
-    forearm_dir = (wrist_pos - elbow_pos)
-    if forearm_dir.length < 0.001:
-        return None
-    forearm_dir = forearm_dir.normalized()
-
-    # Palm normal: for a relaxed pose, palms face inward (toward the body).
-    # Cross forearm direction with spine_forward to get a palm-inward vector.
-    # For left hand: palm faces right (+X ish)
-    # For right hand: palm faces left (-X ish)
-    up_hint = spine_forward.cross(forearm_dir)
-    if up_hint.length < 0.001:
-        up_hint = Vector((0, 0, 1))
-    up_hint = up_hint.normalized()
-
-    if side == 'R':
-        up_hint = -up_hint
-
-    # Build rotation matrix: Y = forearm direction (along bone), Z = up, X = cross
-    y_axis = forearm_dir
-    x_axis = y_axis.cross(up_hint).normalized()
-    z_axis = x_axis.cross(y_axis).normalized()
-
-    rot_mat = Matrix((
-        (x_axis.x, y_axis.x, z_axis.x),
-        (x_axis.y, y_axis.y, z_axis.y),
-        (x_axis.z, y_axis.z, z_axis.z),
-    ))
-    return rot_mat.to_quaternion()
 
 
 # =============================================================================
@@ -1171,24 +1122,21 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     set_bone_world_position(rig, bone, pos_scaled)
                     bone.keyframe_insert(data_path="location")
 
-                    # Hand rotation: derive from forearm direction
+                    # Hand rotation: point hand along forearm direction.
+                    # Same approach as FK rotation — use compute_fk_rotation
+                    # to orient the bone's Y axis along elbow→wrist.
                     if self.hand_rotation and "hand" in bone_name and not finger_data_available:
-                        side = "L" if ".L" in bone_name else "R"
-                        elbow_idx = LM.LEFT_ELBOW if side == "L" else LM.RIGHT_ELBOW
-                        wrist_idx = LM.LEFT_WRIST if side == "L" else LM.RIGHT_WRIST
+                        h_side = "L" if ".L" in bone_name else "R"
+                        elbow_idx = LM.LEFT_ELBOW if h_side == "L" else LM.RIGHT_ELBOW
+                        wrist_idx = LM.LEFT_WRIST if h_side == "L" else LM.RIGHT_WRIST
                         p_elbow = get_landmark(landmarks_3d, elbow_idx)
                         p_wrist = get_landmark(landmarks_3d, wrist_idx)
 
-                        if p_elbow and p_wrist and spine_points.get('hip_mid') and spine_points.get('shoulder_mid'):
-                            spine_fwd = (spine_points['shoulder_mid'] - spine_points['hip_mid']).normalized()
-                            hand_quat = compute_hand_rotation_from_forearm(p_elbow, p_wrist, side, spine_fwd)
-                            if hand_quat:
-                                # Convert world rotation to bone-local rotation
-                                arm_quat = (armature_inv_33 @ Matrix.Identity(3)).to_quaternion()
-                                rest_inv = bone.bone.matrix_local.to_3x3().inverted().to_quaternion()
-                                bone.rotation_mode = 'QUATERNION'
-                                bone.rotation_quaternion = rest_inv @ arm_quat @ hand_quat
-                                bone.keyframe_insert(data_path="rotation_quaternion")
+                        if p_elbow and p_wrist:
+                            forearm_dir = (armature_inv_33 @ (p_wrist - p_elbow)).normalized()
+                            bone.rotation_mode = 'QUATERNION'
+                            bone.rotation_quaternion = compute_fk_rotation(bone, forearm_dir)
+                            bone.keyframe_insert(data_path="rotation_quaternion")
 
                 # Pole targets (also scaled)
                 for bone_name, (root_idx, mid_idx, end_idx) in POLE_TARGETS.items():
