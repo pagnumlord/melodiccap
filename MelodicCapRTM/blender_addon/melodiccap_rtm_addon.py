@@ -929,6 +929,9 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         prev_timestamp = 0
         pinned_foot_pos = {"L": None, "R": None}
 
+        # Foot diagnostics: collect per-frame data for analysis
+        foot_diag = {"L": [], "R": []}
+
         DiagLog.section("PROCESSING FRAMES")
         log_every = max(1, len(frames) // 10)
 
@@ -1094,6 +1097,10 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     side = "L" if ".L" in bone_name else "R"
 
                     if is_foot:
+                        # Capture pre-processing position for diagnostics
+                        raw_z = pos_scaled.z
+                        raw_pos = pos_scaled.copy()
+
                         # Ground clamp: never below floor
                         if self.ground_clamp and pos_scaled.z < 0:
                             pos_scaled.z = 0
@@ -1101,23 +1108,38 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         # Foot pinning: lock foot to ground when near floor
                         # and moving slowly. Uses m/s (not m/frame) so it
                         # works at any FPS — critical for 10 FPS captures.
+                        foot_speed = 0.0
+                        foot_pinned = False
                         if self.pin_threshold > 0:
                             near_floor = pos_scaled.z < self.foot_floor_height
                             dt = timestamp - prev_timestamp if prev_timestamp > 0 else 0.033
 
                             if prev_foot_pos[side] is not None and dt > 0:
                                 dist = (pos_scaled - prev_foot_pos[side]).length
-                                speed = dist / dt  # meters per second
+                                foot_speed = dist / dt  # meters per second
 
-                                if speed < self.pin_threshold and near_floor:
+                                if foot_speed < self.pin_threshold and near_floor:
                                     if pinned_foot_pos[side] is None:
                                         pinned_foot_pos[side] = pos_scaled.copy()
                                         pinned_foot_pos[side].z = 0
                                     pos_scaled = pinned_foot_pos[side]
-                                elif not near_floor or speed > self.pin_threshold * 3:
+                                    foot_pinned = True
+                                elif not near_floor or foot_speed > self.pin_threshold * 3:
                                     pinned_foot_pos[side] = None
 
                             prev_foot_pos[side] = pos_scaled.copy()
+
+                        # Collect diagnostic data
+                        foot_diag[side].append({
+                            'frame': frame_idx,
+                            'raw_z': raw_z,
+                            'final_z': pos_scaled.z,
+                            'raw_x': raw_pos.x, 'raw_y': raw_pos.y,
+                            'final_x': pos_scaled.x, 'final_y': pos_scaled.y,
+                            'speed': foot_speed,
+                            'pinned': foot_pinned,
+                            'clamped': raw_z < 0,
+                        })
 
                     set_bone_world_position(rig, bone, pos_scaled)
                     bone.keyframe_insert(data_path="location")
@@ -1181,6 +1203,79 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     bone.keyframe_insert(data_path="location")
 
             prev_timestamp = timestamp
+
+        # =====================
+        # FOOT DIAGNOSTICS
+        # =====================
+        DiagLog.section("FOOT DIAGNOSTICS")
+        for side_label in ["L", "R"]:
+            entries = foot_diag[side_label]
+            if not entries:
+                DiagLog.info(f"  foot.{side_label}: no data")
+                continue
+
+            z_vals = [e['raw_z'] for e in entries]
+            speeds = [e['speed'] for e in entries if e['speed'] > 0]
+            pinned_count = sum(1 for e in entries if e['pinned'])
+            clamped_count = sum(1 for e in entries if e['clamped'])
+
+            z_min = min(z_vals)
+            z_max = max(z_vals)
+            z_range = z_max - z_min
+
+            # Frame-to-frame Z deltas
+            z_deltas = [abs(z_vals[i] - z_vals[i-1]) for i in range(1, len(z_vals))]
+            z_delta_avg = sum(z_deltas) / len(z_deltas) if z_deltas else 0
+            z_delta_max = max(z_deltas) if z_deltas else 0
+
+            # XY deltas (horizontal jitter)
+            x_vals = [e['raw_x'] for e in entries]
+            y_vals = [e['raw_y'] for e in entries]
+            xy_deltas = []
+            for i in range(1, len(entries)):
+                dx = x_vals[i] - x_vals[i-1]
+                dy = y_vals[i] - y_vals[i-1]
+                xy_deltas.append(math.sqrt(dx*dx + dy*dy))
+            xy_delta_avg = sum(xy_deltas) / len(xy_deltas) if xy_deltas else 0
+            xy_delta_max = max(xy_deltas) if xy_deltas else 0
+
+            speed_avg = sum(speeds) / len(speeds) if speeds else 0
+            speed_max = max(speeds) if speeds else 0
+
+            # Count "jitter frames" — Z delta > 1cm when speed < 0.3 m/s
+            jitter_frames = 0
+            for i in range(1, len(entries)):
+                if entries[i]['speed'] < 0.3 and abs(z_vals[i] - z_vals[i-1]) > 0.01:
+                    jitter_frames += 1
+
+            DiagLog.info(f"  foot_ik.{side_label}:")
+            DiagLog.data(f"    Z range", f"{z_min:.4f} to {z_max:.4f} (span: {z_range:.4f}m)")
+            DiagLog.data(f"    Z delta avg/max", f"{z_delta_avg:.4f}m / {z_delta_max:.4f}m")
+            DiagLog.data(f"    XY delta avg/max", f"{xy_delta_avg:.4f}m / {xy_delta_max:.4f}m")
+            DiagLog.data(f"    Speed avg/max", f"{speed_avg:.3f} / {speed_max:.3f} m/s")
+            DiagLog.data(f"    Pinned frames", f"{pinned_count}/{len(entries)}")
+            DiagLog.data(f"    Ground-clamped", f"{clamped_count}/{len(entries)}")
+            DiagLog.data(f"    Jitter frames", f"{jitter_frames}/{len(entries)} (Z>1cm while slow)")
+
+            # Print first 20 frames of raw data for detailed analysis
+            DiagLog.info(f"    --- First 20 frames detail ---")
+            for e in entries[:20]:
+                pin_str = " PINNED" if e['pinned'] else ""
+                clamp_str = " CLAMPED" if e['clamped'] else ""
+                DiagLog.info(f"    f{e['frame']:3d}: Z={e['raw_z']:+.4f} finalZ={e['final_z']:+.4f} "
+                             f"spd={e['speed']:.3f}{pin_str}{clamp_str}")
+
+            # Print worst jitter frames
+            worst_z = sorted(range(1, len(entries)),
+                             key=lambda i: abs(z_vals[i] - z_vals[i-1]),
+                             reverse=True)[:5]
+            if worst_z:
+                DiagLog.info(f"    --- Worst Z-jitter frames ---")
+                for i in worst_z:
+                    e = entries[i]
+                    delta = z_vals[i] - z_vals[i-1]
+                    DiagLog.info(f"    f{e['frame']:3d}: deltaZ={delta:+.4f} Z={e['raw_z']:+.4f} "
+                                 f"spd={e['speed']:.3f}")
 
         DiagLog.section("IMPORT COMPLETE")
         DiagLog.data("Total frames processed", len(frames))

@@ -19,6 +19,9 @@ from kalman import SimpleKalman
 # Reasonable limits for a human body in a room
 OUTLIER_MAX_DISTANCE = 3.0      # meters from body centroid
 OUTLIER_MAX_VELOCITY = 2.0      # meters per frame (at ~10fps = 20m/s, impossible for human)
+# Tighter limits for feet — they move slower than hands and jitter is most visible
+OUTLIER_MAX_VELOCITY_FEET = 0.5  # meters per frame (at ~21fps = 10.5m/s, still generous)
+FOOT_INDICES = {15, 16, 17, 18, 19, 20, 21, 22}  # ankles + foot keypoints
 BONE_PAIRS_FOR_SCALE = [
     # (parent_idx, child_idx, expected_length_meters, tolerance_ratio)
     # COCO-WholeBody indices
@@ -591,21 +594,25 @@ class StereoCalibration:
                     continue  # Skip entirely if no history
 
             # Reject impossible frame-to-frame velocity
+            # Feet get a tighter threshold — they're noisier and jitter is most visible
             if idx in self._prev_points:
                 prev = np.array(self._prev_points[idx])
                 velocity = np.linalg.norm(pt - prev)
-                if velocity > OUTLIER_MAX_VELOCITY:
+                max_vel = OUTLIER_MAX_VELOCITY_FEET if idx in FOOT_INDICES else OUTLIER_MAX_VELOCITY
+                if velocity > max_vel:
                     # Use previous value instead of teleporting
                     pt_3d = self._prev_points[idx]
 
             # Apply Kalman smoothing
+            # Feet get higher measurement noise (trust prediction more, reject jitter)
             if smooth:
                 if idx not in self.filters:
+                    q = self.config.KALMAN_PROCESS_NOISE     # 1e-4
+                    r = self.config.KALMAN_MEASUREMENT_NOISE  # 1e-2
+                    if idx in FOOT_INDICES:
+                        r = r * 5  # 5e-2: feet are noisier, trust measurement less
                     self.filters[idx] = [
-                        SimpleKalman(
-                            self.config.KALMAN_PROCESS_NOISE,
-                            self.config.KALMAN_MEASUREMENT_NOISE
-                        )
+                        SimpleKalman(q, r)
                         for _ in range(3)
                     ]
 
