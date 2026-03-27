@@ -931,7 +931,33 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         pinned_foot_pos = {"L": None, "R": None}
         # Smooth unpin: blend from pinned to raw over N frames
         unpin_blend = {"L": 0.0, "R": 0.0}  # 0 = fully pinned, 1 = fully unpinned
+        pin_blend = {"L": 0.0, "R": 0.0}    # 0 = raw, 1 = fully pinned
         UNPIN_BLEND_FRAMES = 8  # frames to blend over when unpinning
+        PIN_BLEND_FRAMES = 6    # frames to blend over when pinning (slightly faster)
+
+        # Precompute ankle-to-ground offset from first N standing frames.
+        # The mocap ankle keypoint is anatomically above the ground (~5-7cm).
+        # Without this offset, unpinned feet float visibly above the floor.
+        foot_z_offset = {"L": 0.0, "R": 0.0}
+        OFFSET_SAMPLE_FRAMES = min(20, len(frames))
+        for side_key, ankle_idx in [("L", LM.LEFT_ANKLE), ("R", LM.RIGHT_ANKLE)]:
+            z_samples = []
+            for i in range(OFFSET_SAMPLE_FRAMES):
+                f_data = frames[i]
+                lm = f_data.get('landmarks_3d', {})
+                hip_c = compute_midpoint(lm, LM.LEFT_HIP, LM.RIGHT_HIP)
+                ankle = get_landmark(lm, ankle_idx)
+                if hip_c and ankle:
+                    # Replicate the same scaling the main loop does
+                    chain_k = f'leg.{side_key}'
+                    cs = scales.get(chain_k, global_scale)
+                    pos = scale_position(ankle, hip_c, cs)
+                    pos_z = pos.z + (hip_height_scale - 1.0) * hip_c.z
+                    z_samples.append(pos_z)
+            if z_samples:
+                foot_z_offset[side_key] = sum(z_samples) / len(z_samples)
+        DiagLog.data("Foot Z offset L", f"{foot_z_offset['L']:.4f}m")
+        DiagLog.data("Foot Z offset R", f"{foot_z_offset['R']:.4f}m")
 
         # Foot diagnostics: collect per-frame data for analysis
         foot_diag = {"L": [], "R": []}
@@ -1186,6 +1212,11 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     side = "L" if ".L" in bone_name else "R"
 
                     if is_foot:
+                        # Apply ankle-to-ground offset so feet naturally sit near floor.
+                        # The mocap ankle keypoint is ~5-7cm above ground anatomically.
+                        # Without this, unpinned feet visibly float.
+                        pos_scaled.z -= foot_z_offset[side]
+
                         # Capture pre-processing position for diagnostics
                         raw_z = pos_scaled.z
                         raw_pos = pos_scaled.copy()
@@ -1194,11 +1225,9 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         if self.ground_clamp and pos_scaled.z < 0:
                             pos_scaled.z = 0
 
-                        # Foot pinning: lock foot to ground when near floor
-                        # and moving slowly. Speed computed from RAW (pre-pin)
-                        # positions to prevent oscillation.
-                        # Unpin transition is blended over UNPIN_BLEND_FRAMES
-                        # to prevent visible jumping when walking starts.
+                        # Foot pinning with smooth blend transitions.
+                        # Both pin-IN and unpin are blended over multiple frames
+                        # to prevent visible snapping.
                         foot_speed = 0.0
                         foot_pinned = False
                         if self.pin_threshold > 0:
@@ -1210,9 +1239,9 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 foot_speed = dist / dt
 
                                 if foot_speed < self.pin_threshold and near_floor:
-                                    # Pin: snap to ground (only if not mid-blend)
+                                    # PINNING — foot should be on ground
                                     if unpin_blend[side] > 0:
-                                        # Already unpinning — don't re-pin, let blend finish
+                                        # Mid-unpin blend — let it finish first
                                         unpin_blend[side] += 1.0 / UNPIN_BLEND_FRAMES
                                         if unpin_blend[side] < 1.0:
                                             t = unpin_blend[side]
@@ -1221,22 +1250,48 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                             pos_scaled = pin_pos + (pos_scaled - pin_pos) * t
                                             foot_pinned = True
                                         else:
-                                            # Blend finished, now re-pin at current position
+                                            # Unpin blend done, now start pin blend
                                             pinned_foot_pos[side] = pos_scaled.copy()
                                             pinned_foot_pos[side].z = 0
+                                            unpin_blend[side] = 0.0
+                                            pin_blend[side] = 1.0  # already at target
                                             pos_scaled = pinned_foot_pos[side].copy()
                                             foot_pinned = True
-                                            unpin_blend[side] = 0.0
+                                    elif pinned_foot_pos[side] is None:
+                                        # New pin — start pin-IN blend
+                                        pinned_foot_pos[side] = pos_scaled.copy()
+                                        pinned_foot_pos[side].z = 0
+                                        pin_blend[side] += 1.0 / PIN_BLEND_FRAMES
+                                        if pin_blend[side] < 1.0:
+                                            t = pin_blend[side]
+                                            t = t * t * (3 - 2 * t)
+                                            pin_pos = pinned_foot_pos[side]
+                                            pos_scaled = raw_pos + (pin_pos - raw_pos) * t
+                                            foot_pinned = True
+                                        else:
+                                            pin_blend[side] = 1.0
+                                            pos_scaled = pinned_foot_pos[side].copy()
+                                            foot_pinned = True
+                                    elif pin_blend[side] < 1.0:
+                                        # Continue pin-IN blend
+                                        pin_blend[side] += 1.0 / PIN_BLEND_FRAMES
+                                        if pin_blend[side] < 1.0:
+                                            t = pin_blend[side]
+                                            t = t * t * (3 - 2 * t)
+                                            pin_pos = pinned_foot_pos[side]
+                                            pos_scaled = raw_pos + (pin_pos - raw_pos) * t
+                                            foot_pinned = True
+                                        else:
+                                            pin_blend[side] = 1.0
+                                            pos_scaled = pinned_foot_pos[side].copy()
+                                            foot_pinned = True
                                     else:
-                                        if pinned_foot_pos[side] is None:
-                                            pinned_foot_pos[side] = pos_scaled.copy()
-                                            pinned_foot_pos[side].z = 0
+                                        # Fully pinned
                                         pos_scaled = pinned_foot_pos[side].copy()
                                         foot_pinned = True
                                 else:
-                                    # Not pinning — blend out if we were pinned.
-                                    # OLD BUG: had a dead zone (threshold < speed < 3*threshold)
-                                    # where the blend never triggered, causing instant snaps.
+                                    # NOT PINNING — blend out if we were pinned
+                                    pin_blend[side] = 0.0
                                     if pinned_foot_pos[side] is not None:
                                         unpin_blend[side] += 1.0 / UNPIN_BLEND_FRAMES
                                         if unpin_blend[side] < 1.0:
