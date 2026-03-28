@@ -1115,7 +1115,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                 torso.keyframe_insert(data_path="location")
 
             # =====================
-            # TORSO ROTATION (from shoulder line + hip line)
+            # TORSO ROTATION (full 3D: yaw + pitch + roll)
             # =====================
             if torso:
                 p_ls = get_landmark(landmarks_3d, LM.LEFT_SHOULDER)
@@ -1124,47 +1124,63 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                 p_rh = get_landmark(landmarks_3d, LM.RIGHT_HIP)
 
                 if p_ls and p_rs and p_lh and p_rh:
-                    # Average shoulder and hip lines for overall body facing
-                    shoulder_vec = (p_ls - p_rs)
-                    hip_vec = (p_lh - p_rh)
-                    body_right = ((shoulder_vec + hip_vec) / 2)
-                    body_right.z = 0  # Project to ground plane
+                    # Build a body coordinate frame from mocap landmarks:
+                    # X = body right (shoulder line + hip line average)
+                    # Y = body forward (perpendicular to right and up)
+                    # Z = body up (hip_mid -> shoulder_mid)
+                    shoulder_vec = p_ls - p_rs
+                    hip_vec = p_lh - p_rh
+                    body_right = ((shoulder_vec + hip_vec) / 2.0).normalized()
 
-                    if body_right.length > 0.01:
-                        body_right = body_right.normalized()
-                        # Body "right" in Blender: rig faces -Y, so right = +X
-                        # Rotation angle = angle between body_right and +X axis
-                        angle = math.atan2(-body_right.y, body_right.x)
+                    body_up = (spine_points.get('shoulder_mid', Vector()) -
+                               spine_points.get('hip_mid', Vector()))
+                    if body_up.length > 0.01:
+                        body_up = body_up.normalized()
+                    else:
+                        body_up = Vector((0, 0, 1))
 
-                        # Apply as Z rotation on torso
-                        torso.rotation_mode = 'QUATERNION'
-                        torso.rotation_quaternion = Quaternion((0, 0, 1), angle)
-                        torso.keyframe_insert(data_path="rotation_quaternion")
+                    # Forward = up x right (right-hand rule)
+                    body_fwd = body_up.cross(body_right).normalized()
+                    # Re-orthogonalize right
+                    body_right = body_fwd.cross(body_up).normalized()
 
-                        if frame_idx % log_every == 0:
-                            DiagLog.data("  torso_yaw", f"{math.degrees(angle):.1f}°")
-                            # Log torso pitch (forward lean) — currently NOT applied
-                            # to the torso bone, but shows how much rotation we're missing
-                            spine_v = spine_points.get('shoulder_mid', Vector()) - spine_points.get('hip_mid', Vector())
-                            if spine_v.length > 0.01:
-                                pitch_angle = math.degrees(math.acos(max(-1, min(1, spine_v.normalized().z))))
-                                DiagLog.data("  torso_pitch_MISSING", f"{pitch_angle:.1f}° from vertical (NOT applied to rig)")
+                    # Build 3x3 rotation matrix from body frame
+                    # Rig rest pose: torso faces -Y, up = +Z, right = +X
+                    # So we map: body_right -> +X, body_fwd -> -Y, body_up -> +Z
+                    from mathutils import Matrix
+                    body_mat = Matrix((
+                        (body_right.x, -body_fwd.x, body_up.x),
+                        (body_right.y, -body_fwd.y, body_up.y),
+                        (body_right.z, -body_fwd.z, body_up.z),
+                    )).transposed()
+
+                    torso.rotation_mode = 'QUATERNION'
+                    torso.rotation_quaternion = body_mat.to_quaternion()
+                    torso.keyframe_insert(data_path="rotation_quaternion")
+
+                    if frame_idx % log_every == 0:
+                        # Decompose into yaw/pitch/roll for diagnostics
+                        euler = body_mat.to_euler('ZYX')
+                        DiagLog.data("  torso_yaw", f"{math.degrees(euler.z):.1f}°")
+                        DiagLog.data("  torso_pitch", f"{math.degrees(euler.y):.1f}°")
+                        DiagLog.data("  torso_roll", f"{math.degrees(euler.x):.1f}°")
 
             # =====================
             # FK ROTATIONS
             # =====================
             if self.use_fk:
-                # --- Spine FK (first bone only — child bones inherit) ---
-                # Only rotate spine_fk; children stay at rest to avoid
-                # rotation compounding through the 4-bone chain.
-                spine_fk = rig.pose.bones.get("spine_fk")
-                if spine_fk and spine_points.get('hip_mid') and spine_points.get('shoulder_mid'):
-                    spine_dir = (armature_inv_33 @ (spine_points['shoulder_mid'] - spine_points['hip_mid'])).normalized()
+                # --- Spine FK (full chain — all 4 bones independently rotated) ---
+                if spine_points.get('hip_mid') and spine_points.get('shoulder_mid'):
+                    spine_results = compute_spine_fk_chain(rig, spine_points, armature_inv_33)
+                    for bone, pose_quat in spine_results:
+                        bone.rotation_mode = 'QUATERNION'
+                        bone.rotation_quaternion = pose_quat
+                        bone.keyframe_insert(data_path="rotation_quaternion")
+
                     if frame_idx % log_every == 0:
+                        spine_dir = (armature_inv_33 @ (spine_points['shoulder_mid'] - spine_points['hip_mid'])).normalized()
                         DiagLog.data("  spine_dir", f"({spine_dir.x:.3f}, {spine_dir.y:.3f}, {spine_dir.z:.3f})")
-                    spine_fk.rotation_mode = 'QUATERNION'
-                    spine_fk.rotation_quaternion = compute_fk_rotation(spine_fk, spine_dir)
-                    spine_fk.keyframe_insert(data_path="rotation_quaternion")
+                        DiagLog.data("  spine_fk_bones", f"{len(spine_results)} bones rotated")
 
                 # --- Head/Neck FK from face keypoints ---
                 # Neck: point from shoulder_mid toward ear_mid (upward direction)
@@ -1186,8 +1202,8 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         neck_bone.rotation_quaternion = compute_fk_rotation(neck_bone, neck_dir)
                         neck_bone.keyframe_insert(data_path="rotation_quaternion")
 
-                    # Head yaw: rotate head around its up axis based on
-                    # ear line vs shoulder line (head turn relative to torso)
+                    # Head yaw + pitch: rotate head based on ear/nose keypoints
+                    # relative to shoulder orientation (head turn + nod relative to torso)
                     head_bone = rig.pose.bones.get("head")
                     if head_bone and p_nose:
                         p_ls = get_landmark(landmarks_3d, LM.LEFT_SHOULDER)
@@ -1202,18 +1218,28 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                             # Clamp to reasonable range (avoid wild rotations)
                             head_yaw = max(-0.7, min(0.7, head_yaw))
 
-                            # Apply as rotation around bone's local Y axis (up)
+                            # Head pitch (nod): angle of nose-to-ear_mid vector
+                            # relative to the body's forward-up plane.
+                            # Positive pitch = looking down, negative = looking up
+                            nose_ear_vec = p_nose - ear_mid
+                            head_pitch = math.atan2(
+                                -nose_ear_vec.z,
+                                math.sqrt(nose_ear_vec.x**2 + nose_ear_vec.y**2)
+                            )
+                            # Clamp pitch (avoid extreme values from noisy data)
+                            head_pitch = max(-0.6, min(0.6, head_pitch))
+
+                            # Combine yaw and pitch as quaternion rotations
+                            # Yaw around local Y (up), pitch around local X (right)
+                            yaw_quat = Quaternion((0, 1, 0), head_yaw)
+                            pitch_quat = Quaternion((1, 0, 0), head_pitch)
                             head_bone.rotation_mode = 'QUATERNION'
-                            head_bone.rotation_quaternion = Quaternion((0, 1, 0), head_yaw)
+                            head_bone.rotation_quaternion = yaw_quat @ pitch_quat
                             head_bone.keyframe_insert(data_path="rotation_quaternion")
 
                             if frame_idx % log_every == 0:
                                 DiagLog.data("  head_yaw", f"{math.degrees(head_yaw):.1f}° (ear_ang={math.degrees(ear_angle):.1f} - sh_ang={math.degrees(shoulder_angle):.1f})")
-                                # Log head pitch (nod) — currently NOT applied
-                                if p_nose and ear_mid:
-                                    nose_ear_vec = p_nose - ear_mid
-                                    head_pitch = math.degrees(math.atan2(-nose_ear_vec.z, math.sqrt(nose_ear_vec.x**2 + nose_ear_vec.y**2)))
-                                    DiagLog.data("  head_pitch_MISSING", f"{head_pitch:.1f}° (NOT applied to rig)")
+                                DiagLog.data("  head_pitch", f"{math.degrees(head_pitch):.1f}°")
 
                 # --- Limb FK (only in FK mode, skipped when IK active) ---
                 if not self.use_ik:
