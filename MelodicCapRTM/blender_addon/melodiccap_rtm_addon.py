@@ -1155,18 +1155,20 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
             # FK ROTATIONS
             # =====================
             if self.use_fk:
-                # --- Spine FK (full chain — all 4 bones independently rotated) ---
-                if spine_points.get('hip_mid') and spine_points.get('shoulder_mid'):
-                    spine_results = compute_spine_fk_chain(rig, spine_points, armature_inv_33)
-                    for bone, pose_quat in spine_results:
-                        bone.rotation_mode = 'QUATERNION'
-                        bone.rotation_quaternion = pose_quat
-                        bone.keyframe_insert(data_path="rotation_quaternion")
-
+                # --- Spine FK (first bone only — child bones inherit) ---
+                # Only rotate spine_fk; children stay at rest to avoid
+                # rotation compounding through the 4-bone chain.
+                # NOTE: compute_spine_fk_chain() exists but has a cumulative
+                # rotation bug that drops shoulders ~0.34m even when standing
+                # upright. Do NOT use it until the parent-space tracking is fixed.
+                spine_fk = rig.pose.bones.get("spine_fk")
+                if spine_fk and spine_points.get('hip_mid') and spine_points.get('shoulder_mid'):
+                    spine_dir = (armature_inv_33 @ (spine_points['shoulder_mid'] - spine_points['hip_mid'])).normalized()
                     if frame_idx % log_every == 0:
-                        spine_dir = (armature_inv_33 @ (spine_points['shoulder_mid'] - spine_points['hip_mid'])).normalized()
                         DiagLog.data("  spine_dir", f"({spine_dir.x:.3f}, {spine_dir.y:.3f}, {spine_dir.z:.3f})")
-                        DiagLog.data("  spine_fk_bones", f"{len(spine_results)} bones rotated")
+                    spine_fk.rotation_mode = 'QUATERNION'
+                    spine_fk.rotation_quaternion = compute_fk_rotation(spine_fk, spine_dir)
+                    spine_fk.keyframe_insert(data_path="rotation_quaternion")
 
                 # --- Head/Neck FK from face keypoints ---
                 # Neck: point from shoulder_mid toward ear_mid (upward direction)
