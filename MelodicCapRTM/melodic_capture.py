@@ -69,6 +69,7 @@ class Config:
     # Recording
     RECORDING_COUNTDOWN = 5  # seconds before recording starts
     RECORDING_TRIM_END = 2.0  # seconds to trim from end of recording
+    OFFLINE_MODE = False  # True = save raw 2D only, triangulate later with offline_processor.py
 
     # Pose detection
     # 'body' = RTMPose 17 keypoints (fast, all we need for IK)
@@ -518,8 +519,9 @@ class MelodicCapApp:
                     cv2.putText(disp, str(secs), (w // 2 - 40, h // 2 + 40),
                                 cv2.FONT_HERSHEY_SIMPLEX, 4, (0, 255, 255), 8)
             elif self.recorder.is_recording:
-                draw_status(display_a, f"REC: {len(self.recorder.frames)}f", (0, 0, 255))
-                draw_status(display_b, f"REC: {len(self.recorder.frames)}f", (0, 0, 255))
+                rec_label = "REC-RAW" if self.config.OFFLINE_MODE else "REC"
+                draw_status(display_a, f"{rec_label}: {len(self.recorder.frames)}f", (0, 0, 255))
+                draw_status(display_b, f"{rec_label}: {len(self.recorder.frames)}f", (0, 0, 255))
             elif self.calibration.is_calibrated:
                 draw_status(display_a, f"READY [{display_fps:.0f} fps]")
                 draw_status(display_b, f"READY [{display_fps:.0f} fps]")
@@ -532,14 +534,19 @@ class MelodicCapApp:
             if (self.calibration.is_calibrated and
                     det_a is not None and det_b is not None):
 
-                t0 = time.time()
-                points_3d = self.calibration.triangulate_pose(
-                    det_a, det_b, smooth=True
-                )
-                t_tri = time.time() - t0
+                if self.config.OFFLINE_MODE:
+                    # Offline: skip triangulation, save raw 2D only
+                    if self.recorder.is_recording:
+                        self.recorder.add_frame(None, det_a, det_b)
+                else:
+                    t0 = time.time()
+                    points_3d = self.calibration.triangulate_pose(
+                        det_a, det_b, smooth=True
+                    )
+                    t_tri = time.time() - t0
 
-                if points_3d and self.recorder.is_recording:
-                    self.recorder.add_frame(points_3d, det_a, det_b)
+                    if points_3d and self.recorder.is_recording:
+                        self.recorder.add_frame(points_3d, det_a, det_b)
 
             # Collecting calibration frames — with stillness detection
             if self.collecting_cal_frames:
@@ -712,7 +719,8 @@ class MelodicCapApp:
                 elif self.recorder.is_recording:
                     detector_info = f"{self.config.POSE_MODE}_{self.config.POSE_QUALITY}"
                     trim_secs = self.config.RECORDING_TRIM_END
-                    self.recorder.stop(detector_info=detector_info, trim_end=trim_secs)
+                    self.recorder.stop(detector_info=detector_info, trim_end=trim_secs,
+                                       offline_mode=self.config.OFFLINE_MODE)
                 else:
                     # Start countdown
                     self._countdown_active = True
@@ -721,7 +729,7 @@ class MelodicCapApp:
 
         # Cleanup
         if self.recorder.is_recording:
-            self.recorder.stop()
+            self.recorder.stop(offline_mode=self.config.OFFLINE_MODE)
 
         self._infer_pool.shutdown(wait=False)
         self.cap_a.release()

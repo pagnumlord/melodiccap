@@ -737,63 +737,41 @@ def compute_fk_rotation(bone, target_dir_armature):
 
 def compute_spine_fk_chain(rig, spine_points, armature_inv_33):
     """
-    Compute FK rotations for the spine chain with parent-space tracking.
+    Compute FK rotations for the full spine chain (4 bones).
 
-    Processes bones in order, tracking the cumulative posed rotation so each
-    child bone correctly accounts for its parent's pose.
+    Distributes the overall spine rotation equally across all chain bones.
+    Each bone independently computes its full rotation from rest to target,
+    then takes a 1/N fraction so the compound effect approximates the total.
+
+    This avoids cumulative parent-space tracking which caused a 0.34m shoulder
+    drop in the previous implementation.
 
     Returns list of (bone, quaternion) pairs to apply.
     """
-    spine_chain = [
-        ("spine_fk", 'hip_mid', 'spine_low'),
-        ("spine_fk.001", 'spine_low', 'spine_mid'),
-        ("spine_fk.002", 'spine_mid', 'chest'),
-        ("spine_fk.003", 'chest', 'shoulder_mid'),
-    ]
+    hip_mid = spine_points.get('hip_mid')
+    shoulder_mid = spine_points.get('shoulder_mid')
+    if not hip_mid or not shoulder_mid:
+        return []
 
+    spine_dir = (armature_inv_33 @ (shoulder_mid - hip_mid)).normalized()
+
+    chain_names = ["spine_fk", "spine_fk.001", "spine_fk.002", "spine_fk.003"]
+    bones = [(name, rig.pose.bones.get(name)) for name in chain_names]
+    bones = [(name, b) for name, b in bones if b is not None]
+
+    if not bones:
+        return []
+
+    n = len(bones)
     results = []
 
-    first_bone = rig.pose.bones.get("spine_fk")
-    if first_bone and first_bone.parent:
-        cumulative_quat = first_bone.parent.bone.matrix_local.to_quaternion()
-    elif first_bone:
-        cumulative_quat = Quaternion()
-    else:
-        return results
+    for _name, bone in bones:
+        # What rotation would this bone need if it were the only one?
+        full_rot = compute_fk_rotation(bone, spine_dir)
 
-    for bone_name, start_key, end_key in spine_chain:
-        bone = rig.pose.bones.get(bone_name)
-        if not bone:
-            continue
-
-        p_start = spine_points.get(start_key)
-        p_end = spine_points.get(end_key)
-        if p_start is None or p_end is None:
-            continue
-
-        # Target direction in armature space
-        target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
-
-        # This bone's rest rotation relative to its parent
-        if bone.parent:
-            rest_rel = (bone.parent.bone.matrix_local.to_quaternion().inverted()
-                        @ bone.bone.matrix_local.to_quaternion())
-        else:
-            rest_rel = bone.bone.matrix_local.to_quaternion()
-
-        # Effective orientation = cumulative parent posed + this bone's rest
-        effective = cumulative_quat @ rest_rel
-
-        # Target direction in this bone's effective local space
-        target_local = (effective.inverted() @ target_dir).normalized()
-
-        # Rotation from (0,1,0) to target in local space
-        pose_quat = Vector((0, 1, 0)).rotation_difference(target_local)
-
-        results.append((bone, pose_quat))
-
-        # Update cumulative for the next bone in chain
-        cumulative_quat = effective @ pose_quat
+        # Take 1/N of that rotation so N bones compound to the full rotation
+        partial_rot = Quaternion().slerp(full_rot, 1.0 / n)
+        results.append((bone, partial_rot))
 
     return results
 
@@ -887,6 +865,19 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         default=True
     )
 
+    calibration_frame: bpy.props.IntProperty(
+        name="Calibration Frame",
+        description="Frame to use for proportion measurement (0 = first frame). Must be a clean standing A-pose",
+        default=0,
+        min=0
+    )
+
+    spine_chain: bpy.props.BoolProperty(
+        name="Spine FK Chain",
+        description="Distribute spine rotation across all 4 FK bones (better sitting/bending). Off = single bone only",
+        default=False
+    )
+
     def execute(self, context):
         rig = context.active_object
 
@@ -942,10 +933,16 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                 if lm:
                     frames[i]['landmarks_3d'] = _convert_mp_frame(lm)
 
-        # Check hand data availability (first frame)
-        first_landmarks = frames[0].get('landmarks_3d', {})
+        # Calibration frame for proportion measurement
+        cal_idx = min(self.calibration_frame, len(frames) - 1)
+        if cal_idx != 0:
+            DiagLog.info(f"Using frame {cal_idx} for proportion calibration (instead of frame 0)")
+        first_landmarks = frames[cal_idx].get('landmarks_3d', {})
+
+        # Check hand data availability
         finger_data_available = has_hand_data(first_landmarks)
         DiagLog.data("Finger data available", finger_data_available)
+        DiagLog.data("Calibration frame", cal_idx)
 
         # =====================
         # TEMPORAL SMOOTHING
@@ -997,13 +994,13 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
         global_scale = scales['global']
 
-        # Validate frame 0 pose quality
-        DiagLog.section("FRAME 0 POSE QUALITY CHECK")
+        # Validate calibration frame pose quality
+        DiagLog.section(f"CALIBRATION FRAME {cal_idx} POSE QUALITY CHECK")
         pose_quality = validate_frame0_pose(first_landmarks, mocap_props)
         if pose_quality['ok']:
-            DiagLog.info("Frame 0 pose: OK (clean A-pose)")
+            DiagLog.info(f"Frame {cal_idx} pose: OK (clean A-pose)")
         else:
-            DiagLog.info("Frame 0 pose: PROBLEMS DETECTED")
+            DiagLog.info(f"Frame {cal_idx} pose: PROBLEMS DETECTED")
             for w in pose_quality['warnings']:
                 DiagLog.info(f"  ⚠ {w}")
         if 'spine_tilt_deg' in pose_quality:
@@ -1155,20 +1152,28 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
             # FK ROTATIONS
             # =====================
             if self.use_fk:
-                # --- Spine FK (first bone only — child bones inherit) ---
-                # Only rotate spine_fk; children stay at rest to avoid
-                # rotation compounding through the 4-bone chain.
-                # NOTE: compute_spine_fk_chain() exists but has a cumulative
-                # rotation bug that drops shoulders ~0.34m even when standing
-                # upright. Do NOT use it until the parent-space tracking is fixed.
-                spine_fk = rig.pose.bones.get("spine_fk")
-                if spine_fk and spine_points.get('hip_mid') and spine_points.get('shoulder_mid'):
-                    spine_dir = (armature_inv_33 @ (spine_points['shoulder_mid'] - spine_points['hip_mid'])).normalized()
+                # --- Spine FK ---
+                if self.spine_chain and spine_points.get('hip_mid') and spine_points.get('shoulder_mid'):
+                    # Full chain: distribute rotation across all 4 spine FK bones
+                    chain_results = compute_spine_fk_chain(rig, spine_points, armature_inv_33)
+                    for bone, quat in chain_results:
+                        bone.rotation_mode = 'QUATERNION'
+                        bone.rotation_quaternion = quat
+                        bone.keyframe_insert(data_path="rotation_quaternion")
                     if frame_idx % log_every == 0:
+                        spine_dir = (armature_inv_33 @ (spine_points['shoulder_mid'] - spine_points['hip_mid'])).normalized()
                         DiagLog.data("  spine_dir", f"({spine_dir.x:.3f}, {spine_dir.y:.3f}, {spine_dir.z:.3f})")
-                    spine_fk.rotation_mode = 'QUATERNION'
-                    spine_fk.rotation_quaternion = compute_fk_rotation(spine_fk, spine_dir)
-                    spine_fk.keyframe_insert(data_path="rotation_quaternion")
+                        DiagLog.data("  spine_chain_bones", f"{len(chain_results)}")
+                else:
+                    # Single bone fallback (default, proven stable)
+                    spine_fk = rig.pose.bones.get("spine_fk")
+                    if spine_fk and spine_points.get('hip_mid') and spine_points.get('shoulder_mid'):
+                        spine_dir = (armature_inv_33 @ (spine_points['shoulder_mid'] - spine_points['hip_mid'])).normalized()
+                        if frame_idx % log_every == 0:
+                            DiagLog.data("  spine_dir", f"({spine_dir.x:.3f}, {spine_dir.y:.3f}, {spine_dir.z:.3f})")
+                        spine_fk.rotation_mode = 'QUATERNION'
+                        spine_fk.rotation_quaternion = compute_fk_rotation(spine_fk, spine_dir)
+                        spine_fk.keyframe_insert(data_path="rotation_quaternion")
 
                 # --- Head/Neck FK from face keypoints ---
                 # Neck: point from shoulder_mid toward ear_mid (upward direction)
