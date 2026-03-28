@@ -1,5 +1,5 @@
 """
-MelodicCap RTM Blender Addon v3.3
+MelodicCap RTM Blender Addon v3.4
 ===================================
 Imports JSON motion capture data and retargets to JaxRigify armature.
 
@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (3, 3),
+    "version": (3, 4),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -471,6 +471,89 @@ def compute_scale_factors(rig_props, mocap_props):
     return scales
 
 
+def validate_frame0_pose(landmarks_3d, mocap_props):
+    """
+    Validate that frame 0 is a clean standing A-pose.
+    Logs warnings for asymmetry, non-upright spine, or suspicious proportions.
+    Returns a dict of quality metrics.
+    """
+    quality = {'warnings': [], 'ok': True}
+
+    # Arm symmetry check
+    arm_l = mocap_props.get('arm.L', 0)
+    arm_r = mocap_props.get('arm.R', 0)
+    if arm_l > 0.01 and arm_r > 0.01:
+        arm_asym = abs(arm_l - arm_r) / max(arm_l, arm_r) * 100
+        quality['arm_asymmetry_pct'] = arm_asym
+        if arm_asym > 3.0:
+            quality['warnings'].append(
+                f"ARM ASYMMETRY: L={arm_l:.4f} R={arm_r:.4f} ({arm_asym:.1f}% diff) — "
+                f"frame 0 pose is not symmetric or triangulation error on one side")
+            quality['ok'] = False
+
+    # Leg symmetry check
+    leg_l = mocap_props.get('leg.L', 0)
+    leg_r = mocap_props.get('leg.R', 0)
+    if leg_l > 0.01 and leg_r > 0.01:
+        leg_asym = abs(leg_l - leg_r) / max(leg_l, leg_r) * 100
+        quality['leg_asymmetry_pct'] = leg_asym
+        if leg_asym > 3.0:
+            quality['warnings'].append(
+                f"LEG ASYMMETRY: L={leg_l:.4f} R={leg_r:.4f} ({leg_asym:.1f}% diff)")
+            quality['ok'] = False
+
+    # Spine uprightness: check if hip-to-shoulder vector is mostly vertical
+    hip_mid = compute_midpoint(landmarks_3d, LM.LEFT_HIP, LM.RIGHT_HIP)
+    shoulder_mid = compute_midpoint(landmarks_3d, LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER)
+    if hip_mid and shoulder_mid:
+        spine_vec = shoulder_mid - hip_mid
+        if spine_vec.length > 0.01:
+            spine_up = spine_vec.normalized()
+            # Angle from vertical (Z axis)
+            spine_tilt = math.degrees(math.acos(max(-1, min(1, spine_up.z))))
+            quality['spine_tilt_deg'] = spine_tilt
+            if spine_tilt > 15:
+                quality['warnings'].append(
+                    f"SPINE NOT UPRIGHT: {spine_tilt:.1f}° from vertical — "
+                    f"frame 0 may not be a standing pose (sitting?)")
+                quality['ok'] = False
+
+    # Hip height sanity: typical standing hip is 0.8-1.1m above ground
+    hip_pos = mocap_props.get('hip_pos')
+    if hip_pos:
+        quality['hip_height'] = hip_pos.z
+        if hip_pos.z < 0.6:
+            quality['warnings'].append(
+                f"HIP TOO LOW: Z={hip_pos.z:.3f}m — person may be sitting/crouching in frame 0")
+            quality['ok'] = False
+        elif hip_pos.z > 1.2:
+            quality['warnings'].append(
+                f"HIP UNUSUALLY HIGH: Z={hip_pos.z:.3f}m — check calibration")
+
+    # Shoulder width sanity
+    p_ls = get_landmark(landmarks_3d, LM.LEFT_SHOULDER)
+    p_rs = get_landmark(landmarks_3d, LM.RIGHT_SHOULDER)
+    if p_ls and p_rs:
+        shoulder_width = (p_ls - p_rs).length
+        quality['shoulder_width'] = shoulder_width
+        if shoulder_width < 0.2 or shoulder_width > 0.6:
+            quality['warnings'].append(
+                f"SHOULDER WIDTH UNUSUAL: {shoulder_width:.3f}m (expected 0.3-0.5m)")
+
+    # Wrist height relative to hip: in A-pose, wrists should be near hip height
+    for side, wrist_idx in [("L", LM.LEFT_WRIST), ("R", LM.RIGHT_WRIST)]:
+        p_wr = get_landmark(landmarks_3d, wrist_idx)
+        if p_wr and hip_pos:
+            wrist_hip_dz = p_wr.z - hip_pos.z
+            quality[f'wrist_{side}_dz'] = wrist_hip_dz
+            if abs(wrist_hip_dz) > 0.15:
+                quality['warnings'].append(
+                    f"WRIST {side} NOT AT HIP HEIGHT: dZ={wrist_hip_dz:+.3f}m — "
+                    f"arms may not be in A-pose")
+
+    return quality
+
+
 def scale_position(pos, hip_center_mocap, scale_factor):
     """Scale a position relative to the mocap hip center."""
     offset = pos - hip_center_mocap
@@ -914,6 +997,25 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
         global_scale = scales['global']
 
+        # Validate frame 0 pose quality
+        DiagLog.section("FRAME 0 POSE QUALITY CHECK")
+        pose_quality = validate_frame0_pose(first_landmarks, mocap_props)
+        if pose_quality['ok']:
+            DiagLog.info("Frame 0 pose: OK (clean A-pose)")
+        else:
+            DiagLog.info("Frame 0 pose: PROBLEMS DETECTED")
+            for w in pose_quality['warnings']:
+                DiagLog.info(f"  ⚠ {w}")
+        if 'spine_tilt_deg' in pose_quality:
+            DiagLog.data("Spine tilt from vertical", f"{pose_quality['spine_tilt_deg']:.1f}°")
+        if 'arm_asymmetry_pct' in pose_quality:
+            DiagLog.data("Arm length asymmetry", f"{pose_quality['arm_asymmetry_pct']:.1f}%")
+        if 'shoulder_width' in pose_quality:
+            DiagLog.data("Shoulder width", f"{pose_quality['shoulder_width']:.3f}m")
+        for side in ['L', 'R']:
+            if f'wrist_{side}_dz' in pose_quality:
+                DiagLog.data(f"Wrist {side} vs hip dZ", f"{pose_quality[f'wrist_{side}_dz']:+.3f}m")
+
         # Hip height is determined by leg length, not spine length.
         # Use average leg scale for vertical positioning to prevent hunching.
         leg_scale_avg = (scales.get('leg.L', global_scale) + scales.get('leg.R', global_scale)) / 2.0
@@ -961,6 +1063,8 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
         # Foot diagnostics: collect per-frame data for analysis
         foot_diag = {"L": [], "R": []}
+        # Arm diagnostics: collect per-frame ratios for summary
+        arm_ratios = {"L": [], "R": []}
 
         DiagLog.section("PROCESSING FRAMES")
         log_every = max(1, len(frames) // 10)
@@ -982,7 +1086,15 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
             if frame_idx % log_every == 0:
                 DiagLog.info(f"Frame {frame_idx}/{len(frames)} (t={timestamp:.2f}s, blender={frame_num})")
                 if hip_center:
-                    DiagLog.data("  hip_center", f"({hip_center.x:.3f}, {hip_center.y:.3f}, {hip_center.z:.3f})")
+                    DiagLog.data("  hip_raw", f"({hip_center.x:.3f}, {hip_center.y:.3f}, {hip_center.z:.3f})")
+                    # Show what the scaled hip will be
+                    sh_z = hip_center.z * hip_height_scale
+                    DiagLog.data("  hip_scaled_z", f"{sh_z:.3f} (raw_z * {hip_height_scale:.3f})")
+                    # Hip drop from frame 0
+                    f0_hip = mocap_props.get('hip_pos')
+                    if f0_hip:
+                        dz = hip_center.z - f0_hip.z
+                        DiagLog.data("  hip_dz_from_f0", f"{dz:+.3f}m")
 
             # =====================
             # ROOT / TORSO POSITION (scaled)
@@ -1030,7 +1142,13 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         torso.keyframe_insert(data_path="rotation_quaternion")
 
                         if frame_idx % log_every == 0:
-                            DiagLog.data("  torso_angle", f"{math.degrees(angle):.1f}°")
+                            DiagLog.data("  torso_yaw", f"{math.degrees(angle):.1f}°")
+                            # Log torso pitch (forward lean) — currently NOT applied
+                            # to the torso bone, but shows how much rotation we're missing
+                            spine_v = spine_points.get('shoulder_mid', Vector()) - spine_points.get('hip_mid', Vector())
+                            if spine_v.length > 0.01:
+                                pitch_angle = math.degrees(math.acos(max(-1, min(1, spine_v.normalized().z))))
+                                DiagLog.data("  torso_pitch_MISSING", f"{pitch_angle:.1f}° from vertical (NOT applied to rig)")
 
             # =====================
             # FK ROTATIONS
@@ -1088,6 +1206,14 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                             head_bone.rotation_mode = 'QUATERNION'
                             head_bone.rotation_quaternion = Quaternion((0, 1, 0), head_yaw)
                             head_bone.keyframe_insert(data_path="rotation_quaternion")
+
+                            if frame_idx % log_every == 0:
+                                DiagLog.data("  head_yaw", f"{math.degrees(head_yaw):.1f}° (ear_ang={math.degrees(ear_angle):.1f} - sh_ang={math.degrees(shoulder_angle):.1f})")
+                                # Log head pitch (nod) — currently NOT applied
+                                if p_nose and ear_mid:
+                                    nose_ear_vec = p_nose - ear_mid
+                                    head_pitch = math.degrees(math.atan2(-nose_ear_vec.z, math.sqrt(nose_ear_vec.x**2 + nose_ear_vec.y**2)))
+                                    DiagLog.data("  head_pitch_MISSING", f"{head_pitch:.1f}° (NOT applied to rig)")
 
                 # --- Limb FK (only in FK mode, skipped when IK active) ---
                 if not self.use_ik:
@@ -1151,17 +1277,34 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         ("R", rig_shoulder_R, p_shoulder_r),
                     ]:
                         wrist_idx = LM.LEFT_WRIST if side_label == "L" else LM.RIGHT_WRIST
+                        elbow_idx = LM.LEFT_ELBOW if side_label == "L" else LM.RIGHT_ELBOW
                         p_wr = get_landmark(landmarks_3d, wrist_idx)
+                        p_el = get_landmark(landmarks_3d, elbow_idx)
                         arm_len = rig_props.get(f'arm.{side_label}', 0)
                         if rig_sh and mocap_sh and p_wr:
                             arm_vec = p_wr - mocap_sh
                             arm_scale = scales.get(f'arm.{side_label}', global_scale)
                             target = rig_sh + arm_vec * arm_scale
                             dist = (target - rig_sh).length
+                            ratio = dist / arm_len if arm_len > 0 else 0
+                            # Log mocap raw positions for capture quality assessment
+                            mocap_arm_raw = (p_wr - mocap_sh).length
                             DiagLog.data(f"  arm.{side_label}",
                                 f"rig_sh=({rig_sh.x:.3f},{rig_sh.y:.3f},{rig_sh.z:.3f}) "
                                 f"target_dist={dist:.4f} rig_arm_len={arm_len:.4f} "
-                                f"ratio={dist/arm_len:.3f}" if arm_len > 0 else "no data")
+                                f"ratio={ratio:.3f}" if arm_len > 0 else "no data")
+                            DiagLog.data(f"  arm.{side_label}_mocap",
+                                f"sh=({mocap_sh.x:.3f},{mocap_sh.y:.3f},{mocap_sh.z:.3f}) "
+                                f"wr=({p_wr.x:.3f},{p_wr.y:.3f},{p_wr.z:.3f}) "
+                                f"raw_dist={mocap_arm_raw:.4f}")
+                            if p_el:
+                                DiagLog.data(f"  arm.{side_label}_elbow",
+                                    f"({p_el.x:.3f},{p_el.y:.3f},{p_el.z:.3f})")
+                            # Warn on bad ratios
+                            if arm_len > 0 and ratio < 0.7:
+                                DiagLog.info(f"  !! ARM {side_label} RATIO {ratio:.3f} < 0.7 — "
+                                    f"wrist target too close to shoulder. "
+                                    f"Capture or retargeting error!")
 
                 for bone_name, landmark_idx in IK_TARGETS.items():
                     bone = rig.pose.bones.get(bone_name)
@@ -1188,6 +1331,14 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         if rig_sh and mocap_sh:
                             arm_vec = pos - mocap_sh
                             pos_scaled = rig_sh + arm_vec * chain_scale
+                            # Collect arm ratio for summary diagnostics
+                            arm_len = rig_props.get(f'arm.{side}', 0)
+                            if arm_len > 0:
+                                arm_ratios[side].append({
+                                    'frame': frame_idx,
+                                    'ratio': (pos_scaled - rig_sh).length / arm_len,
+                                    'mocap_dist': arm_vec.length,
+                                })
                         else:
                             pos = scale_position(pos, hip_center, chain_scale)
                             pos_scaled = pos.copy()
@@ -1392,6 +1543,44 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     bone.keyframe_insert(data_path="location")
 
             prev_timestamp = timestamp
+
+        # =====================
+        # ARM RATIO DIAGNOSTICS
+        # =====================
+        DiagLog.section("ARM DIAGNOSTICS")
+        for side_label in ["L", "R"]:
+            entries = arm_ratios[side_label]
+            if not entries:
+                DiagLog.info(f"  arm.{side_label}: no data")
+                continue
+            ratios = [e['ratio'] for e in entries]
+            r_min = min(ratios)
+            r_max = max(ratios)
+            r_avg = sum(ratios) / len(ratios)
+            bad_frames = sum(1 for r in ratios if r < 0.7)
+            very_bad = sum(1 for r in ratios if r < 0.5)
+            DiagLog.info(f"  arm.{side_label}:")
+            DiagLog.data(f"    Ratio range", f"{r_min:.3f} to {r_max:.3f} (avg={r_avg:.3f})")
+            DiagLog.data(f"    Frames <0.7 ratio", f"{bad_frames}/{len(entries)} ({100*bad_frames/len(entries):.0f}%)")
+            DiagLog.data(f"    Frames <0.5 ratio", f"{very_bad}/{len(entries)} ({100*very_bad/len(entries):.0f}%)")
+            if bad_frames > 0:
+                # Find first frame where ratio drops below 0.7
+                first_bad = next(e for e in entries if e['ratio'] < 0.7)
+                DiagLog.data(f"    First bad frame", f"{first_bad['frame']} (ratio={first_bad['ratio']:.3f})")
+                # Worst frame
+                worst = min(entries, key=lambda e: e['ratio'])
+                DiagLog.data(f"    Worst frame", f"{worst['frame']} (ratio={worst['ratio']:.3f})")
+                DiagLog.info(f"    !! {bad_frames} frames have arm ratio <0.7. "
+                    f"Likely causes: spine FK too simple for pose, "
+                    f"torso pitch not applied, or capture quality degraded.")
+            # Show ratio progression (sample 10 evenly spaced)
+            sample_count = min(10, len(entries))
+            step = max(1, len(entries) // sample_count)
+            samples = [entries[i * step] for i in range(sample_count) if i * step < len(entries)]
+            DiagLog.info(f"    --- Ratio timeline (sampled) ---")
+            for s in samples:
+                marker = " !!" if s['ratio'] < 0.7 else ""
+                DiagLog.info(f"    f{s['frame']:3d}: ratio={s['ratio']:.3f} mocap_dist={s['mocap_dist']:.4f}{marker}")
 
         # =====================
         # FOOT DIAGNOSTICS
