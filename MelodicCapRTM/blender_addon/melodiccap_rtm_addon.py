@@ -1,5 +1,5 @@
 """
-MelodicCap RTM Blender Addon v3.5
+MelodicCap RTM Blender Addon v4.0
 ===================================
 Imports JSON motion capture data and retargets to JaxRigify armature.
 
@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (3, 5),
+    "version": (4, 0),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -878,6 +878,14 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         default=False
     )
 
+    arm_fk: bpy.props.BoolProperty(
+        name="Arm FK (hybrid)",
+        description="Use FK rotations for arms instead of IK positioning. "
+                    "Directly encodes elbow direction from mocap data — fixes chicken-wing in sitting poses. "
+                    "Legs stay on IK for foot pinning",
+        default=True
+    )
+
     def execute(self, context):
         rig = context.active_object
 
@@ -917,13 +925,22 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         # Switch to pose mode
         bpy.ops.object.mode_set(mode='POSE')
 
-        # Set IK/FK sliders
+        # Set IK/FK sliders per limb
+        # Hybrid mode (arm_fk=True): arms use FK, legs use IK
         ik_fk_count = 0
+        hybrid_mode = self.use_ik and self.arm_fk
         for bone in rig.pose.bones:
             if "IK_FK" in bone.keys():
-                bone["IK_FK"] = 0.0 if self.use_ik else 1.0
+                if hybrid_mode:
+                    # Arms to FK (1.0), legs to IK (0.0)
+                    is_arm = "arm" in bone.name.lower()
+                    bone["IK_FK"] = 1.0 if is_arm else 0.0
+                else:
+                    bone["IK_FK"] = 0.0 if self.use_ik else 1.0
                 ik_fk_count += 1
         DiagLog.data("IK_FK sliders found", ik_fk_count)
+        if hybrid_mode:
+            DiagLog.info("Hybrid mode: arms=FK, legs=IK")
 
         # Convert legacy frames if needed
         if not is_rtm:
@@ -1231,23 +1248,44 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 head_pitch = math.degrees(math.atan2(-nose_ear_vec.z, math.sqrt(nose_ear_vec.x**2 + nose_ear_vec.y**2)))
                                 DiagLog.data("  head_pitch_via_neck", f"{head_pitch:.1f}° (applied via neck FK)")
 
-                # --- Limb FK (only in FK mode, skipped when IK active) ---
-                if not self.use_ik:
-                    for bone_name, (start_idx, end_idx) in V2R_MAPPING.items():
-                        bone = rig.pose.bones.get(bone_name)
-                        if not bone:
-                            continue
+                # --- Limb FK ---
+                # Full FK mode: apply all limb bones
+                # Hybrid mode (arm_fk + use_ik): only apply arm FK bones
+                # Pure IK mode: skip all limb FK
+                arm_fk_bones = {
+                    "upper_arm_fk.L", "forearm_fk.L",
+                    "upper_arm_fk.R", "forearm_fk.R",
+                }
+                for bone_name, (start_idx, end_idx) in V2R_MAPPING.items():
+                    is_arm_bone = bone_name in arm_fk_bones
 
-                        p_start = get_landmark(landmarks_3d, start_idx)
-                        p_end = get_landmark(landmarks_3d, end_idx)
-                        if p_start is None or p_end is None:
-                            continue
+                    # Skip conditions:
+                    # - Pure IK: skip everything
+                    # - Hybrid: only process arm bones
+                    # - Pure FK: process everything
+                    if self.use_ik and not hybrid_mode:
+                        continue  # pure IK, no FK limbs
+                    if hybrid_mode and not is_arm_bone:
+                        continue  # hybrid: only arm FK, legs stay IK
 
-                        target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
+                    bone = rig.pose.bones.get(bone_name)
+                    if not bone:
+                        continue
 
-                        bone.rotation_mode = 'QUATERNION'
-                        bone.rotation_quaternion = compute_fk_rotation(bone, target_dir)
-                        bone.keyframe_insert(data_path="rotation_quaternion")
+                    p_start = get_landmark(landmarks_3d, start_idx)
+                    p_end = get_landmark(landmarks_3d, end_idx)
+                    if p_start is None or p_end is None:
+                        continue
+
+                    target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
+
+                    bone.rotation_mode = 'QUATERNION'
+                    bone.rotation_quaternion = compute_fk_rotation(bone, target_dir)
+                    bone.keyframe_insert(data_path="rotation_quaternion")
+
+                    if hybrid_mode and is_arm_bone and frame_idx % log_every == 0:
+                        DiagLog.data(f"  arm_fk.{bone_name}",
+                            f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f})")
 
                 # --- Fingers (wholebody data, uses simple FK) ---
                 if finger_data_available and self.use_fingers:
@@ -1323,6 +1361,10 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                     f"Capture or retargeting error!")
 
                 for bone_name, landmark_idx in IK_TARGETS.items():
+                    # Hybrid mode: skip arm IK targets (arms use FK)
+                    if hybrid_mode and "hand" in bone_name:
+                        continue
+
                     bone = rig.pose.bones.get(bone_name)
                     if not bone:
                         continue
@@ -1534,6 +1576,10 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
                 # Pole targets (also scaled)
                 for bone_name, (root_idx, mid_idx, end_idx) in POLE_TARGETS.items():
+                    # Hybrid mode: skip arm pole targets (arms use FK)
+                    if hybrid_mode and 'arm' in bone_name:
+                        continue
+
                     bone = rig.pose.bones.get(bone_name)
                     if not bone:
                         continue
@@ -1609,10 +1655,14 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         # ARM RATIO DIAGNOSTICS
         # =====================
         DiagLog.section("ARM DIAGNOSTICS")
+        if hybrid_mode:
+            DiagLog.info("  Arms: FK mode (hybrid) — no IK ratio data")
+            DiagLog.info("  Arm rotations computed directly from mocap shoulder→elbow→wrist")
         for side_label in ["L", "R"]:
             entries = arm_ratios[side_label]
             if not entries:
-                DiagLog.info(f"  arm.{side_label}: no data")
+                if not hybrid_mode:
+                    DiagLog.info(f"  arm.{side_label}: no data")
                 continue
             ratios = [e['ratio'] for e in entries]
             r_min = min(ratios)
