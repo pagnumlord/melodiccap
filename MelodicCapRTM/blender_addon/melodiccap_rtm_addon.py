@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (4, 0),
+    "version": (4, 1),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -716,22 +716,38 @@ def _butter_lowpass_filtfilt(data, cutoff, fs, order=2):
 # FK ROTATION HELPERS
 # =============================================================================
 
-def compute_fk_rotation(bone, target_dir_armature):
+def compute_fk_rotation(bone, target_dir_armature, parent_matrix_override=None):
     """
     Compute rotation_quaternion for a pose bone to point along target_dir.
 
-    rotation_quaternion is applied in bone-local space. The bone's Y axis
-    (0,1,0) points along its length at rest. bone.bone.matrix_local transforms
-    from bone-local to armature space.
+    Two modes:
+    1) parent_matrix_override is None (default): uses bone.bone.matrix_local
+       (rest pose) to convert target direction. Works when parent is at rest
+       or hasn't been updated yet (e.g., spine chain). This was the original
+       behavior and is preserved for backward compatibility.
 
-    For a root-level bone (or one whose parent is at rest):
-      final_dir = matrix_local @ pose_rotation @ (0,1,0)
-    So:
-      pose_rotation @ (0,1,0) = matrix_local.inv() @ target_dir
-      pose_rotation = (0,1,0).rotation_difference(matrix_local.inv() @ target_dir)
+    2) parent_matrix_override is provided: uses the parent's DEFORMED matrix
+       to properly account for rotations set earlier in the same frame.
+       Required for arm FK bones whose parent chain (spine) has been rotated.
+
+       Formula: bone direction = parent.matrix @ rest_offset @ pose_rot @ Y
+       So: pose_rot @ Y = (parent.matrix @ rest_offset).inv() @ target_dir
+
+    Pass parent_matrix_override='auto' to use bone.parent.matrix (requires
+    depsgraph to have been flushed since parent was last rotated).
     """
-    rest_inv = bone.bone.matrix_local.to_3x3().inverted()
-    target_local = (rest_inv @ target_dir_armature).normalized()
+    if parent_matrix_override is not None and bone.parent:
+        if parent_matrix_override == 'auto':
+            parent_world = bone.parent.matrix.to_3x3()
+        else:
+            parent_world = parent_matrix_override.to_3x3()
+        rest_offset = bone.parent.bone.matrix_local.to_3x3().inverted() @ bone.bone.matrix_local.to_3x3()
+        basis = parent_world @ rest_offset
+        target_local = (basis.inverted() @ target_dir_armature).normalized()
+    else:
+        # Original rest-based math (backward compatible)
+        rest_inv = bone.bone.matrix_local.to_3x3().inverted()
+        target_local = (rest_inv @ target_dir_armature).normalized()
     return Vector((0, 1, 0)).rotation_difference(target_local)
 
 
@@ -929,6 +945,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         # Hybrid mode (arm_fk=True): arms use FK, legs use IK
         ik_fk_count = 0
         hybrid_mode = self.use_ik and self.arm_fk
+        ik_fk_bones = []
         for bone in rig.pose.bones:
             if "IK_FK" in bone.keys():
                 if hybrid_mode:
@@ -937,6 +954,9 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     bone["IK_FK"] = 1.0 if is_arm else 0.0
                 else:
                     bone["IK_FK"] = 0.0 if self.use_ik else 1.0
+                # Keyframe the IK_FK property on frame 0 so it persists in animation
+                bone.keyframe_insert(data_path='["IK_FK"]', frame=0)
+                ik_fk_bones.append(bone)
                 ik_fk_count += 1
         DiagLog.data("IK_FK sliders found", ik_fk_count)
         if hybrid_mode:
@@ -1248,6 +1268,12 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 head_pitch = math.degrees(math.atan2(-nose_ear_vec.z, math.sqrt(nose_ear_vec.x**2 + nose_ear_vec.y**2)))
                                 DiagLog.data("  head_pitch_via_neck", f"{head_pitch:.1f}° (applied via neck FK)")
 
+                # --- Flush depsgraph so parent matrices are current ---
+                # Spine/torso/neck/head rotations were set above. Without this
+                # update, bone.parent.matrix still reflects the PREVIOUS frame,
+                # making child FK rotations (arms, legs) incorrect.
+                bpy.context.view_layer.update()
+
                 # --- Limb FK ---
                 # Full FK mode: apply all limb bones
                 # Hybrid mode (arm_fk + use_ik): only apply arm FK bones
@@ -1256,36 +1282,112 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     "upper_arm_fk.L", "forearm_fk.L",
                     "upper_arm_fk.R", "forearm_fk.R",
                 }
-                for bone_name, (start_idx, end_idx) in V2R_MAPPING.items():
-                    is_arm_bone = bone_name in arm_fk_bones
 
-                    # Skip conditions:
-                    # - Pure IK: skip everything
-                    # - Hybrid: only process arm bones
-                    # - Pure FK: process everything
-                    if self.use_ik and not hybrid_mode:
-                        continue  # pure IK, no FK limbs
-                    if hybrid_mode and not is_arm_bone:
-                        continue  # hybrid: only arm FK, legs stay IK
+                if self.use_ik and not hybrid_mode:
+                    pass  # pure IK, no FK limbs
+                elif hybrid_mode:
+                    # Hybrid: process arm FK bones in parent→child order
+                    # so we can pass upper_arm's computed matrix to forearm
+                    for side in ["L", "R"]:
+                        ua_name = f"upper_arm_fk.{side}"
+                        fa_name = f"forearm_fk.{side}"
+                        ua_bone = rig.pose.bones.get(ua_name)
+                        fa_bone = rig.pose.bones.get(fa_name)
 
-                    bone = rig.pose.bones.get(bone_name)
-                    if not bone:
-                        continue
+                        # Upper arm first
+                        ua_mapping = V2R_MAPPING.get(ua_name)
+                        ua_expected_matrix = None
+                        if ua_bone and ua_mapping:
+                            p_start = get_landmark(landmarks_3d, ua_mapping[0])
+                            p_end = get_landmark(landmarks_3d, ua_mapping[1])
+                            if p_start is not None and p_end is not None:
+                                target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
+                                ua_bone.rotation_mode = 'QUATERNION'
+                                ua_rot = compute_fk_rotation(ua_bone, target_dir, 'auto')
+                                ua_bone.rotation_quaternion = ua_rot
+                                ua_bone.keyframe_insert(data_path="rotation_quaternion")
 
-                    p_start = get_landmark(landmarks_3d, start_idx)
-                    p_end = get_landmark(landmarks_3d, end_idx)
-                    if p_start is None or p_end is None:
-                        continue
+                                # Compute what upper_arm's matrix WILL be after this rotation
+                                # so forearm can use it without a depsgraph update
+                                if ua_bone.parent:
+                                    parent_mat = ua_bone.parent.matrix
+                                    rest_off = ua_bone.parent.bone.matrix_local.inverted() @ ua_bone.bone.matrix_local
+                                else:
+                                    parent_mat = Matrix.Identity(4)
+                                    rest_off = ua_bone.bone.matrix_local
+                                ua_expected_matrix = parent_mat @ rest_off @ ua_rot.to_matrix().to_4x4()
 
-                    target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
+                                if frame_idx % log_every == 0:
+                                    DiagLog.data(f"  arm_fk.{ua_name}",
+                                        f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f})")
 
-                    bone.rotation_mode = 'QUATERNION'
-                    bone.rotation_quaternion = compute_fk_rotation(bone, target_dir)
-                    bone.keyframe_insert(data_path="rotation_quaternion")
+                        # Forearm second (uses upper_arm's computed matrix)
+                        fa_mapping = V2R_MAPPING.get(fa_name)
+                        if fa_bone and fa_mapping:
+                            p_start = get_landmark(landmarks_3d, fa_mapping[0])
+                            p_end = get_landmark(landmarks_3d, fa_mapping[1])
+                            if p_start is not None and p_end is not None:
+                                target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
+                                fa_bone.rotation_mode = 'QUATERNION'
+                                fa_bone.rotation_quaternion = compute_fk_rotation(
+                                    fa_bone, target_dir, ua_expected_matrix)
+                                fa_bone.keyframe_insert(data_path="rotation_quaternion")
 
-                    if hybrid_mode and is_arm_bone and frame_idx % log_every == 0:
-                        DiagLog.data(f"  arm_fk.{bone_name}",
-                            f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f})")
+                                if frame_idx % log_every == 0:
+                                    DiagLog.data(f"  arm_fk.{fa_name}",
+                                        f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f})")
+                else:
+                    # Pure FK: process all limb bones (legs + arms)
+                    # Process in parent→child order within each chain
+                    fk_chain_order = [
+                        "upper_arm_fk.L", "forearm_fk.L",
+                        "upper_arm_fk.R", "forearm_fk.R",
+                        "thigh_fk.L", "shin_fk.L", "foot_fk.L",
+                        "thigh_fk.R", "shin_fk.R", "foot_fk.R",
+                    ]
+                    prev_parent_matrix = {}
+                    for bone_name in fk_chain_order:
+                        mapping = V2R_MAPPING.get(bone_name)
+                        if not mapping:
+                            continue
+                        bone = rig.pose.bones.get(bone_name)
+                        if not bone:
+                            continue
+                        p_start = get_landmark(landmarks_3d, mapping[0])
+                        p_end = get_landmark(landmarks_3d, mapping[1])
+                        if p_start is None or p_end is None:
+                            continue
+
+                        target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
+                        # Use manually tracked parent matrix if available,
+                        # otherwise 'auto' (depsgraph was flushed above)
+                        parent_override = prev_parent_matrix.get(bone_name, 'auto')
+                        bone.rotation_mode = 'QUATERNION'
+                        rot = compute_fk_rotation(bone, target_dir, parent_override)
+                        bone.rotation_quaternion = rot
+                        bone.keyframe_insert(data_path="rotation_quaternion")
+
+                        # Track this bone's expected matrix for its children
+                        if bone.parent:
+                            p_mat = prev_parent_matrix.get(bone_name, bone.parent.matrix)
+                            rest_off = bone.parent.bone.matrix_local.inverted() @ bone.bone.matrix_local
+                        else:
+                            p_mat = Matrix.Identity(4)
+                            rest_off = bone.bone.matrix_local
+                        expected = p_mat @ rest_off @ rot.to_matrix().to_4x4()
+
+                        # Map children: forearm's parent_override key is forearm_fk.X
+                        child_map = {
+                            "upper_arm_fk.L": "forearm_fk.L",
+                            "upper_arm_fk.R": "forearm_fk.R",
+                            "thigh_fk.L": "shin_fk.L",
+                            "thigh_fk.R": "shin_fk.R",
+                            "shin_fk.L": "foot_fk.L",
+                            "shin_fk.R": "foot_fk.R",
+                        }
+                        child = child_map.get(bone_name)
+                        if child:
+                            prev_parent_matrix[child] = expected
 
                 # --- Fingers (wholebody data, uses simple FK) ---
                 if finger_data_available and self.use_fingers:
@@ -1361,8 +1463,22 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                     f"Capture or retargeting error!")
 
                 for bone_name, landmark_idx in IK_TARGETS.items():
-                    # Hybrid mode: skip arm IK targets (arms use FK)
+                    # Hybrid mode: snap hand_ik to wrist position (visual cleanup)
+                    # The IK chain doesn't drive the mesh (IK_FK=1.0), but stale
+                    # hand_ik positions look confusing in the viewport.
                     if hybrid_mode and "hand" in bone_name:
+                        hik_bone = rig.pose.bones.get(bone_name)
+                        if hik_bone:
+                            side = "L" if ".L" in bone_name else "R"
+                            fa_name = f"forearm_fk.{side}"
+                            fa_bone = rig.pose.bones.get(fa_name)
+                            if fa_bone:
+                                # Snap hand_ik to forearm tail (wrist) position
+                                # fa_bone.tail is in armature space after depsgraph update
+                                wrist_armature = fa_bone.tail
+                                wrist_world = rig.matrix_world @ Vector((wrist_armature.x, wrist_armature.y, wrist_armature.z))
+                                set_bone_world_position(rig, hik_bone, wrist_world)
+                                hik_bone.keyframe_insert(data_path="location")
                         continue
 
                     bone = rig.pose.bones.get(bone_name)
