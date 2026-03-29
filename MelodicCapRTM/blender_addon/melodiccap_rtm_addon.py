@@ -1,5 +1,5 @@
 """
-MelodicCap RTM Blender Addon v3.4
+MelodicCap RTM Blender Addon v3.5
 ===================================
 Imports JSON motion capture data and retargets to JaxRigify armature.
 
@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (3, 4),
+    "version": (3, 5),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -1062,6 +1062,10 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         foot_diag = {"L": [], "R": []}
         # Arm diagnostics: collect per-frame ratios for summary
         arm_ratios = {"L": [], "R": []}
+        # Arm velocity clamp: track previous hand IK positions to reject spikes
+        prev_hand_pos = {"L": None, "R": None}
+        ARM_MAX_SPEED = 8.0  # m/s — fast arm swing is ~6 m/s, reject above this
+        ARM_MIN_RATIO = 0.55  # minimum arm reach ratio — prevents extreme chicken-wing
 
         DiagLog.section("PROCESSING FRAMES")
         log_every = max(1, len(frames) // 10)
@@ -1332,25 +1336,52 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
                     if "hand" in bone_name:
                         # Arms: compute wrist target relative to the rig's ACTUAL
-                        # evaluated shoulder position. Previous approaches computed
-                        # the target from mocap coordinates with scaling, but the
-                        # rig's shoulder ends up at a different position due to spine
-                        # curvature and height scaling. This mismatch shortened the
-                        # effective arm reach, causing permanent elbow bending.
+                        # evaluated shoulder position.
                         side = "L" if ".L" in bone_name else "R"
                         rig_sh = rig_shoulder_L if side == "L" else rig_shoulder_R
                         mocap_sh = p_shoulder_l if side == "L" else p_shoulder_r
                         if rig_sh and mocap_sh:
                             arm_vec = pos - mocap_sh
                             pos_scaled = rig_sh + arm_vec * chain_scale
-                            # Collect arm ratio for summary diagnostics
+
+                            # Arm velocity clamp: reject frame-to-frame spikes
+                            # (e.g. triangulation glitches where arm teleports)
+                            dt = timestamp - prev_timestamp if prev_timestamp > 0 else 0.033
+                            if prev_hand_pos[side] is not None and dt > 0:
+                                hand_dist = (pos_scaled - prev_hand_pos[side]).length
+                                hand_speed = hand_dist / dt
+                                if hand_speed > ARM_MAX_SPEED:
+                                    # Reject: keep previous position
+                                    pos_scaled = prev_hand_pos[side].copy()
+                                    if frame_idx % log_every == 0:
+                                        DiagLog.info(f"  !! ARM {side} velocity clamp f{frame_idx}: {hand_speed:.1f} m/s > {ARM_MAX_SPEED}")
+
+                            # Arm ratio minimum clamp: prevent extreme chicken-wing
+                            # When wrist is too close to shoulder (bent arms while
+                            # sitting), the IK solver bends the elbow sideways.
+                            # Clamp outward along the arm direction to keep elbow
+                            # in a natural forward-bent pose.
                             arm_len = rig_props.get(f'arm.{side}', 0)
                             if arm_len > 0:
+                                target_dist = (pos_scaled - rig_sh).length
+                                ratio = target_dist / arm_len
+                                if ratio < ARM_MIN_RATIO:
+                                    # Push target outward along arm direction
+                                    arm_dir = (pos_scaled - rig_sh)
+                                    if arm_dir.length > 0.001:
+                                        arm_dir = arm_dir.normalized()
+                                    else:
+                                        arm_dir = Vector((0, -1, 0))  # fallback: forward
+                                    pos_scaled = rig_sh + arm_dir * (arm_len * ARM_MIN_RATIO)
+                                    ratio = ARM_MIN_RATIO
+
                                 arm_ratios[side].append({
                                     'frame': frame_idx,
-                                    'ratio': (pos_scaled - rig_sh).length / arm_len,
+                                    'ratio': ratio,
                                     'mocap_dist': arm_vec.length,
                                 })
+
+                            prev_hand_pos[side] = pos_scaled.copy()
                         else:
                             pos = scale_position(pos, hip_center, chain_scale)
                             pos_scaled = pos.copy()
@@ -1540,7 +1571,25 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         p_mid_s = scale_position(p_mid, hip_center, cs)
                         p_end_s = scale_position(p_end, hip_center, cs)
 
-                    pole_pos = compute_pole_position(p_root_s, p_mid_s, p_end_s)
+                    # Increase pole offset for bent arms — when ratio is low
+                    # the elbow is close to the shoulder-wrist line and a small
+                    # offset lets the IK solver pick a random bend direction.
+                    # Larger offset forces the elbow forward more aggressively.
+                    if is_arm:
+                        arm_side = "L" if ".L" in bone_name else "R"
+                        a_len = rig_props.get(f'arm.{arm_side}', 0)
+                        a_sh = rig_shoulder_L if arm_side == "L" else rig_shoulder_R
+                        a_hand = prev_hand_pos.get(arm_side)
+                        if a_len > 0 and a_sh and a_hand:
+                            a_ratio = (a_hand - a_sh).length / a_len
+                            # Scale offset: 0.3 at ratio=1.0, up to 0.6 at ratio=0.55
+                            pole_offset = 0.3 + max(0, (1.0 - a_ratio)) * 0.7
+                        else:
+                            pole_offset = 0.3
+                    else:
+                        pole_offset = 0.3
+
+                    pole_pos = compute_pole_position(p_root_s, p_mid_s, p_end_s, offset=pole_offset)
 
                     if not (is_arm and (rig_shoulder_L or rig_shoulder_R)):
                         # Only apply height/XY offset for non-arm poles (legs).
@@ -1570,21 +1619,16 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
             r_max = max(ratios)
             r_avg = sum(ratios) / len(ratios)
             bad_frames = sum(1 for r in ratios if r < 0.7)
-            very_bad = sum(1 for r in ratios if r < 0.5)
+            clamped_frames = sum(1 for r in ratios if abs(r - ARM_MIN_RATIO) < 0.001)
             DiagLog.info(f"  arm.{side_label}:")
             DiagLog.data(f"    Ratio range", f"{r_min:.3f} to {r_max:.3f} (avg={r_avg:.3f})")
             DiagLog.data(f"    Frames <0.7 ratio", f"{bad_frames}/{len(entries)} ({100*bad_frames/len(entries):.0f}%)")
-            DiagLog.data(f"    Frames <0.5 ratio", f"{very_bad}/{len(entries)} ({100*very_bad/len(entries):.0f}%)")
+            DiagLog.data(f"    Frames clamped at {ARM_MIN_RATIO}", f"{clamped_frames}/{len(entries)} ({100*clamped_frames/len(entries):.0f}%)")
             if bad_frames > 0:
-                # Find first frame where ratio drops below 0.7
                 first_bad = next(e for e in entries if e['ratio'] < 0.7)
                 DiagLog.data(f"    First bad frame", f"{first_bad['frame']} (ratio={first_bad['ratio']:.3f})")
-                # Worst frame
                 worst = min(entries, key=lambda e: e['ratio'])
                 DiagLog.data(f"    Worst frame", f"{worst['frame']} (ratio={worst['ratio']:.3f})")
-                DiagLog.info(f"    !! {bad_frames} frames have arm ratio <0.7. "
-                    f"Likely causes: spine FK too simple for pose, "
-                    f"torso pitch not applied, or capture quality degraded.")
             # Show ratio progression (sample 10 evenly spaced)
             sample_count = min(10, len(entries))
             step = max(1, len(entries) // sample_count)
