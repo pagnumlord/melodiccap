@@ -37,6 +37,17 @@ class OfflineConfig:
         self.KALMAN_PROCESS_NOISE = kalman_process
         self.KALMAN_MEASUREMENT_NOISE = kalman_measure
 
+        # ChArUco board config — required by StereoCalibration.__init__
+        # but not used during offline triangulation
+        import cv2
+        self.ARUCO_DICT = cv2.aruco.DICT_4X4_50
+        self.CHARUCO_SQUARES_X = 10
+        self.CHARUCO_SQUARES_Y = 5
+        self.CHARUCO_SQUARE_SIZE = 0.04286
+        self.CHARUCO_MARKER_SIZE = 0.03016
+        self.FRAME_WIDTH = 1280
+        self.FRAME_HEIGHT = 720
+
 
 def process_take(raw_path, calibration_path, smooth=True,
                  min_conf=0.3, skip_face_hands=True,
