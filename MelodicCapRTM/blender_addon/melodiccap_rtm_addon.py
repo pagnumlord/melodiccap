@@ -1140,12 +1140,17 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
             # When hip drops >15cm from frame 0, we're sitting/crouching.
             # Switch legs from IK (foot-anchored) to FK (rotation-based)
             # and disable foot pinning which makes no sense seated.
-            SIT_THRESHOLD = -0.15  # meters below frame-0 hip
-            is_sitting = False
+            SIT_THRESHOLD = -0.15  # meters below frame-0 hip → sit
+            STAND_THRESHOLD = -0.10  # meters below frame-0 hip → stand (hysteresis)
+            is_sitting = mocap_props.get('_prev_sitting', False)
             mocap_hip_f0 = mocap_props.get('hip_pos')
             if hip_center and mocap_hip_f0:
                 hip_dz = hip_center.z - mocap_hip_f0.z
-                is_sitting = hip_dz < SIT_THRESHOLD
+                # Hysteresis: must cross a different threshold to change state
+                if is_sitting:
+                    is_sitting = hip_dz < STAND_THRESHOLD  # must rise above -0.10 to stand
+                else:
+                    is_sitting = hip_dz < SIT_THRESHOLD    # must drop below -0.15 to sit
 
                 # Update IK_FK sliders for legs when sit state changes
                 if is_sitting != mocap_props.get('_prev_sitting', False):
