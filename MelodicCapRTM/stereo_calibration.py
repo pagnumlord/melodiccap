@@ -539,10 +539,16 @@ class StereoCalibration:
         Compute reprojection error: project 3D points back to both cameras
         and measure pixel distance from original detections.
 
+        Points from triangulatePoints(P1, P2) are in the rectified coordinate
+        system. To reproject back to original pixel space:
+        1. Un-rectify: transform from rectified frame back to original camera A
+        2. Project to camera A with K1/D1
+        3. Transform to camera B with R/T, project with K2/D2
+
         Args:
             pts_2d_a: Nx2 original pixel coords from camera A
             pts_2d_b: Nx2 original pixel coords from camera B
-            pts_3d_cv: Nx3 points in OpenCV space (before Blender conversion)
+            pts_3d_cv: Nx3 points in rectified OpenCV space
 
         Returns:
             (mean_error_a, mean_error_b, max_error) in pixels
@@ -550,17 +556,22 @@ class StereoCalibration:
         if len(pts_3d_cv) == 0:
             return 0.0, 0.0, 0.0
 
-        pts_3d = np.array(pts_3d_cv, dtype=np.float64)
+        pts_3d_rect = np.array(pts_3d_cv, dtype=np.float64)
 
-        # Project to camera A (identity R, zero T since points are in camera A frame)
+        # Un-rectify: transform from rectified frame to original camera A frame
+        # Rectified = R1 @ Original_A, so Original_A = R1^T @ Rectified
+        R1_inv = self.R1.T
+        pts_3d_origA = (R1_inv @ pts_3d_rect.T).T
+
+        # Project to camera A (identity R, zero T — points are now in camera A frame)
         rvec_a = np.zeros(3)
         tvec_a = np.zeros(3)
-        proj_a, _ = cv2.projectPoints(pts_3d, rvec_a, tvec_a, self.K1, self.D1)
+        proj_a, _ = cv2.projectPoints(pts_3d_origA, rvec_a, tvec_a, self.K1, self.D1)
         proj_a = proj_a.reshape(-1, 2)
 
-        # Project to camera B
+        # Project to camera B: transform from camera A to camera B
         rvec_b, _ = cv2.Rodrigues(self.R)
-        proj_b, _ = cv2.projectPoints(pts_3d, rvec_b, self.T, self.K2, self.D2)
+        proj_b, _ = cv2.projectPoints(pts_3d_origA, rvec_b, self.T, self.K2, self.D2)
         proj_b = proj_b.reshape(-1, 2)
 
         err_a = np.linalg.norm(proj_a - np.array(pts_2d_a).reshape(-1, 2), axis=1)
