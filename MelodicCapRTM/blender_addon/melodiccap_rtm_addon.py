@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (4, 1),
+    "version": (4, 2),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -1135,6 +1135,31 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         DiagLog.data("  hip_dz_from_f0", f"{dz:+.3f}m")
 
             # =====================
+            # SIT / STAND DETECTION
+            # =====================
+            # When hip drops >15cm from frame 0, we're sitting/crouching.
+            # Switch legs from IK (foot-anchored) to FK (rotation-based)
+            # and disable foot pinning which makes no sense seated.
+            SIT_THRESHOLD = -0.15  # meters below frame-0 hip
+            is_sitting = False
+            mocap_hip_f0 = mocap_props.get('hip_pos')
+            if hip_center and mocap_hip_f0:
+                hip_dz = hip_center.z - mocap_hip_f0.z
+                is_sitting = hip_dz < SIT_THRESHOLD
+
+                # Update IK_FK sliders for legs when sit state changes
+                if is_sitting != mocap_props.get('_prev_sitting', False):
+                    for ikfk_bone in ik_fk_bones:
+                        is_leg = "thigh" in ikfk_bone.name.lower()
+                        if is_leg:
+                            # Sitting: legs → FK (1.0). Standing: legs → IK (0.0)
+                            ikfk_bone["IK_FK"] = 1.0 if is_sitting else 0.0
+                            ikfk_bone.keyframe_insert(data_path='["IK_FK"]', frame=frame_num)
+                    if frame_idx % log_every == 0 or is_sitting != mocap_props.get('_prev_sitting', False):
+                        DiagLog.info(f"  SIT DETECT: {'SITTING' if is_sitting else 'STANDING'} (hip_dz={hip_dz:+.3f}m)")
+                    mocap_props['_prev_sitting'] = is_sitting
+
+            # =====================
             # ROOT / TORSO POSITION (scaled)
             # =====================
             torso = rig.pose.bones.get("torso")
@@ -1153,9 +1178,10 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                 torso.keyframe_insert(data_path="location")
 
             # =====================
-            # TORSO ROTATION (yaw-only from shoulder + hip lines)
-            # Pitch/roll is handled by spine FK chain — applying it here
-            # too would double the forward lean and collapse the skeleton.
+            # TORSO ROTATION (yaw + pitch from shoulder/hip lines)
+            # Yaw: body facing direction from averaged shoulder+hip lines
+            # Pitch: forward lean from spine vector (hip_mid → shoulder_mid)
+            # Spine FK chain handles RESIDUAL curvature on top of this.
             # =====================
             if torso:
                 p_ls = get_landmark(landmarks_3d, LM.LEFT_SHOULDER)
@@ -1164,30 +1190,49 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                 p_rh = get_landmark(landmarks_3d, LM.RIGHT_HIP)
 
                 if p_ls and p_rs and p_lh and p_rh:
-                    # Average shoulder and hip lines for overall body facing
+                    # --- YAW (Z rotation): body facing direction ---
                     shoulder_vec = (p_ls - p_rs)
                     hip_vec = (p_lh - p_rh)
                     body_right = ((shoulder_vec + hip_vec) / 2)
                     body_right.z = 0  # Project to ground plane
 
+                    yaw_angle = 0.0
                     if body_right.length > 0.01:
                         body_right = body_right.normalized()
-                        # Body "right" in Blender: rig faces -Y, so right = +X
-                        # Rotation angle = angle between body_right and +X axis
-                        angle = math.atan2(-body_right.y, body_right.x)
+                        yaw_angle = math.atan2(-body_right.y, body_right.x)
 
-                        # Apply as Z rotation on torso
-                        torso.rotation_mode = 'QUATERNION'
-                        torso.rotation_quaternion = Quaternion((0, 0, 1), angle)
-                        torso.keyframe_insert(data_path="rotation_quaternion")
+                    # --- PITCH (X rotation): forward/backward lean ---
+                    # Measure spine tilt: angle between hip→shoulder and vertical
+                    # Subtract frame-0 tilt so standing = 0° pitch
+                    pitch_angle = 0.0
+                    shoulder_mid = spine_points.get('shoulder_mid')
+                    hip_mid_sp = spine_points.get('hip_mid')
+                    if shoulder_mid and hip_mid_sp:
+                        spine_v = shoulder_mid - hip_mid_sp
+                        if spine_v.length > 0.01:
+                            # Pitch = angle from vertical in the sagittal plane
+                            # Convert spine vector to armature space for correct plane
+                            spine_arm = armature_inv_33 @ spine_v
+                            # Pitch is rotation around X axis (forward lean = -Y in Blender)
+                            pitch_from_vert = math.atan2(-spine_arm.y, spine_arm.z)
 
-                        if frame_idx % log_every == 0:
-                            DiagLog.data("  torso_yaw", f"{math.degrees(angle):.1f}°")
-                            # Log torso pitch for diagnostics (handled by spine FK chain)
-                            spine_v = spine_points.get('shoulder_mid', Vector()) - spine_points.get('hip_mid', Vector())
-                            if spine_v.length > 0.01:
-                                pitch_angle = math.degrees(math.acos(max(-1, min(1, spine_v.normalized().z))))
-                                DiagLog.data("  torso_pitch_via_spine", f"{pitch_angle:.1f}° from vertical (applied via spine FK chain)")
+                            # Subtract rest pitch (frame 0 lean) so A-pose = zero
+                            if 'torso_rest_pitch' not in mocap_props:
+                                mocap_props['torso_rest_pitch'] = pitch_from_vert
+                            pitch_angle = pitch_from_vert - mocap_props['torso_rest_pitch']
+
+                    # Combine yaw + pitch as quaternion
+                    # Order: yaw (Z) then pitch (X) — yaw first so pitch
+                    # is applied in the rotated body frame
+                    torso.rotation_mode = 'QUATERNION'
+                    q_yaw = Quaternion((0, 0, 1), yaw_angle)
+                    q_pitch = Quaternion((1, 0, 0), pitch_angle)
+                    torso.rotation_quaternion = q_yaw @ q_pitch
+                    torso.keyframe_insert(data_path="rotation_quaternion")
+
+                    if frame_idx % log_every == 0:
+                        DiagLog.data("  torso_yaw", f"{math.degrees(yaw_angle):.1f}°")
+                        DiagLog.data("  torso_pitch", f"{math.degrees(pitch_angle):.1f}° (from vertical, rest-subtracted)")
 
             # =====================
             # FK ROTATIONS
@@ -1276,16 +1321,20 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
                 # --- Limb FK ---
                 # Full FK mode: apply all limb bones
-                # Hybrid mode (arm_fk + use_ik): only apply arm FK bones
-                # Pure IK mode: skip all limb FK
-                arm_fk_bones = {
-                    "upper_arm_fk.L", "forearm_fk.L",
-                    "upper_arm_fk.R", "forearm_fk.R",
+                # Hybrid mode (arm_fk + use_ik): arm FK always, leg FK when sitting
+                # Pure IK mode: skip all limb FK (unless sitting)
+                leg_fk_bones = {
+                    "thigh_fk.L", "shin_fk.L", "foot_fk.L",
+                    "thigh_fk.R", "shin_fk.R", "foot_fk.R",
                 }
 
-                if self.use_ik and not hybrid_mode:
-                    pass  # pure IK, no FK limbs
-                elif hybrid_mode:
+                # Determine which FK bones to process this frame
+                do_arm_fk = hybrid_mode or (self.use_fk and not self.use_ik)
+                do_leg_fk = is_sitting or (self.use_fk and not self.use_ik)
+
+                if not do_arm_fk and not do_leg_fk:
+                    pass  # pure IK + standing, no FK limbs
+                elif hybrid_mode or (do_arm_fk and not do_leg_fk):
                     # Hybrid: process arm FK bones in parent→child order
                     # so we can pass upper_arm's computed matrix to forearm
                     for side in ["L", "R"]:
@@ -1336,6 +1385,79 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 if frame_idx % log_every == 0:
                                     DiagLog.data(f"  arm_fk.{fa_name}",
                                         f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f})")
+
+                    # Leg FK when sitting (parent→child: thigh → shin → foot)
+                    if do_leg_fk:
+                        for side in ["L", "R"]:
+                            leg_chain = [
+                                f"thigh_fk.{side}",
+                                f"shin_fk.{side}",
+                                f"foot_fk.{side}",
+                            ]
+                            prev_expected = None
+                            for bone_name in leg_chain:
+                                mapping = V2R_MAPPING.get(bone_name)
+                                if not mapping:
+                                    continue
+                                bone = rig.pose.bones.get(bone_name)
+                                if not bone:
+                                    continue
+                                p_start = get_landmark(landmarks_3d, mapping[0])
+                                p_end = get_landmark(landmarks_3d, mapping[1])
+                                if p_start is None or p_end is None:
+                                    continue
+                                target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
+                                # Use tracked parent matrix or 'auto' (depsgraph flushed)
+                                parent_ovr = prev_expected if prev_expected is not None else 'auto'
+                                bone.rotation_mode = 'QUATERNION'
+                                rot = compute_fk_rotation(bone, target_dir, parent_ovr)
+                                bone.rotation_quaternion = rot
+                                bone.keyframe_insert(data_path="rotation_quaternion")
+                                # Track expected matrix for next child in chain
+                                if bone.parent:
+                                    p_mat = prev_expected if prev_expected is not None else bone.parent.matrix
+                                    rest_off = bone.parent.bone.matrix_local.inverted() @ bone.bone.matrix_local
+                                else:
+                                    p_mat = Matrix.Identity(4)
+                                    rest_off = bone.bone.matrix_local
+                                prev_expected = p_mat @ rest_off @ rot.to_matrix().to_4x4()
+
+                            if frame_idx % log_every == 0:
+                                DiagLog.data(f"  leg_fk.{side}", "sitting FK active")
+
+                elif do_leg_fk and not do_arm_fk:
+                    # Sitting with pure IK arms — only process leg FK
+                    for side in ["L", "R"]:
+                        leg_chain = [
+                            f"thigh_fk.{side}",
+                            f"shin_fk.{side}",
+                            f"foot_fk.{side}",
+                        ]
+                        prev_expected = None
+                        for bone_name in leg_chain:
+                            mapping = V2R_MAPPING.get(bone_name)
+                            if not mapping:
+                                continue
+                            bone = rig.pose.bones.get(bone_name)
+                            if not bone:
+                                continue
+                            p_start = get_landmark(landmarks_3d, mapping[0])
+                            p_end = get_landmark(landmarks_3d, mapping[1])
+                            if p_start is None or p_end is None:
+                                continue
+                            target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
+                            parent_ovr = prev_expected if prev_expected is not None else 'auto'
+                            bone.rotation_mode = 'QUATERNION'
+                            rot = compute_fk_rotation(bone, target_dir, parent_ovr)
+                            bone.rotation_quaternion = rot
+                            bone.keyframe_insert(data_path="rotation_quaternion")
+                            if bone.parent:
+                                p_mat = prev_expected if prev_expected is not None else bone.parent.matrix
+                                rest_off = bone.parent.bone.matrix_local.inverted() @ bone.bone.matrix_local
+                            else:
+                                p_mat = Matrix.Identity(4)
+                                rest_off = bone.bone.matrix_local
+                            prev_expected = p_mat @ rest_off @ rot.to_matrix().to_4x4()
                 else:
                     # Pure FK: process all limb bones (legs + arms)
                     # Process in parent→child order within each chain
@@ -1463,6 +1585,10 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                     f"Capture or retargeting error!")
 
                 for bone_name, landmark_idx in IK_TARGETS.items():
+                    # Sitting: skip foot IK targets (legs use FK)
+                    if is_sitting and "foot" in bone_name:
+                        continue
+
                     # Hybrid mode: snap hand_ik to wrist position (visual cleanup)
                     # The IK chain doesn't drive the mesh (IK_FK=1.0), but stale
                     # hand_ik positions look confusing in the viewport.
@@ -1694,6 +1820,9 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                 for bone_name, (root_idx, mid_idx, end_idx) in POLE_TARGETS.items():
                     # Hybrid mode: skip arm pole targets (arms use FK)
                     if hybrid_mode and 'arm' in bone_name:
+                        continue
+                    # Sitting: skip leg pole targets (legs use FK)
+                    if is_sitting and 'thigh' in bone_name:
                         continue
 
                     bone = rig.pose.bones.get(bone_name)

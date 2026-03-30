@@ -64,6 +64,10 @@ class StereoCalibration:
         # Floor calibration
         self.floor_z_offset = 0.0
 
+        # Reprojection error from last triangulate_pose() call
+        # (mean_err_cam_a, mean_err_cam_b, max_err) in pixels
+        self.last_reproj_error = (0.0, 0.0, 0.0)
+
         # Kalman filters for each landmark
         self.filters = {}
 
@@ -359,7 +363,7 @@ class StereoCalibration:
                 cur_obj, cur_img_a, cur_img_b,
                 K1, D1, K2, D2, img_size,
                 criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 300, 1e-7),
-                flags=cv2.CALIB_USE_INTRINSIC_GUESS
+                flags=cv2.CALIB_FIX_INTRINSIC
             )
             print(f"    Stereo RMS: {ret_stereo:.4f}")
 
@@ -528,6 +532,40 @@ class StereoCalibration:
 
         return blender_points
 
+    def compute_reprojection_error(self, pts_2d_a, pts_2d_b, pts_3d_cv):
+        """
+        Compute reprojection error: project 3D points back to both cameras
+        and measure pixel distance from original detections.
+
+        Args:
+            pts_2d_a: Nx2 original pixel coords from camera A
+            pts_2d_b: Nx2 original pixel coords from camera B
+            pts_3d_cv: Nx3 points in OpenCV space (before Blender conversion)
+
+        Returns:
+            (mean_error_a, mean_error_b, max_error) in pixels
+        """
+        if len(pts_3d_cv) == 0:
+            return 0.0, 0.0, 0.0
+
+        pts_3d = np.array(pts_3d_cv, dtype=np.float64)
+
+        # Project to camera A (identity R, zero T since points are in camera A frame)
+        rvec_a = np.zeros(3)
+        tvec_a = np.zeros(3)
+        proj_a, _ = cv2.projectPoints(pts_3d, rvec_a, tvec_a, self.K1, self.D1)
+        proj_a = proj_a.reshape(-1, 2)
+
+        # Project to camera B
+        rvec_b, _ = cv2.Rodrigues(self.R)
+        proj_b, _ = cv2.projectPoints(pts_3d, rvec_b, self.T, self.K2, self.D2)
+        proj_b = proj_b.reshape(-1, 2)
+
+        err_a = np.linalg.norm(proj_a - np.array(pts_2d_a).reshape(-1, 2), axis=1)
+        err_b = np.linalg.norm(proj_b - np.array(pts_2d_b).reshape(-1, 2), axis=1)
+
+        return float(np.mean(err_a)), float(np.mean(err_b)), float(max(np.max(err_a), np.max(err_b)))
+
     def triangulate_pose(self, detections_a, detections_b, smooth=True):
         """
         Triangulate 3D pose from two sets of 2D detections.
@@ -557,6 +595,9 @@ class StereoCalibration:
 
         # First pass: triangulate all valid keypoints
         raw_points = {}
+        _reproj_2d_a = []
+        _reproj_2d_b = []
+        _reproj_3d_cv = []
         for idx in common_indices:
             px_a, py_a, conf_a = detections_a[idx]
             px_b, py_b, conf_b = detections_b[idx]
@@ -569,6 +610,12 @@ class StereoCalibration:
             result = self.triangulate([[px_a, py_a]], [[px_b, py_b]])
             if result is not None:
                 raw_points[idx] = result[0].tolist()
+                # Collect for reprojection error (convert Blender back to CV)
+                bpt = result[0]
+                cv_pt = [bpt[0], -bpt[2] + self.floor_z_offset, bpt[1]]  # reverse Blender→CV
+                _reproj_2d_a.append([px_a, py_a])
+                _reproj_2d_b.append([px_b, py_b])
+                _reproj_3d_cv.append(cv_pt)
 
         # ── Outlier Rejection ─────────────────────────────────────
         # Compute body centroid from core keypoints (hips + shoulders)
@@ -676,6 +723,14 @@ class StereoCalibration:
 
         # Store for next frame's velocity check
         self._prev_points = dict(points_3d)
+
+        # Compute reprojection error for diagnostics
+        if _reproj_3d_cv:
+            self.last_reproj_error = self.compute_reprojection_error(
+                _reproj_2d_a, _reproj_2d_b, _reproj_3d_cv
+            )
+        else:
+            self.last_reproj_error = (0.0, 0.0, 0.0)
 
         return points_3d
 

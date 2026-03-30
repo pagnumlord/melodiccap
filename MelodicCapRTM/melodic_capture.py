@@ -615,7 +615,9 @@ class MelodicCapApp:
                 avg_infer = timing_accum['infer'] / n * 1000
                 avg_tri = timing_accum['tri'] / n * 1000
                 avg_total = timing_accum['total'] / n * 1000
-                print(f"[TIMING] {display_fps:.1f} fps | cam:{avg_cam:.0f}ms infer:{avg_infer:.0f}ms tri:{avg_tri:.0f}ms total:{avg_total:.0f}ms")
+                reproj = self.calibration.last_reproj_error
+                reproj_str = f" reproj:{reproj[0]:.1f}/{reproj[1]:.1f}px" if reproj[2] > 0 else ""
+                print(f"[TIMING] {display_fps:.1f} fps | cam:{avg_cam:.0f}ms infer:{avg_infer:.0f}ms tri:{avg_tri:.0f}ms total:{avg_total:.0f}ms{reproj_str}")
                 frame_count = 0
                 fps_timer = time.time()
                 timing_accum = {'cam': 0, 'infer': 0, 'tri': 0, 'total': 0, 'count': 0}
