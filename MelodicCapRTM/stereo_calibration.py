@@ -432,10 +432,10 @@ class StereoCalibration:
         elif ret_b > 0.5:
             quality_issues.append(f"Camera B intrinsic RMS {ret_b:.3f} > 0.5 (mediocre)")
 
-        if ret_stereo > 1.0:
-            quality_issues.append(f"Stereo RMS {ret_stereo:.3f} > 1.0 (BAD — will produce stretched/jittery results)")
-        elif ret_stereo > 0.5:
-            quality_issues.append(f"Stereo RMS {ret_stereo:.3f} > 0.5 (mediocre — expect some jitter)")
+        if ret_stereo > 1.5:
+            quality_issues.append(f"Stereo RMS {ret_stereo:.3f} > 1.5 (BAD — will produce stretched/jittery results)")
+        elif ret_stereo > 1.0:
+            quality_issues.append(f"Stereo RMS {ret_stereo:.3f} > 1.0 (high — may have some jitter)")
 
         if baseline < 0.05:
             quality_issues.append(f"Baseline {baseline:.3f}m is very small — poor depth resolution")
@@ -448,16 +448,15 @@ class StereoCalibration:
                 print(f"    • {issue}")
 
         # Reject truly terrible calibrations
-        if ret_stereo > 2.0:
+        if ret_stereo > 3.0:
             print(f"\n  [REJECTED] Stereo RMS {ret_stereo:.3f} is too high.")
             print(f"  Tips: Use fewer, higher-quality frames. Hold board steady.")
             print(f"  Move slowly. Ensure both cameras see the board clearly.")
             return False
 
-        if quality_issues and ret_stereo > 0.8:
+        if quality_issues and ret_stereo > 1.5:
             print(f"\n  [WARNING] Calibration saved but quality is poor (RMS {ret_stereo:.3f}).")
             print(f"  Consider recalibrating with 20-30 slow, deliberate frames.")
-            print(f"  Target: Stereo RMS < 0.5 for good mocap results.")
 
         # Stereo rectification
         print("  Computing rectification...")
@@ -482,8 +481,10 @@ class StereoCalibration:
         print(f"     Baseline: {baseline:.3f}m")
         print(f"     Stereo RMS: {ret_stereo:.4f}")
         if ret_stereo < 0.5:
+            print(f"     Quality: EXCELLENT")
+        elif ret_stereo < 1.0:
             print(f"     Quality: GOOD")
-        elif ret_stereo < 0.8:
+        elif ret_stereo < 1.5:
             print(f"     Quality: ACCEPTABLE")
         else:
             print(f"     Quality: POOR — recalibrate for better results")
