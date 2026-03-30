@@ -133,6 +133,8 @@ class StereoCalibration:
             self.K2 = np.array(data['K2'])
             self.D1 = np.array(data['D1'])
             self.D2 = np.array(data['D2'])
+            self.R = np.array(data['R']) if data.get('R') is not None else np.eye(3)
+            self.T = np.array(data['T']) if data.get('T') is not None else np.zeros((3, 1))
             self.R1 = np.array(data.get('R1', np.eye(3).tolist()))
             self.R2 = np.array(data.get('R2', np.eye(3).tolist()))
             self.P1 = np.array(data['P1'])
