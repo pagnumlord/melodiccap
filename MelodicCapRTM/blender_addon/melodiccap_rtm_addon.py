@@ -1,5 +1,5 @@
 """
-MelodicCap RTM Blender Addon v4.0
+MelodicCap RTM Blender Addon v4.3
 ===================================
 Imports JSON motion capture data and retargets to JaxRigify armature.
 
@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (4, 2),
+    "version": (4, 3),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -869,8 +869,8 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
     butter_cutoff_feet: bpy.props.FloatProperty(
         name="Feet Cutoff (Hz)",
-        description="Butterworth cutoff frequency for feet (lower = smoother)",
-        default=2.0,
+        description="Butterworth cutoff frequency for feet (lower = smoother, higher preserves foot lift during walking)",
+        default=3.5,
         min=0.5,
         max=8.0
     )
@@ -1070,6 +1070,12 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         pin_blend = {"L": 0.0, "R": 0.0}    # 0 = raw, 1 = fully pinned
         UNPIN_BLEND_FRAMES = 8  # frames to blend over when unpinning
         PIN_BLEND_FRAMES = 6    # frames to blend over when pinning (slightly faster)
+        # Walking-aware pinning: track hip position when foot was pinned
+        # If hip XY moves too far from the pin point, force-unpin (person walked away)
+        pin_hip_pos = {"L": None, "R": None}  # hip XY when foot was pinned
+        pin_frame_count = {"L": 0, "R": 0}    # frames since pin started
+        HIP_DRIFT_UNPIN = 0.25    # meters — if hip moves this far in XY, force unpin
+        MIN_PIN_FRAMES = 4        # minimum frames to stay pinned (prevent toggling)
 
         # Precompute ankle-to-ground offset from first N standing frames.
         # The mocap ankle keypoint is anatomically above the ground (~5-7cm).
@@ -1094,6 +1100,25 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                 foot_z_offset[side_key] = sum(z_samples) / len(z_samples)
         DiagLog.data("Foot Z offset L", f"{foot_z_offset['L']:.4f}m")
         DiagLog.data("Foot Z offset R", f"{foot_z_offset['R']:.4f}m")
+
+        # Arm splay bias correction: measure lateral arm direction from
+        # calibration frame A-pose and subtract it from all frames.
+        # In a clean A-pose, upper arms point straight down (X ≈ 0).
+        # Triangulation with 2 cameras at ~90° consistently places elbows
+        # too far from the body ("chicken wing"). We correct by removing
+        # the frame-0 lateral bias.
+        arm_splay_bias = {"L": 0.0, "R": 0.0}
+        cal_landmarks = first_landmarks  # already set from calibration frame
+        for side in ["L", "R"]:
+            ua_mapping = V2R_MAPPING.get(f"upper_arm_fk.{side}")
+            if ua_mapping:
+                p_sh = get_landmark(cal_landmarks, ua_mapping[0])
+                p_el = get_landmark(cal_landmarks, ua_mapping[1])
+                if p_sh is not None and p_el is not None:
+                    cal_dir = (armature_inv_33 @ (p_el - p_sh)).normalized()
+                    arm_splay_bias[side] = cal_dir.x
+        DiagLog.data("Arm splay bias L", f"{arm_splay_bias['L']:+.3f} (subtracted from upper_arm X)")
+        DiagLog.data("Arm splay bias R", f"{arm_splay_bias['R']:+.3f} (subtracted from upper_arm X)")
 
         # Foot diagnostics: collect per-frame data for analysis
         foot_diag = {"L": [], "R": []}
@@ -1235,6 +1260,9 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     torso.rotation_quaternion = q_yaw @ q_pitch
                     torso.keyframe_insert(data_path="rotation_quaternion")
 
+                    # Store torso yaw for head attenuation at large angles
+                    mocap_props['_current_torso_yaw'] = yaw_angle
+
                     if frame_idx % log_every == 0:
                         DiagLog.data("  torso_yaw", f"{math.degrees(yaw_angle):.1f}°")
                         DiagLog.data("  torso_pitch", f"{math.degrees(pitch_angle):.1f}° (from vertical, rest-subtracted)")
@@ -1279,11 +1307,29 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                 if p_lear and p_rear:
                     ear_mid = (p_lear + p_rear) / 2.0
 
+                    # Head/neck confidence: attenuate when turned sideways to cameras.
+                    # Ear keypoints become unreliable in profile view (one ear occluded).
+                    # Full confidence below 30° torso yaw, fades to 0 at 60°.
+                    torso_yaw_abs = abs(mocap_props.get('_current_torso_yaw', 0.0))
+                    HEAD_YAW_FULL = math.radians(30)   # full confidence below this
+                    HEAD_YAW_ZERO = math.radians(60)   # zero confidence above this
+                    if torso_yaw_abs <= HEAD_YAW_FULL:
+                        head_confidence = 1.0
+                    elif torso_yaw_abs >= HEAD_YAW_ZERO:
+                        head_confidence = 0.0
+                    else:
+                        t = (torso_yaw_abs - HEAD_YAW_FULL) / (HEAD_YAW_ZERO - HEAD_YAW_FULL)
+                        head_confidence = 1.0 - t * t * (3 - 2 * t)  # smoothstep fade
+
                     neck_bone = rig.pose.bones.get("neck")
                     if neck_bone and spine_points.get('shoulder_mid'):
                         neck_dir = (armature_inv_33 @ (ear_mid - spine_points['shoulder_mid'])).normalized()
                         neck_bone.rotation_mode = 'QUATERNION'
-                        neck_bone.rotation_quaternion = compute_fk_rotation(neck_bone, neck_dir)
+                        neck_rot = compute_fk_rotation(neck_bone, neck_dir)
+                        # Blend toward identity when confidence is low
+                        if head_confidence < 1.0:
+                            neck_rot = Quaternion().slerp(neck_rot, head_confidence)
+                        neck_bone.rotation_quaternion = neck_rot
                         neck_bone.keyframe_insert(data_path="rotation_quaternion")
 
                     # Head yaw + pitch: rotate head based on ear/nose keypoints
@@ -1301,6 +1347,8 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                             head_yaw = ear_angle - shoulder_angle
                             # Clamp to reasonable range (avoid wild rotations)
                             head_yaw = max(-0.7, min(0.7, head_yaw))
+                            # Attenuate when turned sideways
+                            head_yaw *= head_confidence
 
                             # Apply as rotation around bone's local Y axis (up)
                             # Head pitch is handled by neck FK (compute_fk_rotation
@@ -1312,11 +1360,11 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                             head_bone.keyframe_insert(data_path="rotation_quaternion")
 
                             if frame_idx % log_every == 0:
-                                DiagLog.data("  head_yaw", f"{math.degrees(head_yaw):.1f}° (ear_ang={math.degrees(ear_angle):.1f} - sh_ang={math.degrees(shoulder_angle):.1f})")
+                                DiagLog.data("  head_yaw", f"{math.degrees(head_yaw):.1f}° (ear_ang={math.degrees(ear_angle):.1f} - sh_ang={math.degrees(shoulder_angle):.1f}, conf={head_confidence:.2f})")
                                 # Log head pitch for diagnostics (handled by neck FK)
                                 nose_ear_vec = p_nose - ear_mid
                                 head_pitch = math.degrees(math.atan2(-nose_ear_vec.z, math.sqrt(nose_ear_vec.x**2 + nose_ear_vec.y**2)))
-                                DiagLog.data("  head_pitch_via_neck", f"{head_pitch:.1f}° (applied via neck FK)")
+                                DiagLog.data("  head_pitch_via_neck", f"{head_pitch:.1f}° (applied via neck FK, conf={head_confidence:.2f})")
 
                 # --- Flush depsgraph so parent matrices are current ---
                 # Spine/torso/neck/head rotations were set above. Without this
@@ -1356,6 +1404,11 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                             p_end = get_landmark(landmarks_3d, ua_mapping[1])
                             if p_start is not None and p_end is not None:
                                 target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
+
+                                # Subtract calibration-frame arm splay bias (chicken wing fix)
+                                target_dir.x -= arm_splay_bias[side]
+                                target_dir = target_dir.normalized()
+
                                 ua_bone.rotation_mode = 'QUATERNION'
                                 ua_rot = compute_fk_rotation(ua_bone, target_dir, 'auto')
                                 ua_bone.rotation_quaternion = ua_rot
@@ -1711,18 +1764,33 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         # Foot pinning with smooth blend transitions.
                         # Both pin-IN and unpin are blended over multiple frames
                         # to prevent visible snapping.
+                        # Walking-aware: force-unpin when hip drifts too far from
+                        # where the foot was pinned (person walked away).
                         foot_speed = 0.0
                         foot_pinned = False
-                        if self.pin_threshold > 0:
+                        if self.pin_threshold > 0 and not is_sitting:
                             near_floor = pos_scaled.z < self.foot_floor_height
                             dt = timestamp - prev_timestamp if prev_timestamp > 0 else 0.033
+
+                            # Check hip drift: if hip XY moved far from pin point, force unpin
+                            hip_drift_unpin = False
+                            if pinned_foot_pos[side] is not None and hip_center and pin_hip_pos[side] is not None:
+                                hip_dx = hip_center.x - pin_hip_pos[side].x
+                                hip_dy = hip_center.y - pin_hip_pos[side].y
+                                hip_drift = math.sqrt(hip_dx * hip_dx + hip_dy * hip_dy)
+                                if hip_drift > HIP_DRIFT_UNPIN and pin_frame_count[side] >= MIN_PIN_FRAMES:
+                                    hip_drift_unpin = True
 
                             if prev_foot_raw[side] is not None and dt > 0:
                                 dist = (pos_scaled - prev_foot_raw[side]).length
                                 foot_speed = dist / dt
 
-                                if foot_speed < self.pin_threshold and near_floor:
+                                want_pin = (foot_speed < self.pin_threshold and near_floor
+                                            and not hip_drift_unpin)
+
+                                if want_pin:
                                     # PINNING — foot should be on ground
+                                    pin_frame_count[side] += 1
                                     if unpin_blend[side] > 0:
                                         # Mid-unpin blend — let it finish first
                                         unpin_blend[side] += 1.0 / UNPIN_BLEND_FRAMES
@@ -1736,6 +1804,8 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                             # Unpin blend done, now start pin blend
                                             pinned_foot_pos[side] = pos_scaled.copy()
                                             pinned_foot_pos[side].z = 0
+                                            pin_hip_pos[side] = hip_center.copy() if hip_center else None
+                                            pin_frame_count[side] = 0
                                             unpin_blend[side] = 0.0
                                             pin_blend[side] = 1.0  # already at target
                                             pos_scaled = pinned_foot_pos[side].copy()
@@ -1744,6 +1814,8 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                         # New pin — start pin-IN blend
                                         pinned_foot_pos[side] = pos_scaled.copy()
                                         pinned_foot_pos[side].z = 0
+                                        pin_hip_pos[side] = hip_center.copy() if hip_center else None
+                                        pin_frame_count[side] = 0
                                         pin_blend[side] += 1.0 / PIN_BLEND_FRAMES
                                         if pin_blend[side] < 1.0:
                                             t = pin_blend[side]
@@ -1785,6 +1857,8 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                             foot_pinned = True  # still blending
                                         else:
                                             pinned_foot_pos[side] = None
+                                            pin_hip_pos[side] = None
+                                            pin_frame_count[side] = 0
                                             unpin_blend[side] = 0.0
 
                             prev_foot_raw[side] = raw_pos.copy()
