@@ -1,5 +1,5 @@
 """
-MelodicCap RTM Blender Addon v4.3
+MelodicCap RTM Blender Addon v4.4
 ===================================
 Imports JSON motion capture data and retargets to JaxRigify armature.
 
@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (4, 3),
+    "version": (4, 4),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -751,7 +751,7 @@ def compute_fk_rotation(bone, target_dir_armature, parent_matrix_override=None):
     return Vector((0, 1, 0)).rotation_difference(target_local)
 
 
-def compute_spine_fk_chain(rig, spine_points, armature_inv_33):
+def compute_spine_fk_chain(rig, spine_points, armature_inv_33, spine_rest_dir=None):
     """
     Compute FK rotations for the full spine chain (4 bones).
 
@@ -770,6 +770,10 @@ def compute_spine_fk_chain(rig, spine_points, armature_inv_33):
         return []
 
     spine_dir = (armature_inv_33 @ (shoulder_mid - hip_mid)).normalized()
+    # Subtract frame-0 forward tilt (systematic ~8° lean)
+    if spine_rest_dir is not None:
+        spine_dir.y -= spine_rest_dir.y
+        spine_dir = spine_dir.normalized()
 
     chain_names = ["spine_fk", "spine_fk.001", "spine_fk.002", "spine_fk.003"]
     bones = [(name, rig.pose.bones.get(name)) for name in chain_names]
@@ -1074,8 +1078,9 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         # If hip XY moves too far from the pin point, force-unpin (person walked away)
         pin_hip_pos = {"L": None, "R": None}  # hip XY when foot was pinned
         pin_frame_count = {"L": 0, "R": 0}    # frames since pin started
-        HIP_DRIFT_UNPIN = 0.25    # meters — if hip moves this far in XY, force unpin
+        HIP_DRIFT_UNPIN = 0.12    # meters — if hip moves this far in XY, force unpin
         MIN_PIN_FRAMES = 4        # minimum frames to stay pinned (prevent toggling)
+        PIN_SLIDE_RATE = 0.15     # how fast pin slides toward foot during walking (0-1)
 
         # Precompute ankle-to-ground offset from first N standing frames.
         # The mocap ankle keypoint is anatomically above the ground (~5-7cm).
@@ -1101,24 +1106,24 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         DiagLog.data("Foot Z offset L", f"{foot_z_offset['L']:.4f}m")
         DiagLog.data("Foot Z offset R", f"{foot_z_offset['R']:.4f}m")
 
-        # Arm splay bias correction: measure lateral arm direction from
-        # calibration frame A-pose and subtract it from all frames.
-        # In a clean A-pose, upper arms point straight down (X ≈ 0).
-        # Triangulation with 2 cameras at ~90° consistently places elbows
-        # too far from the body ("chicken wing"). We correct by removing
-        # the frame-0 lateral bias.
-        arm_splay_bias = {"L": 0.0, "R": 0.0}
-        cal_landmarks = first_landmarks  # already set from calibration frame
-        for side in ["L", "R"]:
-            ua_mapping = V2R_MAPPING.get(f"upper_arm_fk.{side}")
-            if ua_mapping:
-                p_sh = get_landmark(cal_landmarks, ua_mapping[0])
-                p_el = get_landmark(cal_landmarks, ua_mapping[1])
-                if p_sh is not None and p_el is not None:
-                    cal_dir = (armature_inv_33 @ (p_el - p_sh)).normalized()
-                    arm_splay_bias[side] = cal_dir.x
-        DiagLog.data("Arm splay bias L", f"{arm_splay_bias['L']:+.3f} (subtracted from upper_arm X)")
-        DiagLog.data("Arm splay bias R", f"{arm_splay_bias['R']:+.3f} (subtracted from upper_arm X)")
+        # Arm splay CLAMP: limit how far outward upper arms can splay.
+        # The chicken wing error is in CAMERA space (triangulation pushes
+        # elbows outward), but we can't subtract a bias in ARMATURE space
+        # because the correction direction rotates with the body.
+        # Instead, we CLAMP the maximum outward X component to prevent
+        # extreme splay without pushing arms inward at other yaw angles.
+        ARM_SPLAY_MAX = 0.10  # max |X| for upper arm direction (outward only)
+
+        # Spine rest direction: measure frame-0 spine direction so we can
+        # subtract the systematic 8° forward tilt from spine FK.
+        spine_rest_dir = None
+        cal_hip_mid = compute_midpoint(first_landmarks, LM.LEFT_HIP, LM.RIGHT_HIP)
+        cal_sh_mid = compute_midpoint(first_landmarks, LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER)
+        if cal_hip_mid and cal_sh_mid:
+            spine_rest_dir = (armature_inv_33 @ (cal_sh_mid - cal_hip_mid)).normalized()
+            DiagLog.data("Spine rest dir", f"({spine_rest_dir.x:.3f}, {spine_rest_dir.y:.3f}, {spine_rest_dir.z:.3f})")
+            spine_rest_tilt_y = spine_rest_dir.y  # forward lean component (~0.15)
+            DiagLog.data("Spine rest tilt Y", f"{spine_rest_tilt_y:.3f} (subtracted from spine FK)")
 
         # Foot diagnostics: collect per-frame data for analysis
         foot_diag = {"L": [], "R": []}
@@ -1274,7 +1279,8 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                 # --- Spine FK ---
                 if self.spine_chain and spine_points.get('hip_mid') and spine_points.get('shoulder_mid'):
                     # Full chain: distribute rotation across all 4 spine FK bones
-                    chain_results = compute_spine_fk_chain(rig, spine_points, armature_inv_33)
+                    # Subtract frame-0 tilt before computing FK
+                    chain_results = compute_spine_fk_chain(rig, spine_points, armature_inv_33, spine_rest_dir)
                     for bone, quat in chain_results:
                         bone.rotation_mode = 'QUATERNION'
                         bone.rotation_quaternion = quat
@@ -1288,6 +1294,10 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     spine_fk = rig.pose.bones.get("spine_fk")
                     if spine_fk and spine_points.get('hip_mid') and spine_points.get('shoulder_mid'):
                         spine_dir = (armature_inv_33 @ (spine_points['shoulder_mid'] - spine_points['hip_mid'])).normalized()
+                        # Subtract frame-0 forward tilt (systematic ~8° lean)
+                        if spine_rest_dir is not None:
+                            spine_dir.y -= spine_rest_tilt_y
+                            spine_dir = spine_dir.normalized()
                         if frame_idx % log_every == 0:
                             DiagLog.data("  spine_dir", f"({spine_dir.x:.3f}, {spine_dir.y:.3f}, {spine_dir.z:.3f})")
                         spine_fk.rotation_mode = 'QUATERNION'
@@ -1396,6 +1406,22 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         ua_bone = rig.pose.bones.get(ua_name)
                         fa_bone = rig.pose.bones.get(fa_name)
 
+                        # Compute arm FK confidence from wrist-to-shoulder ratio
+                        # When hands are on lap (sitting), ratio < 0.7 and FK directions
+                        # are garbage — blend toward rest pose
+                        sh_idx = LM.LEFT_SHOULDER if side == "L" else LM.RIGHT_SHOULDER
+                        wr_idx = LM.LEFT_WRIST if side == "L" else LM.RIGHT_WRIST
+                        p_sh_raw = get_landmark(landmarks_3d, sh_idx)
+                        p_wr_raw = get_landmark(landmarks_3d, wr_idx)
+                        rig_arm_len = rig_props.get(f'arm.{side}', 0.53)
+                        arm_fk_conf = 1.0
+                        if p_sh_raw is not None and p_wr_raw is not None and rig_arm_len > 0:
+                            raw_dist = (p_wr_raw - p_sh_raw).length
+                            arm_ratio = raw_dist / rig_arm_len
+                            if arm_ratio < 0.7:
+                                # Blend: 0.7 → conf=1.0, 0.4 → conf=0.0
+                                arm_fk_conf = max(0.0, (arm_ratio - 0.4) / 0.3)
+
                         # Upper arm first
                         ua_mapping = V2R_MAPPING.get(ua_name)
                         ua_expected_matrix = None
@@ -1405,12 +1431,20 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                             if p_start is not None and p_end is not None:
                                 target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
 
-                                # Subtract calibration-frame arm splay bias (chicken wing fix)
-                                target_dir.x -= arm_splay_bias[side]
-                                target_dir = target_dir.normalized()
+                                # Clamp outward arm splay (chicken wing fix)
+                                # L arm: outward is +X, R arm: outward is -X
+                                if side == "L" and target_dir.x > ARM_SPLAY_MAX:
+                                    target_dir.x = ARM_SPLAY_MAX
+                                    target_dir = target_dir.normalized()
+                                elif side == "R" and target_dir.x < -ARM_SPLAY_MAX:
+                                    target_dir.x = -ARM_SPLAY_MAX
+                                    target_dir = target_dir.normalized()
 
                                 ua_bone.rotation_mode = 'QUATERNION'
                                 ua_rot = compute_fk_rotation(ua_bone, target_dir, 'auto')
+                                # Blend toward rest pose when arm ratio is low (seated)
+                                if arm_fk_conf < 1.0:
+                                    ua_rot = Quaternion().slerp(ua_rot, arm_fk_conf)
                                 ua_bone.rotation_quaternion = ua_rot
                                 ua_bone.keyframe_insert(data_path="rotation_quaternion")
 
@@ -1436,8 +1470,12 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                             if p_start is not None and p_end is not None:
                                 target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
                                 fa_bone.rotation_mode = 'QUATERNION'
-                                fa_bone.rotation_quaternion = compute_fk_rotation(
+                                fa_rot = compute_fk_rotation(
                                     fa_bone, target_dir, ua_expected_matrix)
+                                # Blend toward rest pose when arm ratio is low (seated)
+                                if arm_fk_conf < 1.0:
+                                    fa_rot = Quaternion().slerp(fa_rot, arm_fk_conf)
+                                fa_bone.rotation_quaternion = fa_rot
                                 fa_bone.keyframe_insert(data_path="rotation_quaternion")
 
                                 if frame_idx % log_every == 0:
@@ -1772,21 +1810,23 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                             near_floor = pos_scaled.z < self.foot_floor_height
                             dt = timestamp - prev_timestamp if prev_timestamp > 0 else 0.033
 
-                            # Check hip drift: if hip XY moved far from pin point, force unpin
+                            # Check hip drift: if hip moved far from pin point, slide pin
                             hip_drift_unpin = False
+                            hip_drift_slide = False
                             if pinned_foot_pos[side] is not None and hip_center and pin_hip_pos[side] is not None:
                                 hip_dx = hip_center.x - pin_hip_pos[side].x
                                 hip_dy = hip_center.y - pin_hip_pos[side].y
                                 hip_drift = math.sqrt(hip_dx * hip_dx + hip_dy * hip_dy)
                                 if hip_drift > HIP_DRIFT_UNPIN and pin_frame_count[side] >= MIN_PIN_FRAMES:
-                                    hip_drift_unpin = True
+                                    # Instead of force-unpin, slide pin XY toward current foot
+                                    # This keeps foot on ground but allows it to "step"
+                                    hip_drift_slide = True
 
                             if prev_foot_raw[side] is not None and dt > 0:
                                 dist = (pos_scaled - prev_foot_raw[side]).length
                                 foot_speed = dist / dt
 
-                                want_pin = (foot_speed < self.pin_threshold and near_floor
-                                            and not hip_drift_unpin)
+                                want_pin = (foot_speed < self.pin_threshold and near_floor)
 
                                 if want_pin:
                                     # PINNING — foot should be on ground
@@ -1841,7 +1881,12 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                             pos_scaled = pinned_foot_pos[side].copy()
                                             foot_pinned = True
                                     else:
-                                        # Fully pinned
+                                        # Fully pinned — slide XY if hip drifted (walking)
+                                        if hip_drift_slide:
+                                            # Slide pin toward current foot XY position
+                                            pinned_foot_pos[side].x += (pos_scaled.x - pinned_foot_pos[side].x) * PIN_SLIDE_RATE
+                                            pinned_foot_pos[side].y += (pos_scaled.y - pinned_foot_pos[side].y) * PIN_SLIDE_RATE
+                                            pin_hip_pos[side] = hip_center.copy() if hip_center else None
                                         pos_scaled = pinned_foot_pos[side].copy()
                                         foot_pinned = True
                                 else:
