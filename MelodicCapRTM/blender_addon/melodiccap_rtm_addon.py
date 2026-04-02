@@ -1,5 +1,5 @@
 """
-MelodicCap RTM Blender Addon v4.4
+MelodicCap RTM Blender Addon v4.5
 ===================================
 Imports JSON motion capture data and retargets to JaxRigify armature.
 
@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (4, 4),
+    "version": (4, 5),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -751,7 +751,7 @@ def compute_fk_rotation(bone, target_dir_armature, parent_matrix_override=None):
     return Vector((0, 1, 0)).rotation_difference(target_local)
 
 
-def compute_spine_fk_chain(rig, spine_points, armature_inv_33, spine_rest_dir=None):
+def compute_spine_fk_chain(rig, spine_points, armature_inv_33):
     """
     Compute FK rotations for the full spine chain (4 bones).
 
@@ -770,10 +770,6 @@ def compute_spine_fk_chain(rig, spine_points, armature_inv_33, spine_rest_dir=No
         return []
 
     spine_dir = (armature_inv_33 @ (shoulder_mid - hip_mid)).normalized()
-    # Subtract frame-0 forward tilt (systematic ~8° lean)
-    if spine_rest_dir is not None:
-        spine_dir.y -= spine_rest_dir.y
-        spine_dir = spine_dir.normalized()
 
     chain_names = ["spine_fk", "spine_fk.001", "spine_fk.002", "spine_fk.003"]
     bones = [(name, rig.pose.bones.get(name)) for name in chain_names]
@@ -1114,16 +1110,18 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         # extreme splay without pushing arms inward at other yaw angles.
         ARM_SPLAY_MAX = 0.10  # max |X| for upper arm direction (outward only)
 
-        # Spine rest direction: measure frame-0 spine direction so we can
-        # subtract the systematic 8° forward tilt from spine FK.
+        # Spine rest direction: logged for diagnostics but NOT subtracted
+        # from spine FK. The torso bone already applies rest-subtracted pitch.
+        # Subtracting tilt from spine FK too causes double-rotation (v4.4 bug:
+        # character leaned too far back when sitting because both torso pitch
+        # and spine FK both corrected the same lean from the same data).
         spine_rest_dir = None
         cal_hip_mid = compute_midpoint(first_landmarks, LM.LEFT_HIP, LM.RIGHT_HIP)
         cal_sh_mid = compute_midpoint(first_landmarks, LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER)
         if cal_hip_mid and cal_sh_mid:
             spine_rest_dir = (armature_inv_33 @ (cal_sh_mid - cal_hip_mid)).normalized()
             DiagLog.data("Spine rest dir", f"({spine_rest_dir.x:.3f}, {spine_rest_dir.y:.3f}, {spine_rest_dir.z:.3f})")
-            spine_rest_tilt_y = spine_rest_dir.y  # forward lean component (~0.15)
-            DiagLog.data("Spine rest tilt Y", f"{spine_rest_tilt_y:.3f} (subtracted from spine FK)")
+            DiagLog.data("Spine rest tilt Y", f"{spine_rest_dir.y:.3f} (NOT subtracted — torso pitch handles this)")
 
         # Foot diagnostics: collect per-frame data for analysis
         foot_diag = {"L": [], "R": []}
@@ -1280,7 +1278,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                 if self.spine_chain and spine_points.get('hip_mid') and spine_points.get('shoulder_mid'):
                     # Full chain: distribute rotation across all 4 spine FK bones
                     # Subtract frame-0 tilt before computing FK
-                    chain_results = compute_spine_fk_chain(rig, spine_points, armature_inv_33, spine_rest_dir)
+                    chain_results = compute_spine_fk_chain(rig, spine_points, armature_inv_33)
                     for bone, quat in chain_results:
                         bone.rotation_mode = 'QUATERNION'
                         bone.rotation_quaternion = quat
@@ -1294,10 +1292,6 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     spine_fk = rig.pose.bones.get("spine_fk")
                     if spine_fk and spine_points.get('hip_mid') and spine_points.get('shoulder_mid'):
                         spine_dir = (armature_inv_33 @ (spine_points['shoulder_mid'] - spine_points['hip_mid'])).normalized()
-                        # Subtract frame-0 forward tilt (systematic ~8° lean)
-                        if spine_rest_dir is not None:
-                            spine_dir.y -= spine_rest_tilt_y
-                            spine_dir = spine_dir.normalized()
                         if frame_idx % log_every == 0:
                             DiagLog.data("  spine_dir", f"({spine_dir.x:.3f}, {spine_dir.y:.3f}, {spine_dir.z:.3f})")
                         spine_fk.rotation_mode = 'QUATERNION'
@@ -1335,7 +1329,11 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     if neck_bone and spine_points.get('shoulder_mid'):
                         neck_dir = (armature_inv_33 @ (ear_mid - spine_points['shoulder_mid'])).normalized()
                         neck_bone.rotation_mode = 'QUATERNION'
-                        neck_rot = compute_fk_rotation(neck_bone, neck_dir)
+                        # Use 'auto' parent mode so neck rotation is RELATIVE to
+                        # the current torso/spine pose. Without this, tilting the
+                        # torso forward 26° while head stays level produces a
+                        # 60° neck rotation instead of the correct ~8°.
+                        neck_rot = compute_fk_rotation(neck_bone, neck_dir, 'auto')
                         # Blend toward identity when confidence is low
                         if head_confidence < 1.0:
                             neck_rot = Quaternion().slerp(neck_rot, head_confidence)
@@ -1419,8 +1417,10 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                             raw_dist = (p_wr_raw - p_sh_raw).length
                             arm_ratio = raw_dist / rig_arm_len
                             if arm_ratio < 0.7:
-                                # Blend: 0.7 → conf=1.0, 0.4 → conf=0.0
-                                arm_fk_conf = max(0.0, (arm_ratio - 0.4) / 0.3)
+                                # Blend: 0.7 → conf=1.0, 0.55 → conf=0.0
+                                # Faster fade to rest prevents garbage FK directions
+                                # from producing visible arm weirdness when sitting
+                                arm_fk_conf = max(0.0, (arm_ratio - 0.55) / 0.15)
 
                         # Upper arm first
                         ua_mapping = V2R_MAPPING.get(ua_name)
