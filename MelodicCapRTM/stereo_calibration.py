@@ -245,7 +245,7 @@ class StereoCalibration:
         all_ids_a = []
         all_ids_b = []
 
-        MIN_CORNERS = 12  # per camera — need enough for good constraints
+        MIN_CORNERS = 6   # per camera — lowered for 5x7 board (24 corners total)
 
         for i, (fa, fb) in enumerate(zip(frames_a, frames_b)):
             ca, ia = self.detect_charuco(fa)

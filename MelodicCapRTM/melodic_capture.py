@@ -59,11 +59,12 @@ class Config:
     TAKES_DIR = BASE_DIR / "takes"
 
     # ChArUco board (must match your printed board)
-    # 10x5 board, two letter pages taped on cardboard
-    CHARUCO_SQUARES_X = 10
-    CHARUCO_SQUARES_Y = 5
-    CHARUCO_SQUARE_SIZE = 0.04286  # 1 and 11/16 inches = 42.86mm (measured)
-    CHARUCO_MARKER_SIZE = 0.03016  # 1 and 3/16 inches = 30.16mm (measured)
+    # 5x7 board, single letter page — no edge truncation
+    # IMPORTANT: measure actual printed square with ruler, update if different
+    CHARUCO_SQUARES_X = 5
+    CHARUCO_SQUARES_Y = 7
+    CHARUCO_SQUARE_SIZE = 0.035    # 35mm target — MEASURE YOUR PRINT
+    CHARUCO_MARKER_SIZE = 0.025    # 25mm target — MEASURE YOUR PRINT
     ARUCO_DICT = cv2.aruco.DICT_4X4_50
 
     # Recording
