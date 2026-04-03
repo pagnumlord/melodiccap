@@ -1,5 +1,5 @@
 """
-MelodicCap RTM Blender Addon v4.5
+MelodicCap RTM Blender Addon v4.6
 ===================================
 Imports JSON motion capture data and retargets to JaxRigify armature.
 
@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (4, 5),
+    "version": (4, 6),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -1132,6 +1132,19 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         ARM_MAX_SPEED = 8.0  # m/s — fast arm swing is ~6 m/s, reject above this
         ARM_MIN_RATIO = 0.55  # minimum arm reach ratio — prevents extreme chicken-wing
 
+        # v4.6: Last-good arm FK pose — when arm_fk_conf drops below threshold,
+        # hold the last good rotation instead of blending to identity (which puts
+        # arms at the character's sides, wrong for armrest sitting).
+        last_good_arm_rot = {
+            "upper_arm_fk.L": None, "forearm_fk.L": None,
+            "upper_arm_fk.R": None, "forearm_fk.R": None,
+        }
+        ARM_HOLD_CONF_THRESHOLD = 0.3  # below this, use last-good instead of rest
+
+        # v4.6: Track sit transition frame for dense logging
+        sit_transition_frame = None  # frame_idx when sit state last changed
+        prev_hip_pos_for_velocity = None  # for hip path velocity logging
+
         DiagLog.section("PROCESSING FRAMES")
         log_every = max(1, len(frames) // 10)
 
@@ -1149,8 +1162,27 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
             spine_points = compute_virtual_spine_points(landmarks_3d)
             hip_center = spine_points.get('hip_mid')
 
-            if frame_idx % log_every == 0:
-                DiagLog.info(f"Frame {frame_idx}/{len(frames)} (t={timestamp:.2f}s, blender={frame_num})")
+            # v4.6: Dense logging — log every frame near sit transitions
+            # and at regular intervals otherwise
+            near_transition = (sit_transition_frame is not None and
+                               abs(frame_idx - sit_transition_frame) <= 12)
+            do_log = (frame_idx % log_every == 0) or near_transition
+
+            # v4.6: Hip path velocity (XY displacement per frame)
+            hip_xy_velocity = 0.0
+            hip_xy_disp = None
+            if hip_center and prev_hip_pos_for_velocity is not None:
+                hip_dx = hip_center.x - prev_hip_pos_for_velocity.x
+                hip_dy = hip_center.y - prev_hip_pos_for_velocity.y
+                hip_dz_vel = hip_center.z - prev_hip_pos_for_velocity.z
+                hip_xy_disp = math.sqrt(hip_dx*hip_dx + hip_dy*hip_dy)
+                dt_hip = timestamp - prev_timestamp if prev_timestamp > 0 else 0.033
+                hip_xy_velocity = hip_xy_disp / dt_hip if dt_hip > 0 else 0
+            if hip_center:
+                prev_hip_pos_for_velocity = hip_center.copy()
+
+            if do_log:
+                DiagLog.info(f"Frame {frame_idx}/{len(frames)} (t={timestamp:.2f}s, blender={frame_num}){' [TRANSITION]' if near_transition else ''}")
                 if hip_center:
                     DiagLog.data("  hip_raw", f"({hip_center.x:.3f}, {hip_center.y:.3f}, {hip_center.z:.3f})")
                     # Show what the scaled hip will be
@@ -1161,6 +1193,9 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     if f0_hip:
                         dz = hip_center.z - f0_hip.z
                         DiagLog.data("  hip_dz_from_f0", f"{dz:+.3f}m")
+                    # v4.6: Hip XY velocity for sit-down arc investigation
+                    if hip_xy_disp is not None:
+                        DiagLog.data("  hip_xy_disp", f"{hip_xy_disp:.4f}m  vel={hip_xy_velocity:.3f}m/s")
 
             # =====================
             # SIT / STAND DETECTION
@@ -1182,14 +1217,14 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
                 # Update IK_FK sliders for legs when sit state changes
                 if is_sitting != mocap_props.get('_prev_sitting', False):
+                    sit_transition_frame = frame_idx  # v4.6: track for dense logging
                     for ikfk_bone in ik_fk_bones:
                         is_leg = "thigh" in ikfk_bone.name.lower()
                         if is_leg:
                             # Sitting: legs → FK (1.0). Standing: legs → IK (0.0)
                             ikfk_bone["IK_FK"] = 1.0 if is_sitting else 0.0
                             ikfk_bone.keyframe_insert(data_path='["IK_FK"]', frame=frame_num)
-                    if frame_idx % log_every == 0 or is_sitting != mocap_props.get('_prev_sitting', False):
-                        DiagLog.info(f"  SIT DETECT: {'SITTING' if is_sitting else 'STANDING'} (hip_dz={hip_dz:+.3f}m)")
+                    DiagLog.info(f"  SIT DETECT: {'SITTING' if is_sitting else 'STANDING'} (hip_dz={hip_dz:+.3f}m) at frame_idx={frame_idx}")
                     mocap_props['_prev_sitting'] = is_sitting
 
             # =====================
@@ -1266,7 +1301,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     # Store torso yaw for head attenuation at large angles
                     mocap_props['_current_torso_yaw'] = yaw_angle
 
-                    if frame_idx % log_every == 0:
+                    if do_log:
                         DiagLog.data("  torso_yaw", f"{math.degrees(yaw_angle):.1f}°")
                         DiagLog.data("  torso_pitch", f"{math.degrees(pitch_angle):.1f}° (from vertical, rest-subtracted)")
 
@@ -1283,7 +1318,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         bone.rotation_mode = 'QUATERNION'
                         bone.rotation_quaternion = quat
                         bone.keyframe_insert(data_path="rotation_quaternion")
-                    if frame_idx % log_every == 0:
+                    if do_log:
                         spine_dir = (armature_inv_33 @ (spine_points['shoulder_mid'] - spine_points['hip_mid'])).normalized()
                         DiagLog.data("  spine_dir", f"({spine_dir.x:.3f}, {spine_dir.y:.3f}, {spine_dir.z:.3f})")
                         DiagLog.data("  spine_chain_bones", f"{len(chain_results)}")
@@ -1292,18 +1327,20 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     spine_fk = rig.pose.bones.get("spine_fk")
                     if spine_fk and spine_points.get('hip_mid') and spine_points.get('shoulder_mid'):
                         spine_dir = (armature_inv_33 @ (spine_points['shoulder_mid'] - spine_points['hip_mid'])).normalized()
-                        if frame_idx % log_every == 0:
+                        if do_log:
                             DiagLog.data("  spine_dir", f"({spine_dir.x:.3f}, {spine_dir.y:.3f}, {spine_dir.z:.3f})")
                         spine_fk.rotation_mode = 'QUATERNION'
                         spine_fk.rotation_quaternion = compute_fk_rotation(spine_fk, spine_dir)
                         spine_fk.keyframe_insert(data_path="rotation_quaternion")
 
+                # --- v4.6: Flush depsgraph AFTER torso+spine, BEFORE neck ---
+                # Neck FK uses 'auto' parent mode (reads bone.parent.matrix).
+                # Without this flush, the parent matrices still reflect the
+                # PREVIOUS frame, so neck 'auto' computes against stale torso
+                # rotation. This was the cause of 59.9° neck pitch in v4.5.
+                bpy.context.view_layer.update()
+
                 # --- Head/Neck FK from face keypoints ---
-                # Neck: point from shoulder_mid toward ear_mid (upward direction)
-                # Head: do NOT apply compute_fk_rotation — the head bone Y axis
-                # points up, and ear_mid→nose is horizontal. Applying it rotates
-                # the head to face the ground. Neck rotation alone captures head
-                # tilt and some turn. Head yaw needs relative rotation (future).
                 p_nose = get_landmark(landmarks_3d, LM.NOSE)
                 p_lear = get_landmark(landmarks_3d, LM.LEFT_EAR)
                 p_rear = get_landmark(landmarks_3d, LM.RIGHT_EAR)
@@ -1312,72 +1349,58 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     ear_mid = (p_lear + p_rear) / 2.0
 
                     # Head/neck confidence: attenuate when turned sideways to cameras.
-                    # Ear keypoints become unreliable in profile view (one ear occluded).
-                    # Full confidence below 30° torso yaw, fades to 0 at 60°.
                     torso_yaw_abs = abs(mocap_props.get('_current_torso_yaw', 0.0))
-                    HEAD_YAW_FULL = math.radians(30)   # full confidence below this
-                    HEAD_YAW_ZERO = math.radians(60)   # zero confidence above this
+                    HEAD_YAW_FULL = math.radians(30)
+                    HEAD_YAW_ZERO = math.radians(60)
                     if torso_yaw_abs <= HEAD_YAW_FULL:
                         head_confidence = 1.0
                     elif torso_yaw_abs >= HEAD_YAW_ZERO:
                         head_confidence = 0.0
                     else:
                         t = (torso_yaw_abs - HEAD_YAW_FULL) / (HEAD_YAW_ZERO - HEAD_YAW_FULL)
-                        head_confidence = 1.0 - t * t * (3 - 2 * t)  # smoothstep fade
+                        head_confidence = 1.0 - t * t * (3 - 2 * t)
 
                     neck_bone = rig.pose.bones.get("neck")
                     if neck_bone and spine_points.get('shoulder_mid'):
                         neck_dir = (armature_inv_33 @ (ear_mid - spine_points['shoulder_mid'])).normalized()
                         neck_bone.rotation_mode = 'QUATERNION'
-                        # Use 'auto' parent mode so neck rotation is RELATIVE to
-                        # the current torso/spine pose. Without this, tilting the
-                        # torso forward 26° while head stays level produces a
-                        # 60° neck rotation instead of the correct ~8°.
+                        # 'auto' parent mode: now works correctly because
+                        # depsgraph was flushed above with current torso+spine
                         neck_rot = compute_fk_rotation(neck_bone, neck_dir, 'auto')
-                        # Blend toward identity when confidence is low
                         if head_confidence < 1.0:
                             neck_rot = Quaternion().slerp(neck_rot, head_confidence)
                         neck_bone.rotation_quaternion = neck_rot
                         neck_bone.keyframe_insert(data_path="rotation_quaternion")
 
-                    # Head yaw + pitch: rotate head based on ear/nose keypoints
-                    # relative to shoulder orientation (head turn + nod relative to torso)
+                        if do_log:
+                            # Log neck rotation magnitude for debugging
+                            neck_angle = neck_rot.angle
+                            DiagLog.data("  neck_rot", f"{math.degrees(neck_angle):.1f}° (conf={head_confidence:.2f})")
+
                     head_bone = rig.pose.bones.get("head")
                     if head_bone and p_nose:
                         p_ls = get_landmark(landmarks_3d, LM.LEFT_SHOULDER)
                         p_rs = get_landmark(landmarks_3d, LM.RIGHT_SHOULDER)
                         if p_ls and p_rs:
-                            # Ear line angle vs shoulder line angle = head yaw
                             ear_vec = p_lear - p_rear
                             shoulder_vec = p_ls - p_rs
                             ear_angle = math.atan2(ear_vec.y, ear_vec.x)
                             shoulder_angle = math.atan2(shoulder_vec.y, shoulder_vec.x)
                             head_yaw = ear_angle - shoulder_angle
-                            # Clamp to reasonable range (avoid wild rotations)
                             head_yaw = max(-0.7, min(0.7, head_yaw))
-                            # Attenuate when turned sideways
                             head_yaw *= head_confidence
 
-                            # Apply as rotation around bone's local Y axis (up)
-                            # Head pitch is handled by neck FK (compute_fk_rotation
-                            # on neck bone from shoulder_mid to ear_mid). Adding
-                            # explicit pitch here doubles the effect and causes the
-                            # head to stare at the ground due to nose-ear bias.
                             head_bone.rotation_mode = 'QUATERNION'
                             head_bone.rotation_quaternion = Quaternion((0, 1, 0), head_yaw)
                             head_bone.keyframe_insert(data_path="rotation_quaternion")
 
-                            if frame_idx % log_every == 0:
-                                DiagLog.data("  head_yaw", f"{math.degrees(head_yaw):.1f}° (ear_ang={math.degrees(ear_angle):.1f} - sh_ang={math.degrees(shoulder_angle):.1f}, conf={head_confidence:.2f})")
-                                # Log head pitch for diagnostics (handled by neck FK)
+                            if do_log:
+                                DiagLog.data("  head_yaw", f"{math.degrees(head_yaw):.1f}° (conf={head_confidence:.2f})")
                                 nose_ear_vec = p_nose - ear_mid
                                 head_pitch = math.degrees(math.atan2(-nose_ear_vec.z, math.sqrt(nose_ear_vec.x**2 + nose_ear_vec.y**2)))
-                                DiagLog.data("  head_pitch_via_neck", f"{head_pitch:.1f}° (applied via neck FK, conf={head_confidence:.2f})")
+                                DiagLog.data("  head_pitch_via_neck", f"{head_pitch:.1f}°")
 
-                # --- Flush depsgraph so parent matrices are current ---
-                # Spine/torso/neck/head rotations were set above. Without this
-                # update, bone.parent.matrix still reflects the PREVIOUS frame,
-                # making child FK rotations (arms, legs) incorrect.
+                # --- Second depsgraph flush: neck/head set, now update for limb FK ---
                 bpy.context.view_layer.update()
 
                 # --- Limb FK ---
@@ -1413,14 +1436,18 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         p_wr_raw = get_landmark(landmarks_3d, wr_idx)
                         rig_arm_len = rig_props.get(f'arm.{side}', 0.53)
                         arm_fk_conf = 1.0
+                        arm_ratio = 1.0
                         if p_sh_raw is not None and p_wr_raw is not None and rig_arm_len > 0:
                             raw_dist = (p_wr_raw - p_sh_raw).length
                             arm_ratio = raw_dist / rig_arm_len
                             if arm_ratio < 0.7:
                                 # Blend: 0.7 → conf=1.0, 0.55 → conf=0.0
-                                # Faster fade to rest prevents garbage FK directions
-                                # from producing visible arm weirdness when sitting
                                 arm_fk_conf = max(0.0, (arm_ratio - 0.55) / 0.15)
+
+                        # v4.6: Log arm_fk_conf every frame near transitions
+                        if do_log:
+                            DiagLog.data(f"  arm_fk_conf.{side}",
+                                f"{arm_fk_conf:.2f} (ratio={arm_ratio:.3f})")
 
                         # Upper arm first
                         ua_mapping = V2R_MAPPING.get(ua_name)
@@ -1442,9 +1469,23 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
                                 ua_bone.rotation_mode = 'QUATERNION'
                                 ua_rot = compute_fk_rotation(ua_bone, target_dir, 'auto')
-                                # Blend toward rest pose when arm ratio is low (seated)
-                                if arm_fk_conf < 1.0:
-                                    ua_rot = Quaternion().slerp(ua_rot, arm_fk_conf)
+
+                                # v4.6: Last-good-pose fallback for seated arms.
+                                # Instead of blending to identity (arms at sides),
+                                # hold the last good FK rotation when confidence drops.
+                                if arm_fk_conf >= ARM_HOLD_CONF_THRESHOLD:
+                                    # Good confidence — use computed rotation, save as last-good
+                                    if arm_fk_conf < 1.0:
+                                        # Partial confidence: blend toward last-good (not identity)
+                                        fallback = last_good_arm_rot[ua_name] or Quaternion()
+                                        ua_rot = fallback.slerp(ua_rot, arm_fk_conf)
+                                    last_good_arm_rot[ua_name] = ua_rot.copy()
+                                else:
+                                    # Low confidence — hold last-good pose
+                                    if last_good_arm_rot[ua_name] is not None:
+                                        ua_rot = last_good_arm_rot[ua_name].copy()
+                                    # else: no last-good yet, use computed (first frames)
+
                                 ua_bone.rotation_quaternion = ua_rot
                                 ua_bone.keyframe_insert(data_path="rotation_quaternion")
 
@@ -1458,9 +1499,10 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                     rest_off = ua_bone.bone.matrix_local
                                 ua_expected_matrix = parent_mat @ rest_off @ ua_rot.to_matrix().to_4x4()
 
-                                if frame_idx % log_every == 0:
+                                if do_log:
+                                    hold_str = " HOLD" if arm_fk_conf < ARM_HOLD_CONF_THRESHOLD and last_good_arm_rot[ua_name] is not None else ""
                                     DiagLog.data(f"  arm_fk.{ua_name}",
-                                        f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f})")
+                                        f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f}){hold_str}")
 
                         # Forearm second (uses upper_arm's computed matrix)
                         fa_mapping = V2R_MAPPING.get(fa_name)
@@ -1472,15 +1514,24 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 fa_bone.rotation_mode = 'QUATERNION'
                                 fa_rot = compute_fk_rotation(
                                     fa_bone, target_dir, ua_expected_matrix)
-                                # Blend toward rest pose when arm ratio is low (seated)
-                                if arm_fk_conf < 1.0:
-                                    fa_rot = Quaternion().slerp(fa_rot, arm_fk_conf)
+
+                                # v4.6: Same last-good-pose logic for forearm
+                                if arm_fk_conf >= ARM_HOLD_CONF_THRESHOLD:
+                                    if arm_fk_conf < 1.0:
+                                        fallback = last_good_arm_rot[fa_name] or Quaternion()
+                                        fa_rot = fallback.slerp(fa_rot, arm_fk_conf)
+                                    last_good_arm_rot[fa_name] = fa_rot.copy()
+                                else:
+                                    if last_good_arm_rot[fa_name] is not None:
+                                        fa_rot = last_good_arm_rot[fa_name].copy()
+
                                 fa_bone.rotation_quaternion = fa_rot
                                 fa_bone.keyframe_insert(data_path="rotation_quaternion")
 
-                                if frame_idx % log_every == 0:
+                                if do_log:
+                                    hold_str = " HOLD" if arm_fk_conf < ARM_HOLD_CONF_THRESHOLD and last_good_arm_rot[fa_name] is not None else ""
                                     DiagLog.data(f"  arm_fk.{fa_name}",
-                                        f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f})")
+                                        f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f}){hold_str}")
 
                     # Leg FK when sitting (parent→child: thigh → shin → foot)
                     if do_leg_fk:
@@ -1503,13 +1554,11 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 if p_start is None or p_end is None:
                                     continue
                                 target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
-                                # Use tracked parent matrix or 'auto' (depsgraph flushed)
                                 parent_ovr = prev_expected if prev_expected is not None else 'auto'
                                 bone.rotation_mode = 'QUATERNION'
                                 rot = compute_fk_rotation(bone, target_dir, parent_ovr)
                                 bone.rotation_quaternion = rot
                                 bone.keyframe_insert(data_path="rotation_quaternion")
-                                # Track expected matrix for next child in chain
                                 if bone.parent:
                                     p_mat = prev_expected if prev_expected is not None else bone.parent.matrix
                                     rest_off = bone.parent.bone.matrix_local.inverted() @ bone.bone.matrix_local
@@ -1518,8 +1567,11 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                     rest_off = bone.bone.matrix_local
                                 prev_expected = p_mat @ rest_off @ rot.to_matrix().to_4x4()
 
-                            if frame_idx % log_every == 0:
-                                DiagLog.data(f"  leg_fk.{side}", "sitting FK active")
+                                # v4.6: Log leg FK directions during sitting
+                                if do_log:
+                                    rot_angle = math.degrees(rot.angle)
+                                    DiagLog.data(f"  leg_fk.{bone_name}",
+                                        f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f}) rot={rot_angle:.1f}°")
 
                 elif do_leg_fk and not do_arm_fk:
                     # Sitting with pure IK arms — only process leg FK
@@ -1554,6 +1606,12 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 p_mat = Matrix.Identity(4)
                                 rest_off = bone.bone.matrix_local
                             prev_expected = p_mat @ rest_off @ rot.to_matrix().to_4x4()
+
+                            # v4.6: Log leg FK directions during sitting
+                            if do_log:
+                                rot_angle = math.degrees(rot.angle)
+                                DiagLog.data(f"  leg_fk.{bone_name}",
+                                    f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f}) rot={rot_angle:.1f}°")
                 else:
                     # Pure FK: process all limb bones (legs + arms)
                     # Process in parent→child order within each chain
@@ -1644,8 +1702,8 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                 p_shoulder_l = get_landmark(landmarks_3d, LM.LEFT_SHOULDER)
                 p_shoulder_r = get_landmark(landmarks_3d, LM.RIGHT_SHOULDER)
 
-                # Arm diagnostics (log every Nth frame)
-                if frame_idx % log_every == 0:
+                # Arm diagnostics
+                if do_log:
                     for side_label, rig_sh, mocap_sh in [
                         ("L", rig_shoulder_L, p_shoulder_l),
                         ("R", rig_shoulder_R, p_shoulder_r),
@@ -1733,7 +1791,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 if hand_speed > ARM_MAX_SPEED:
                                     # Reject: keep previous position
                                     pos_scaled = prev_hand_pos[side].copy()
-                                    if frame_idx % log_every == 0:
+                                    if do_log:
                                         DiagLog.info(f"  !! ARM {side} velocity clamp f{frame_idx}: {hand_speed:.1f} m/s > {ARM_MAX_SPEED}")
 
                             # Arm ratio minimum clamp: prevent extreme chicken-wing
