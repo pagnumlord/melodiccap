@@ -5,6 +5,7 @@ import threading
 import tkinter as tk
 import os
 import time
+import numpy as np
 
 # Internal Imports
 from engine.camera_thread import CameraThread
@@ -12,6 +13,13 @@ from engine.view_3d import Skeleton3DView
 from engine.triangulation_engine import TriangulationEngine
 from engine.recorder_engine import TakeRecorder
 from engine.post_processor import ScientificRefiner
+
+# Use paths relative to this script's location for portability
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_DIR = os.path.dirname(_SCRIPT_DIR)  # MelodicCapAntiGrav
+_DEFAULT_CAL_PATH = os.path.join(_PROJECT_DIR, "data", "calibration_data", "stereo_calibration.json")
+_DEFAULT_TAKES_DIR = os.path.join(_PROJECT_DIR, "mocap_takes")
+
 
 class MelodicCapStudioApp(ctk.CTk):
     def __init__(self):
@@ -21,7 +29,7 @@ class MelodicCapStudioApp(ctk.CTk):
         self.geometry("1400x900")
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
-        
+
         # Custom Fonts
         self.header_font = ctk.CTkFont(family="Inter", size=28, weight="bold")
         self.subhead_font = ctk.CTkFont(family="Inter", size=14, weight="bold")
@@ -30,15 +38,18 @@ class MelodicCapStudioApp(ctk.CTk):
         self.cam_a_thread = None
         self.cam_b_thread = None
         self.available_cams = self.detect_available_cameras()
-        
-        # Engines
-        self.cal_path = r"C:\Users\ninja\Documents\MelodicCapStudio\MelodicCapAntiGrav\data\calibration_data\stereo_calibration.json"
-        self.triangulation_engine = TriangulationEngine(self.cal_path)
-        self.recorder = TakeRecorder(r"C:\Users\ninja\Documents\MelodicCapStudio\MelodicCapAntiGrav\mocap_takes")
-        self.refiner = ScientificRefiner(self.cal_path)
+
+        # Engines - use portable paths
+        self.cal_path = _DEFAULT_CAL_PATH
+        os.makedirs(os.path.dirname(self.cal_path), exist_ok=True)
+        os.makedirs(_DEFAULT_TAKES_DIR, exist_ok=True)
+
+        self.triangulation_engine = TriangulationEngine(self.cal_path if os.path.exists(self.cal_path) else None)
+        self.recorder = TakeRecorder(_DEFAULT_TAKES_DIR)
+        self.refiner = ScientificRefiner(self.cal_path) if os.path.exists(self.cal_path) else None
         self.is_recording = False
         self.last_take_path = None
-        
+
         self.setup_ui()
         self.after(100, self.update_previews)
 
@@ -244,9 +255,9 @@ class MelodicCapStudioApp(ctk.CTk):
             # Check if board is visible on the floor
             if self.cam_a_thread.board_detected_section is not None and self.cam_b_thread.board_detected_section is not None:
                 # Run a quick floor verification
-                board_config = {'squares_x': 4, 'squares_y': 3, 'square_length': 0.040, 'marker_length': 0.030}
+                board_config = None  # FloorCalibrator now uses canonical config
                 from engine.floor_calibrator import FloorCalibrator
-                fc = FloorCalibrator(board_config)
+                fc = FloorCalibrator()
                 
                 res, _ = fc.detect_floor_from_frames(
                     cv2.cvtColor(self.cam_a_thread.latest_frame, cv2.COLOR_RGB2BGR),
@@ -294,11 +305,9 @@ class MelodicCapStudioApp(ctk.CTk):
         self.cal_log.insert("end", "Solving extrinsics (Fixing Intrinsics)...\n")
         self.btn_solve_ext.configure(state="disabled", text="SOLVING...")
         
-        # Use board config from iPad 40mm board
         from engine.floor_calibrator import FloorCalibrator
-        board_config = {'squares_x': 4, 'squares_y': 3, 'square_length': 0.040, 'marker_length': 0.030}
-        fc = FloorCalibrator(board_config)
-        
+        fc = FloorCalibrator()
+
         success, msg = self.triangulation_engine.calibrate_extrinsic_from_samples(self.cal_samples, fc.board)
         
         if success:
@@ -319,8 +328,8 @@ class MelodicCapStudioApp(ctk.CTk):
             
         from engine.floor_calibrator import FloorCalibrator
         # Use board config from iPad 40mm board
-        board_config = {'squares_x': 4, 'squares_y': 3, 'square_length': 0.040, 'marker_length': 0.030}
-        fc = FloorCalibrator(board_config)
+        board_config = None  # FloorCalibrator now uses canonical config
+        fc = FloorCalibrator()
         
         frame_a = self.cam_a_thread.latest_frame
         frame_b = self.cam_b_thread.latest_frame
@@ -409,15 +418,22 @@ class MelodicCapStudioApp(ctk.CTk):
             hands_b = self.cam_b_thread.landmarks.get("hands") if self.cam_b_thread.landmarks else None
             
             if lms_a and lms_b and self.triangulation_engine.is_calibrated:
+                # Check frame sync: warn if cameras are >50ms apart
+                if self.cam_a_thread.frame_timestamp and self.cam_b_thread.frame_timestamp:
+                    sync_delta = abs(self.cam_a_thread.frame_timestamp - self.cam_b_thread.frame_timestamp)
+                    if sync_delta > 0.05 and time.time() % 5 < 0.1:
+                        self.log_to_console(f"WARNING: Frame sync delta {sync_delta*1000:.0f}ms")
+
                 points_3d = self.triangulation_engine.triangulate_pose(lms_a, lms_b, smooth=True)
                 if self.hand_mode_var.get() and hands_a and hands_b:
                     self.log_to_console(f"Triangulating Fingers... (Lms: {len(lms_a.landmark)})")
             elif self.cam_a_thread.landmarks and "pose_world" in self.cam_a_thread.landmarks:
                 pw = self.cam_a_thread.landmarks["pose_world"]
-                if pw: 
-                    points_3d = {i: (lm.x*4, lm.y*4, lm.z*4) for i, lm in enumerate(pw.landmark)}
-                    if time.time() % 2 < 0.1: # Throttled log
-                        self.log_to_console("Single-Cam Fallback (Pose World Ready)")
+                if pw:
+                    # pose_world is in meters centered on hip; scale is reasonable as-is
+                    points_3d = {i: [lm.x, lm.z, -lm.y] for i, lm in enumerate(pw.landmark)}
+                    if time.time() % 2 < 0.1:
+                        self.log_to_console("Single-Cam Fallback (Pose World)")
 
         if points_3d:
             if self.is_recording:

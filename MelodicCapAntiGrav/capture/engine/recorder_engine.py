@@ -24,10 +24,11 @@ class TakeRecorder:
     def add_frame(self, points_3d, lms_2d_a=None, lms_2d_b=None, hands_a=None, hands_b=None):
         if not self.is_recording:
             return
-        
+
         frame_data = {
             "timestamp": time.time() - self.start_time,
-            "landmarks_3d": {},
+            # Unified format: "landmarks" with string keys -> [x, y, z]
+            "landmarks": {},
             "raw_2d": {
                 "cam_a": self._serialize_landmarks(lms_2d_a),
                 "cam_b": self._serialize_landmarks(lms_2d_b)
@@ -37,12 +38,12 @@ class TakeRecorder:
                 "cam_b": self._serialize_hands(hands_b)
             }
         }
-        
+
         # Convert numpy floats to standard python floats for JSON
         if points_3d:
             for idx, pt in points_3d.items():
-                frame_data["landmarks_3d"][str(idx)] = [float(c) for c in pt]
-            
+                frame_data["landmarks"][str(idx)] = [float(c) for c in pt]
+
         self.frames.append(frame_data)
 
     def _serialize_landmarks(self, landmarks):

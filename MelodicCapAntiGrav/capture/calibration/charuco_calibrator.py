@@ -1,12 +1,21 @@
 import cv2
 import numpy as np
+import sys
+import os
+
+# Import canonical board config
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from engine.camera_thread import BOARD_COLS, BOARD_ROWS, BOARD_SQUARE_M, BOARD_MARKER_M, BOARD_DICT
+
 
 class CharucoCalibrator:
-    def __init__(self, squares_x=4, squares_y=3, square_length=0.0635, marker_length=0.0476, dictionary=cv2.aruco.DICT_4X4_50):
+    def __init__(self, squares_x=BOARD_COLS, squares_y=BOARD_ROWS,
+                 square_length=BOARD_SQUARE_M, marker_length=BOARD_MARKER_M,
+                 dictionary=BOARD_DICT):
         self.dictionary = cv2.aruco.getPredefinedDictionary(dictionary)
         self.board = cv2.aruco.CharucoBoard((squares_x, squares_y), square_length, marker_length, self.dictionary)
         self.detector = cv2.aruco.CharucoDetector(self.board)
-        
+
         self.all_corners = []
         self.all_ids = []
         self.image_size = None

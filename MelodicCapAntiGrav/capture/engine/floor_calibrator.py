@@ -3,20 +3,17 @@ import numpy as np
 import json
 import os
 
+from engine.camera_thread import get_board_and_detector
+
+
 class FloorCalibrator:
     """
     Detects the calibration board on the ground to establish Z=0
     and the forward direction (+Y).
     """
-    def __init__(self, board_config):
-        self.squares_x = board_config.get('squares_x', 4)
-        self.squares_y = board_config.get('squares_y', 3)
-        self.square_length = board_config.get('square_length', 0.040)
-        self.marker_length = board_config.get('marker_length', 0.030)
-        
-        self.dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-        self.board = cv2.aruco.CharucoBoard((self.squares_x, self.squares_y), self.square_length, self.marker_length, self.dictionary)
-        self.detector = cv2.aruco.CharucoDetector(self.board)
+    def __init__(self, board_config=None):
+        # Always use canonical board config for consistency
+        self.board, self.detector = get_board_and_detector()
 
     def detect_floor_from_frames(self, frame_a, frame_b, triangulation_engine):
         """
