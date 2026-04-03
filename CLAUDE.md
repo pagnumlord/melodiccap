@@ -26,7 +26,7 @@ motion data onto Rigify character rigs. For a short film.
 - `MelodicCapRTM/blender_addon/` — Blender addon
   - `melodiccap_rtm_addon.py` — Main addon (v4.6): imports JSON takes, retargets to JaxRigify
 
-## Blender Addon - Current State (v4.6)
+## Blender Addon - Current State (v4.7)
 - Proportional retargeting: measures mocap vs rig proportions from frame 0
 - **Hybrid mode (default)**: Arms use FK rotations, legs use IK positioning
 - Torso: yaw + pitch rotation (pitch = forward lean, rest-subtracted)
@@ -38,9 +38,11 @@ motion data onto Rigify character rigs. For a short film.
 - Ankle Z offset: precomputed from first 20 standing frames
 - Sit/stand detection: hip Z drop with hysteresis (-0.15m sit, -0.10m stand)
 - When sitting: legs switch to FK, foot pinning disabled
-- Arm FK confidence: wrist-to-shoulder ratio < 0.7 = low confidence
-- Arm splay clamp: ARM_SPLAY_MAX limits outward X in armature space
+- Arm FK confidence: wrist-to-shoulder ratio + direction stability boost (v4.7)
+- Arm splay clamp: context-aware soft clamp — scales with arm raise height (v4.7)
 - Arm velocity clamp: rejects >8 m/s hand IK spikes
+- 4th-order Butterworth low-pass filter (two cascaded biquads, zero-phase) (v4.7)
+- Per-keypoint confidence stored in JSON (min of both camera scores) (v4.7)
 - Depsgraph flush: after torso+spine (before neck), after neck/head (before limbs)
 
 ## Version History (Retargeter)
@@ -93,7 +95,28 @@ motion data onto Rigify character rigs. For a short film.
 - Dense logging: every frame within ±12 of sit transitions
 - Per-frame arm_fk_conf + leg FK direction logging
 
-## CRITICAL BUG — ARM_SPLAY_MAX = 0.10 Destroys Arm Raises (v4.4+)
+### v4.7 — Context-aware splay, direction stability, 4th-order Butterworth
+- **ARM_SPLAY_MAX replaced with context-aware soft clamp**: measures elbow Z
+  relative to shoulder Z. When arm is raised (elbow above shoulder by 0.15-0.35m),
+  splay limit opens from 0.15 → 0.95 with smooth-step interpolation.
+  When arm hangs at sides, tight clamp prevents chicken-wing. Fixes the #1
+  regression from v4.4 that destroyed arm raises.
+- **Direction stability confidence boost**: arm_fk_conf no longer drops to 0 when
+  wrist-shoulder distance is short. If shoulder→elbow direction is stable frame-
+  to-frame (dot product > 0.95), confidence gets up to +0.5 boost. Fixes arms
+  snapping to sides when sitting on armrests.
+- **4th-order Butterworth filter**: upgraded from 2nd-order to two cascaded biquad
+  sections. Professional standard (matches Vicon/Pose2Sim).
+- **Capture pipeline tightened**:
+  - OUTLIER_MAX_VELOCITY: 2.0 → 0.3 m/frame (~6.3 m/s at 21fps)
+  - OUTLIER_MAX_VELOCITY_FEET: 0.5 → 0.15 m/frame (~3.15 m/s at 21fps)
+  - Bone length tolerances: 0.4 → 0.20-0.25 (limbs vs arms)
+  - Floor calibration confidence uses config threshold (not hardcoded 0.3)
+- **recorder.py fixes**:
+  - keypoint_format now reflects actual mode (coco_body_17 vs coco_wholebody_133)
+  - Per-keypoint confidence stored: min(conf_a, conf_b) per triangulated point
+
+## RESOLVED — ARM_SPLAY_MAX = 0.10 Destroyed Arm Raises (v4.4-v4.6)
 
 **This is the #1 regression from v3.x.** The ARM_SPLAY_MAX clamp was added in
 v4.4 to fix chicken-wing (elbows splaying outward during standing). It clamps
@@ -110,20 +133,11 @@ point nearly straight down. Example from v4.6 test at arm-raise peak:
 positioned from mocap data without any splay clamp. IK solver pulled the hand
 to the correct position regardless of elbow direction.
 
-**Fix needed**: Either:
-1. Increase ARM_SPLAY_MAX significantly (0.5+) and accept some chicken-wing
-2. Make the clamp context-aware (only clamp when arms are near sides, not raised)
-3. Use a soft clamp (reduce but don't crush) instead of hard clamp
-4. Switch back to IK for arms when arm ratio > 0.7 (confident FK data)
+**Fixed in v4.7**: Context-aware soft clamp (option 2+3 combined). Splay limit
+scales from 0.15 (arms at sides) to 0.95 (arms raised) based on elbow height
+relative to shoulder. Uses smooth-step interpolation for natural transitions.
 
-## Other Known Issues (as of v4.6)
-
-### Seated arm position
-- Arm hold-pose fallback holds the last-good rotation from the sit transition,
-  not the actual armrest position. The mocap data DOES show arms on armrests
-  (elbows at reasonable positions), but arm_fk_conf drops because wrist-to-shoulder
-  DISTANCE is short, even though the FK DIRECTION might be valid.
-- Possible fix: base confidence on direction stability, not just distance ratio
+## Other Known Issues (as of v4.7)
 
 ### Left leg bending during sitting
 - Left shin_fk has consistent X offset (-0.115 to -0.145) vs right (-0.063 to -0.119)
@@ -136,19 +150,20 @@ to the correct position regardless of elbow direction.
 - The high raw value includes the torso lean in the measurement
 - The depsgraph fix in v4.6 IS working for the applied rotation
 
-### Capture pipeline issues (from system audit)
-- OUTLIER_MAX_VELOCITY = 2.0 m/frame is too permissive (42 m/s at 21fps)
-- OUTLIER_MAX_VELOCITY_FEET = 0.5 m/frame also high
-- Bone tolerances all 0.4 (40% variation — guesswork)
+### Capture pipeline (remaining issues)
 - 3 independent 1D Kalman filters per keypoint (should be coupled 3D)
-- 2nd-order Butterworth at 4.0 Hz body / 3.5 Hz feet
-  (professional systems use 4th-order at 6-10 Hz)
-- No per-keypoint confidence in JSON data pipeline
-- No camera synchronization mechanism
-- recorder.py always writes "coco_wholebody_133" even in body-only mode (17 kp)
-- Floor calibration ankle confidence 0.3 hardcoded (inconsistent)
+- No camera synchronization mechanism (DroidCam ~50-100ms latency)
 - Coordinate transform blender↔CV on stereo_calibration.py lines 528-531, 629
   — verified CORRECT despite looking suspicious
+
+### Fixed in v4.7 (were Tier 1/2 audit items)
+- ~~OUTLIER_MAX_VELOCITY~~ → tightened to 0.3 m/frame (was 2.0)
+- ~~OUTLIER_MAX_VELOCITY_FEET~~ → tightened to 0.15 m/frame (was 0.5)
+- ~~Bone tolerances 0.4~~ → 0.20-0.25 depending on limb
+- ~~2nd-order Butterworth~~ → 4th-order (two cascaded biquads)
+- ~~No per-keypoint confidence~~ → min(conf_a, conf_b) in JSON
+- ~~keypoint_format lie~~ → reports actual mode (body_17 vs wholebody_133)
+- ~~Floor calibration hardcoded 0.3~~ → uses config.MIN_KEYPOINT_CONFIDENCE
 
 ## Working Well
 - Frame 0 A-pose calibration and proportion measurement
@@ -160,7 +175,10 @@ to the correct position regardless of elbow direction.
 - Walking-aware foot pinning (hip drift slide)
 - Sit/stand detection with hysteresis
 - Depsgraph flush ordering (fixed in v4.6)
-- Butterworth low-pass filter (custom implementation, no scipy)
+- 4th-order Butterworth low-pass filter (custom implementation, no scipy) (v4.7)
+- Context-aware arm splay clamp (v4.7)
+- Arm FK direction stability confidence boost (v4.7)
+- Per-keypoint confidence in data pipeline (v4.7)
 - Arm velocity clamping (rejects triangulation spikes)
 - Dense diagnostic logging near transitions
 

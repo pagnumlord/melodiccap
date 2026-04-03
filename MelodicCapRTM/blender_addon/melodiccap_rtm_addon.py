@@ -1,5 +1,5 @@
 """
-MelodicCap RTM Blender Addon v4.6
+MelodicCap RTM Blender Addon v4.7
 ===================================
 Imports JSON motion capture data and retargets to JaxRigify armature.
 
@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (4, 6),
+    "version": (4, 7),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -607,12 +607,14 @@ def smooth_frames(frames, window=5):
 
 def butterworth_filter_landmarks(frames, fps, cutoff_body=4.0, cutoff_feet=2.0):
     """
-    Apply a 2nd-order Butterworth low-pass filter to landmark positions.
+    Apply a 4th-order Butterworth low-pass filter to landmark positions (v4.7).
 
-    Feet (ankles) get a lower cutoff to kill jitter since they need to be
-    stable on the ground. Everything else gets a moderate cutoff.
+    Professional mocap systems (Vicon, OptiTrack) use 4th-order Butterworth
+    at 6-10 Hz. We use 4th order via two cascaded biquad sections, with
+    forward-backward filtering for zero phase lag.
 
-    Uses forward-backward filtering (filtfilt equivalent) for zero phase lag.
+    Feet (ankles/knees) get a lower cutoff to kill jitter since they need to
+    be stable on the ground. Everything else gets a moderate cutoff.
     """
     if len(frames) < 5:
         return frames
@@ -659,57 +661,71 @@ def butterworth_filter_landmarks(frames, fps, cutoff_body=4.0, cutoff_feet=2.0):
     return frames
 
 
-def _butter_lowpass_filtfilt(data, cutoff, fs, order=2):
+def _butter_lowpass_filtfilt(data, cutoff, fs, order=4):
     """
-    Zero-phase Butterworth filter implemented without scipy.
+    Zero-phase Butterworth filter implemented without scipy (v4.7).
 
-    Uses cascaded biquad sections with forward-backward passes.
+    4th-order filter via two cascaded 2nd-order biquad sections,
+    each with forward-backward passes for zero phase lag.
+    This matches professional mocap pipeline standards (Vicon, Pose2Sim).
     """
-    # Compute biquad coefficients for 2nd order Butterworth
     nyq = fs / 2.0
     wc = cutoff / nyq
     if wc >= 1.0:
-        return data  # cutoff above nyquist, no filtering needed
+        return data
 
-    # Bilinear transform: analog butterworth -> digital
+    n = len(data)
+    if n < 5:
+        return list(data)
+
+    # Bilinear pre-warp
     warp = math.tan(math.pi * wc / 2.0)
     k = warp * warp
-    norm = 1.0 / (1.0 + math.sqrt(2.0) * warp + k)
 
-    b0 = k * norm
-    b1 = 2.0 * b0
-    b2 = b0
-    a1 = 2.0 * (k - 1.0) * norm
-    a2 = (1.0 - math.sqrt(2.0) * warp + k) * norm
+    # 4th-order Butterworth = two 2nd-order sections with different Q factors.
+    # Pole angles for 4th-order: pi*(2*m+1)/(2*N) for m=0,1
+    # Section 1: Q1 = 1/(2*cos(pi*1/8)) ≈ 0.541
+    # Section 2: Q2 = 1/(2*cos(pi*3/8)) ≈ 1.307
+    sections = []
+    for q_factor in [1.0 / (2.0 * math.cos(math.pi * 1 / 8)),
+                     1.0 / (2.0 * math.cos(math.pi * 3 / 8))]:
+        alpha = warp / q_factor
+        norm = 1.0 / (1.0 + alpha + k)
+        b0 = k * norm
+        b1 = 2.0 * b0
+        b2 = b0
+        a1 = 2.0 * (k - 1.0) * norm
+        a2 = (1.0 - alpha + k) * norm
+        sections.append((b0, b1, b2, a1, a2))
 
-    # Forward pass
+    def _apply_biquad(signal, coeffs):
+        b0, b1, b2, a1, a2 = coeffs
+        out = list(signal)
+        for i in range(2, len(out)):
+            out[i] = (b0 * signal[i] + b1 * signal[i - 1] + b2 * signal[i - 2]
+                       - a1 * out[i - 1] - a2 * out[i - 2])
+        return out
+
+    # Edge padding to reduce transients
+    pad = min(12, n - 1)
     y = list(data)
-    n = len(y)
-    if n < 3:
-        return y
-
-    # Pad edges to reduce transients
-    pad = min(3 * order, n - 1)
     front_pad = [2.0 * y[0] - y[i] for i in range(pad, 0, -1)]
     back_pad = [2.0 * y[-1] - y[-(i + 2)] for i in range(pad)]
     padded = front_pad + y + back_pad
 
-    def _apply_filter(signal):
-        out = list(signal)
-        for i in range(2, len(out)):
-            out[i] = b0 * signal[i] + b1 * signal[i - 1] + b2 * signal[i - 2] \
-                     - a1 * out[i - 1] - a2 * out[i - 2]
-        return out
-
-    # Forward
-    fwd = _apply_filter(padded)
-    # Backward (reverse, filter, reverse)
-    fwd.reverse()
-    bwd = _apply_filter(fwd)
-    bwd.reverse()
+    # Apply each biquad section with forward-backward passes
+    result = padded
+    for coeffs in sections:
+        # Forward
+        fwd = _apply_biquad(result, coeffs)
+        # Backward
+        fwd.reverse()
+        bwd = _apply_biquad(fwd, coeffs)
+        bwd.reverse()
+        result = bwd
 
     # Strip padding
-    return bwd[pad:pad + n]
+    return result[pad:pad + n]
 
 
 # =============================================================================
@@ -1102,13 +1118,16 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         DiagLog.data("Foot Z offset L", f"{foot_z_offset['L']:.4f}m")
         DiagLog.data("Foot Z offset R", f"{foot_z_offset['R']:.4f}m")
 
-        # Arm splay CLAMP: limit how far outward upper arms can splay.
-        # The chicken wing error is in CAMERA space (triangulation pushes
-        # elbows outward), but we can't subtract a bias in ARMATURE space
-        # because the correction direction rotates with the body.
-        # Instead, we CLAMP the maximum outward X component to prevent
-        # extreme splay without pushing arms inward at other yaw angles.
-        ARM_SPLAY_MAX = 0.10  # max |X| for upper arm direction (outward only)
+        # Arm splay CLAMP: context-aware soft clamp (v4.7).
+        # v4.4 had ARM_SPLAY_MAX=0.10 which destroyed arm raises by crushing
+        # the outward X component. Now we scale the clamp based on how raised
+        # the arm is: when elbow is near shoulder height, the arm is raised
+        # and we allow full splay. When elbow is hanging at sides, we clamp
+        # tightly to prevent chicken-wing from triangulation noise.
+        ARM_SPLAY_REST = 0.15   # max |X| when arm hangs at side (tight)
+        ARM_SPLAY_RAISED = 0.95 # max |X| when arm is fully raised (permissive)
+        ARM_RAISE_THRESHOLD = 0.15  # elbow-shoulder Z delta (m) where raise starts
+        ARM_RAISE_FULL = 0.35       # elbow-shoulder Z delta (m) where raise is full
 
         # Spine rest direction: logged for diagnostics but NOT subtracted
         # from spine FK. The torso bone already applies rest-subtracted pitch.
@@ -1140,6 +1159,13 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
             "upper_arm_fk.R": None, "forearm_fk.R": None,
         }
         ARM_HOLD_CONF_THRESHOLD = 0.3  # below this, use last-good instead of rest
+
+        # v4.7: Track previous arm FK directions for stability-based confidence.
+        # When direction is stable frame-to-frame (dot product near 1.0), the FK
+        # data is trustworthy even if wrist-shoulder distance is short (armrest).
+        prev_arm_dir = {"L": None, "R": None}
+        ARM_STABILITY_BOOST = 0.5  # max confidence boost from direction stability
+        ARM_STABILITY_DOT_THRESHOLD = 0.95  # dot product above this = stable
 
         # v4.6: Track sit transition frame for dense logging
         sit_transition_frame = None  # frame_idx when sit state last changed
@@ -1428,26 +1454,48 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         fa_bone = rig.pose.bones.get(fa_name)
 
                         # Compute arm FK confidence from wrist-to-shoulder ratio
-                        # When hands are on lap (sitting), ratio < 0.7 and FK directions
-                        # are garbage — blend toward rest pose
+                        # AND direction stability (v4.7).
+                        # Ratio-only confidence dropped arms to sides on armrests.
+                        # Now: if the FK direction is STABLE frame-to-frame, boost
+                        # confidence even at short ratios (armrest = stable + short).
                         sh_idx = LM.LEFT_SHOULDER if side == "L" else LM.RIGHT_SHOULDER
+                        el_idx = LM.LEFT_ELBOW if side == "L" else LM.RIGHT_ELBOW
                         wr_idx = LM.LEFT_WRIST if side == "L" else LM.RIGHT_WRIST
                         p_sh_raw = get_landmark(landmarks_3d, sh_idx)
+                        p_el_raw = get_landmark(landmarks_3d, el_idx)
                         p_wr_raw = get_landmark(landmarks_3d, wr_idx)
                         rig_arm_len = rig_props.get(f'arm.{side}', 0.53)
                         arm_fk_conf = 1.0
                         arm_ratio = 1.0
+                        stability_boost = 0.0
                         if p_sh_raw is not None and p_wr_raw is not None and rig_arm_len > 0:
                             raw_dist = (p_wr_raw - p_sh_raw).length
                             arm_ratio = raw_dist / rig_arm_len
                             if arm_ratio < 0.7:
-                                # Blend: 0.7 → conf=1.0, 0.55 → conf=0.0
+                                # Base confidence: 0.7 → 1.0, 0.55 → 0.0
                                 arm_fk_conf = max(0.0, (arm_ratio - 0.55) / 0.15)
 
-                        # v4.6: Log arm_fk_conf every frame near transitions
+                            # v4.7: Direction stability boost.
+                            # If shoulder→elbow direction is stable, the FK data
+                            # is trustworthy even at short reach (e.g. armrests).
+                            if p_el_raw is not None:
+                                cur_dir = (p_el_raw - p_sh_raw)
+                                if cur_dir.length > 0.01:
+                                    cur_dir = cur_dir.normalized()
+                                    if prev_arm_dir[side] is not None:
+                                        dot = cur_dir.dot(prev_arm_dir[side])
+                                        if dot > ARM_STABILITY_DOT_THRESHOLD:
+                                            # Stable: boost confidence proportionally
+                                            stab_t = (dot - ARM_STABILITY_DOT_THRESHOLD) / (1.0 - ARM_STABILITY_DOT_THRESHOLD)
+                                            stability_boost = stab_t * ARM_STABILITY_BOOST
+                                            arm_fk_conf = min(1.0, arm_fk_conf + stability_boost)
+                                    prev_arm_dir[side] = cur_dir.copy()
+
+                        # v4.7: Log arm_fk_conf with stability info
                         if do_log:
+                            boost_str = f" stab_boost={stability_boost:.2f}" if stability_boost > 0 else ""
                             DiagLog.data(f"  arm_fk_conf.{side}",
-                                f"{arm_fk_conf:.2f} (ratio={arm_ratio:.3f})")
+                                f"{arm_fk_conf:.2f} (ratio={arm_ratio:.3f}{boost_str})")
 
                         # Upper arm first
                         ua_mapping = V2R_MAPPING.get(ua_name)
@@ -1458,13 +1506,26 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                             if p_start is not None and p_end is not None:
                                 target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
 
-                                # Clamp outward arm splay (chicken wing fix)
-                                # L arm: outward is +X, R arm: outward is -X
-                                if side == "L" and target_dir.x > ARM_SPLAY_MAX:
-                                    target_dir.x = ARM_SPLAY_MAX
+                                # v4.7: Context-aware soft splay clamp.
+                                # Measure how raised the arm is: elbow Z relative
+                                # to shoulder Z. When raised, allow full splay.
+                                # When hanging at sides, clamp to prevent chicken-wing.
+                                elbow_raise = 0.0
+                                if p_start is not None and p_end is not None:
+                                    elbow_raise = p_end.z - p_start.z  # +ve = elbow above shoulder
+                                raise_t = max(0.0, min(1.0,
+                                    (elbow_raise - ARM_RAISE_THRESHOLD) /
+                                    (ARM_RAISE_FULL - ARM_RAISE_THRESHOLD)))
+                                # Smooth step for natural transition
+                                raise_t = raise_t * raise_t * (3.0 - 2.0 * raise_t)
+                                splay_limit = ARM_SPLAY_REST + raise_t * (ARM_SPLAY_RAISED - ARM_SPLAY_REST)
+
+                                # Apply clamp: L arm outward is +X, R arm is -X
+                                if side == "L" and target_dir.x > splay_limit:
+                                    target_dir.x = splay_limit
                                     target_dir = target_dir.normalized()
-                                elif side == "R" and target_dir.x < -ARM_SPLAY_MAX:
-                                    target_dir.x = -ARM_SPLAY_MAX
+                                elif side == "R" and target_dir.x < -splay_limit:
+                                    target_dir.x = -splay_limit
                                     target_dir = target_dir.normalized()
 
                                 ua_bone.rotation_mode = 'QUATERNION'
@@ -1502,7 +1563,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 if do_log:
                                     hold_str = " HOLD" if arm_fk_conf < ARM_HOLD_CONF_THRESHOLD and last_good_arm_rot[ua_name] is not None else ""
                                     DiagLog.data(f"  arm_fk.{ua_name}",
-                                        f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f}){hold_str}")
+                                        f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f}) splay_lim={splay_limit:.2f} raise={elbow_raise:+.3f}m{hold_str}")
 
                         # Forearm second (uses upper_arm's computed matrix)
                         fa_mapping = V2R_MAPPING.get(fa_name)

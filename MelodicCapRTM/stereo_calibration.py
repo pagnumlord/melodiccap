@@ -18,23 +18,25 @@ from kalman import SimpleKalman
 
 # Reasonable limits for a human body in a room
 OUTLIER_MAX_DISTANCE = 3.0      # meters from body centroid
-OUTLIER_MAX_VELOCITY = 2.0      # meters per frame (at ~10fps = 20m/s, impossible for human)
+OUTLIER_MAX_VELOCITY = 0.3      # meters per frame (~6.3 m/s at 21fps — fast arm swing)
 # Tighter limits for feet — they move slower than hands and jitter is most visible
-OUTLIER_MAX_VELOCITY_FEET = 0.5  # meters per frame (at ~21fps = 10.5m/s, still generous)
+OUTLIER_MAX_VELOCITY_FEET = 0.15 # meters per frame (~3.15 m/s at 21fps — fast step)
 FOOT_INDICES = {15, 16, 17, 18, 19, 20, 21, 22}  # ankles + foot keypoints
 BONE_PAIRS_FOR_SCALE = [
     # (parent_idx, child_idx, expected_length_meters, tolerance_ratio)
     # COCO-WholeBody indices
-    (5, 7, 0.28, 0.4),    # left shoulder → left elbow
-    (7, 9, 0.25, 0.4),    # left elbow → left wrist
-    (6, 8, 0.28, 0.4),    # right shoulder → right elbow
-    (8, 10, 0.25, 0.4),   # right elbow → right wrist
-    (11, 13, 0.42, 0.4),  # left hip → left knee
-    (13, 15, 0.40, 0.4),  # left knee → left ankle
-    (12, 14, 0.42, 0.4),  # right hip → right knee
-    (14, 16, 0.40, 0.4),  # right knee → right ankle
-    (5, 6, 0.36, 0.4),    # shoulder width
-    (11, 12, 0.28, 0.4),  # hip width
+    # Tolerance = max deviation from learned length. 0.25 = 25% — reasonable for
+    # stereo noise. Lower limbs are more stable, upper limbs noisier.
+    (5, 7, 0.28, 0.25),   # left shoulder → left elbow
+    (7, 9, 0.25, 0.25),   # left elbow → left wrist
+    (6, 8, 0.28, 0.25),   # right shoulder → right elbow
+    (8, 10, 0.25, 0.25),  # right elbow → right wrist
+    (11, 13, 0.42, 0.20), # left hip → left knee
+    (13, 15, 0.40, 0.20), # left knee → left ankle
+    (12, 14, 0.42, 0.20), # right hip → right knee
+    (14, 16, 0.40, 0.20), # right knee → right ankle
+    (5, 6, 0.36, 0.20),   # shoulder width
+    (11, 12, 0.28, 0.20), # hip width
 ]
 
 
@@ -947,7 +949,7 @@ class StereoCalibration:
                 px_a, py_a, conf_a = detections_a[idx]
                 px_b, py_b, conf_b = detections_b[idx]
 
-                if conf_a < 0.3 or conf_b < 0.3:
+                if conf_a < self.config.MIN_KEYPOINT_CONFIDENCE or conf_b < self.config.MIN_KEYPOINT_CONFIDENCE:
                     continue
 
                 result = self.triangulate([[px_a, py_a]], [[px_b, py_b]])

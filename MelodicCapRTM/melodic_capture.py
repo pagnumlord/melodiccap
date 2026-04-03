@@ -721,8 +721,10 @@ class MelodicCapApp:
                 elif self.recorder.is_recording:
                     detector_info = f"{self.config.POSE_MODE}_{self.config.POSE_QUALITY}"
                     trim_secs = self.config.RECORDING_TRIM_END
+                    kp_count = 133 if self.config.POSE_MODE == 'wholebody' else 17
                     self.recorder.stop(detector_info=detector_info, trim_end=trim_secs,
-                                       offline_mode=self.config.OFFLINE_MODE)
+                                       offline_mode=self.config.OFFLINE_MODE,
+                                       keypoint_count=kp_count)
                 else:
                     # Start countdown
                     self._countdown_active = True
@@ -731,7 +733,9 @@ class MelodicCapApp:
 
         # Cleanup
         if self.recorder.is_recording:
-            self.recorder.stop(offline_mode=self.config.OFFLINE_MODE)
+            kp_count = 133 if self.config.POSE_MODE == 'wholebody' else 17
+            self.recorder.stop(offline_mode=self.config.OFFLINE_MODE,
+                               keypoint_count=kp_count)
 
         self._infer_pool.shutdown(wait=False)
         self.cap_a.release()
