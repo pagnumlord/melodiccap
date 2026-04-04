@@ -26,7 +26,7 @@ motion data onto Rigify character rigs. For a short film.
 - `MelodicCapRTM/blender_addon/` — Blender addon
   - `melodiccap_rtm_addon.py` — Main addon (v4.6): imports JSON takes, retargets to JaxRigify
 
-## Blender Addon - Current State (v4.8)
+## Blender Addon - Current State (v4.9)
 - Proportional retargeting: measures mocap vs rig proportions from frame 0
 - **Hybrid mode (default)**: Arms use FK rotations, legs use IK positioning
 - Torso: yaw + pitch rotation (pitch = forward lean, rest-subtracted)
@@ -41,6 +41,7 @@ motion data onto Rigify character rigs. For a short film.
 - Arm FK confidence: wrist-to-shoulder ratio + direction stability boost (v4.7)
 - Arm splay: high fixed safety-net limit 0.80 (v4.8 — replaces broken context clamp)
 - Seated leg lateral damping: 0.25x on X component to correct camera bias (v4.8)
+- Seated arm depth damping: 0.30x on Y component of upper arm FK (v4.9)
 - Arm velocity clamp: rejects >8 m/s hand IK spikes
 - 4th-order Butterworth low-pass filter (two cascaded biquads, zero-phase) (v4.7)
 - Per-keypoint confidence stored in JSON (min of both camera scores) (v4.7)
@@ -110,6 +111,20 @@ motion data onto Rigify character rigs. For a short film.
   During sitting, X component of all leg FK directions is damped to 25%, making
   shins hang mostly straight down. Fixes the left leg inward bend during sitting.
 
+### v4.9 — Frame sync fix, seated arm depth damping
+- **Frame sync (capture pipeline)**: replaced threaded `.read()` with sequential
+  `grab()/retrieve()` pattern in melodic_capture.py. Both cameras now grab frames
+  microseconds apart on the main thread instead of 50-100ms apart in parallel
+  threads. Also set `CAP_PROP_BUFFERSIZE=1` to minimize USB frame buffer latency.
+  This is the OpenCV-recommended approach for multi-camera synchronization without
+  hardware triggers.
+- **Seated arm depth damping (SEATED_ARM_DEPTH_DAMP = 0.30)**: the depth axis
+  (Y in Blender/armature space) is the noisiest axis in stereo triangulation.
+  During sitting, upper arm Y component showed +0.70 (elbow 16cm forward of
+  shoulder — physically wrong for arms on armrests). Y is damped to 30% during
+  sitting, keeping arms at the body's sides in depth. Only affects upper arm FK
+  when `is_sitting` is true.
+
 ### v4.7 — Direction stability, 4th-order Butterworth, pipeline tightening
 - **Context-aware splay clamp (FAILED, replaced in v4.8)**: elbow height approach
   didn't work for lateral raises or seated poses.
@@ -148,7 +163,7 @@ the 0.5-0.8 feared.
 safety net for extreme triangulation artifacts only. arm_fk_conf + velocity
 clamp provide the real quality control for arm data.
 
-## Other Known Issues (as of v4.8)
+## Other Known Issues (as of v4.9)
 
 ### Left leg bending during sitting (mitigated in v4.8)
 - Left shin_fk has consistent X offset (-0.115 to -0.145) vs right (-0.063 to -0.119)
@@ -164,7 +179,9 @@ clamp provide the real quality control for arm data.
 
 ### Capture pipeline (remaining issues)
 - 3 independent 1D Kalman filters per keypoint (should be coupled 3D)
-- No camera synchronization mechanism (DroidCam ~50-100ms latency)
+- ~~No camera synchronization mechanism~~ → fixed in v4.9 (grab/retrieve)
+- 90° camera angle is geometrically suboptimal — ~45° is better (FreeMocap/Rokoko approach)
+- Kalman filter treats all 3 axes equally — depth axis (Y) should get higher measurement noise
 - Coordinate transform blender↔CV on stereo_calibration.py lines 528-531, 629
   — verified CORRECT despite looking suspicious
 
@@ -193,6 +210,8 @@ clamp provide the real quality control for arm data.
 - Per-keypoint confidence in data pipeline (v4.7)
 - Arm velocity clamping (rejects triangulation spikes)
 - Seated leg lateral damping (reduces camera placement bias in X) (v4.8)
+- Seated arm depth damping (reduces depth axis noise in upper arm Y) (v4.9)
+- Frame sync via sequential grab()/retrieve() (v4.9)
 - Dense diagnostic logging near transitions
 
 ## Known Limitations
