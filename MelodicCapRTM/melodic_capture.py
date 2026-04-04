@@ -261,6 +261,7 @@ class MelodicCapApp:
             self.cap_a.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.FRAME_WIDTH)
             self.cap_a.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.FRAME_HEIGHT)
             self.cap_a.set(cv2.CAP_PROP_FPS, self.config.FPS)
+            self.cap_a.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # v4.9: minimize frame latency
             print(f"    [OK] Camera A opened")
         else:
             print(f"    [ERROR] Failed to open Camera A")
@@ -276,6 +277,7 @@ class MelodicCapApp:
             self.cap_b.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.FRAME_WIDTH)
             self.cap_b.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.FRAME_HEIGHT)
             self.cap_b.set(cv2.CAP_PROP_FPS, self.config.FPS)
+            self.cap_b.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # v4.9: minimize frame latency
             print(f"    [OK] Camera B opened")
         else:
             print(f"    [ERROR] Failed to open Camera B")
@@ -402,12 +404,16 @@ class MelodicCapApp:
         while self.running:
             t_loop = time.time()
 
-            # Capture frames from both cameras in parallel
+            # v4.9: Sequential grab/retrieve for frame synchronization.
+            # .read() = .grab() + .retrieve() combined. Using threaded .read()
+            # means each camera grabs its frame at different times (50-100ms apart
+            # with USB cameras). Sequential grab() calls happen microseconds apart
+            # on the main thread, so both cameras capture the same moment.
             t0 = time.time()
-            fut_a = self._infer_pool.submit(self.cap_a.read)
-            fut_b = self._infer_pool.submit(self.cap_b.read)
-            ret_a, frame_a = fut_a.result()
-            ret_b, frame_b = fut_b.result()
+            grab_a = self.cap_a.grab()
+            grab_b = self.cap_b.grab()
+            ret_a, frame_a = self.cap_a.retrieve() if grab_a else (False, None)
+            ret_b, frame_b = self.cap_b.retrieve() if grab_b else (False, None)
             t_cam = time.time() - t0
 
             if not ret_a or not ret_b:
@@ -457,8 +463,10 @@ class MelodicCapApp:
                     print("[FLOOR-AUTO] Collecting ankle samples...")
                     ankle_samples = []
                     for _ in range(15):
-                        ret_sa, sample_a = self.cap_a.read()
-                        ret_sb, sample_b = self.cap_b.read()
+                        grab_sa = self.cap_a.grab()
+                        grab_sb = self.cap_b.grab()
+                        ret_sa, sample_a = self.cap_a.retrieve() if grab_sa else (False, None)
+                        ret_sb, sample_b = self.cap_b.retrieve() if grab_sb else (False, None)
                         if ret_sa and ret_sb:
                             sa = self.detector.detect_single(sample_a, min_confidence=self.config.MIN_KEYPOINT_CONFIDENCE)
                             sb = self.detector.detect_single(sample_b, min_confidence=self.config.MIN_KEYPOINT_CONFIDENCE)

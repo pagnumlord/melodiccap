@@ -1139,6 +1139,18 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         # movement to still show through.
         SEATED_LEG_LATERAL_DAMP = 0.25
 
+        # v4.9: Seated arm depth damping.
+        # The depth axis (Y in Blender/armature space) is the noisiest axis
+        # in stereo triangulation — each camera measures it as a derived
+        # quantity, not a direct pixel measurement. At 90° camera angle,
+        # depth errors from the two cameras compound instead of canceling.
+        # During sitting, upper arms should hang roughly straight down from
+        # shoulders. Instead, elbow Y offset pushes arms behind the body
+        # (upper_arm Y=+0.70 means elbow 16cm forward of shoulder in
+        # Blender Y — physically wrong for armrests). Damping Y to 30%
+        # during sitting keeps arms roughly at the body's sides in depth.
+        SEATED_ARM_DEPTH_DAMP = 0.30
+
         # Spine rest direction: logged for diagnostics but NOT subtracted
         # from spine FK. The torso bone already applies rest-subtracted pitch.
         # Subtracting tilt from spine FK too causes double-rotation (v4.4 bug:
@@ -1528,6 +1540,14 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                     target_dir = target_dir.normalized()
                                     splay_clamped = True
 
+                                # v4.9: Seated arm depth damping — reduce depth axis noise
+                                # in Y component when sitting (arms should hang down, not
+                                # project forward/backward from triangulation error)
+                                raw_ua_y = target_dir.y
+                                if is_sitting:
+                                    target_dir.y *= SEATED_ARM_DEPTH_DAMP
+                                    target_dir = target_dir.normalized()
+
                                 ua_bone.rotation_mode = 'QUATERNION'
                                 ua_rot = compute_fk_rotation(ua_bone, target_dir, 'auto')
 
@@ -1563,8 +1583,9 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 if do_log:
                                     hold_str = " HOLD" if arm_fk_conf < ARM_HOLD_CONF_THRESHOLD and last_good_arm_rot[ua_name] is not None else ""
                                     clamp_str = " CLAMPED" if splay_clamped else ""
+                                    ydamp_str = f" raw_y={raw_ua_y:.3f} YDAMP" if is_sitting else ""
                                     DiagLog.data(f"  arm_fk.{ua_name}",
-                                        f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f}){clamp_str}{hold_str}")
+                                        f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f}){clamp_str}{ydamp_str}{hold_str}")
 
                         # Forearm second (uses upper_arm's computed matrix)
                         fa_mapping = V2R_MAPPING.get(fa_name)
