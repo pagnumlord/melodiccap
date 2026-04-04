@@ -1129,6 +1129,16 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         # handle bad data. This is just a safety net for extreme artifacts.
         ARM_SPLAY_LIMIT = 0.80  # max |X| in armature space — allows full lateral raises
 
+        # v4.8: Seated leg lateral damping.
+        # Camera placement asymmetry causes systematic triangulation bias in
+        # the lateral (X) direction of leg FK bones. During sitting, shins
+        # hang mostly straight down — the X component is almost entirely
+        # camera bias (left shin X=-0.14, right X=-0.08, BOTH negative =
+        # same direction = clearly not real anatomy, it's camera geometry).
+        # Damping X to 25% reduces the bias while allowing real lateral
+        # movement to still show through.
+        SEATED_LEG_LATERAL_DAMP = 0.25
+
         # Spine rest direction: logged for diagnostics but NOT subtracted
         # from spine FK. The torso bone already applies rest-subtracted pitch.
         # Subtracting tilt from spine FK too causes double-rotation (v4.4 bug:
@@ -1606,6 +1616,13 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 if p_start is None or p_end is None:
                                     continue
                                 target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
+
+                                # v4.8: Seated lateral damping — reduce camera
+                                # placement bias in X component of leg FK
+                                raw_x = target_dir.x
+                                target_dir.x *= SEATED_LEG_LATERAL_DAMP
+                                target_dir = target_dir.normalized()
+
                                 parent_ovr = prev_expected if prev_expected is not None else 'auto'
                                 bone.rotation_mode = 'QUATERNION'
                                 rot = compute_fk_rotation(bone, target_dir, parent_ovr)
@@ -1619,11 +1636,11 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                     rest_off = bone.bone.matrix_local
                                 prev_expected = p_mat @ rest_off @ rot.to_matrix().to_4x4()
 
-                                # v4.6: Log leg FK directions during sitting
+                                # v4.8: Log leg FK with raw vs damped X
                                 if do_log:
                                     rot_angle = math.degrees(rot.angle)
                                     DiagLog.data(f"  leg_fk.{bone_name}",
-                                        f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f}) rot={rot_angle:.1f}°")
+                                        f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f}) raw_x={raw_x:.3f} rot={rot_angle:.1f}°")
 
                 elif do_leg_fk and not do_arm_fk:
                     # Sitting with pure IK arms — only process leg FK
@@ -1646,6 +1663,12 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                             if p_start is None or p_end is None:
                                 continue
                             target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
+
+                            # v4.8: Seated lateral damping
+                            raw_x = target_dir.x
+                            target_dir.x *= SEATED_LEG_LATERAL_DAMP
+                            target_dir = target_dir.normalized()
+
                             parent_ovr = prev_expected if prev_expected is not None else 'auto'
                             bone.rotation_mode = 'QUATERNION'
                             rot = compute_fk_rotation(bone, target_dir, parent_ovr)
@@ -1659,11 +1682,11 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 rest_off = bone.bone.matrix_local
                             prev_expected = p_mat @ rest_off @ rot.to_matrix().to_4x4()
 
-                            # v4.6: Log leg FK directions during sitting
+                            # v4.8: Log leg FK with raw vs damped X
                             if do_log:
                                 rot_angle = math.degrees(rot.angle)
                                 DiagLog.data(f"  leg_fk.{bone_name}",
-                                    f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f}) rot={rot_angle:.1f}°")
+                                    f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f}) raw_x={raw_x:.3f} rot={rot_angle:.1f}°")
                 else:
                     # Pure FK: process all limb bones (legs + arms)
                     # Process in parent→child order within each chain

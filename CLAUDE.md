@@ -39,7 +39,8 @@ motion data onto Rigify character rigs. For a short film.
 - Sit/stand detection: hip Z drop with hysteresis (-0.15m sit, -0.10m stand)
 - When sitting: legs switch to FK, foot pinning disabled
 - Arm FK confidence: wrist-to-shoulder ratio + direction stability boost (v4.7)
-- Arm splay clamp: context-aware soft clamp — scales with arm raise height (v4.7)
+- Arm splay: high fixed safety-net limit 0.80 (v4.8 — replaces broken context clamp)
+- Seated leg lateral damping: 0.25x on X component to correct camera bias (v4.8)
 - Arm velocity clamp: rejects >8 m/s hand IK spikes
 - 4th-order Butterworth low-pass filter (two cascaded biquads, zero-phase) (v4.7)
 - Per-keypoint confidence stored in JSON (min of both camera scores) (v4.7)
@@ -95,7 +96,7 @@ motion data onto Rigify character rigs. For a short film.
 - Dense logging: every frame within ±12 of sit transitions
 - Per-frame arm_fk_conf + leg FK direction logging
 
-### v4.8 — Fix arm splay limit (actually works this time)
+### v4.8 — Fix arm splay limit, seated leg lateral damping
 - **ARM_SPLAY_LIMIT = 0.80 fixed**: v4.7's context-aware clamp using elbow height
   above shoulder FAILED — lateral arm raises keep elbows at/below shoulder height,
   so splay_lim stayed at 0.15, still crushing arm raises. Also caused seated
@@ -103,6 +104,11 @@ motion data onto Rigify character rigs. For a short film.
   limit (0.80) that acts as a safety net for extreme triangulation artifacts only.
   The original chicken-wing was an IK solver artifact (v3.x), not applicable to FK.
   arm_fk_conf + velocity clamp handle noisy data.
+- **Seated leg lateral damping (SEATED_LEG_LATERAL_DAMP = 0.25)**: camera placement
+  asymmetry causes systematic triangulation bias in shin X component (left=-0.14,
+  right=-0.08, both negative = same direction = clearly camera bias not anatomy).
+  During sitting, X component of all leg FK directions is damped to 25%, making
+  shins hang mostly straight down. Fixes the left leg inward bend during sitting.
 
 ### v4.7 — Direction stability, 4th-order Butterworth, pipeline tightening
 - **Context-aware splay clamp (FAILED, replaced in v4.8)**: elbow height approach
@@ -144,10 +150,11 @@ clamp provide the real quality control for arm data.
 
 ## Other Known Issues (as of v4.8)
 
-### Left leg bending during sitting
+### Left leg bending during sitting (mitigated in v4.8)
 - Left shin_fk has consistent X offset (-0.115 to -0.145) vs right (-0.063 to -0.119)
-- Shin rotation angles are large (65-82°) — may be amplified by parent chain
-- Could be triangulation asymmetry from camera placement (one camera closer to left side)
+- Root cause: camera placement asymmetry (both X values negative = same direction bias)
+- v4.8 adds SEATED_LEG_LATERAL_DAMP=0.25 to reduce X to 25% during sitting
+- Residual asymmetry may remain if cameras are very unequally placed
 
 ### Head pitch_via_neck diagnostic shows 60°+ during sitting
 - This is a RAW MOCAP diagnostic metric (nose-ear angle), NOT the applied rotation
@@ -185,6 +192,7 @@ clamp provide the real quality control for arm data.
 - Arm FK direction stability confidence boost (v4.7)
 - Per-keypoint confidence in data pipeline (v4.7)
 - Arm velocity clamping (rejects triangulation spikes)
+- Seated leg lateral damping (reduces camera placement bias in X) (v4.8)
 - Dense diagnostic logging near transitions
 
 ## Known Limitations
