@@ -566,44 +566,66 @@ class MelodicCapApp:
                     cv2.aruco.drawDetectedCornersCharuco(display_a, ca)
                     cv2.aruco.drawDetectedCornersCharuco(display_b, cb)
 
-                    # Check if board is still (corners haven't moved since last check)
-                    board_still = False
-                    STILL_THRESH = 2.0  # pixels — must move less than this
-                    if (self._prev_cal_corners_a is not None and
-                            self._prev_cal_corners_b is not None and
-                            len(ca) >= 6 and len(cb) >= 6):
-                        # Compare common corners between current and previous
-                        prev_a, prev_ida = self._prev_cal_corners_a
-                        prev_b, prev_idb = self._prev_cal_corners_b
-                        if prev_ida is not None and prev_idb is not None:
-                            common_a = set(ida.flatten()) & set(prev_ida.flatten())
-                            common_b = set(idb.flatten()) & set(prev_idb.flatten())
-                            if len(common_a) >= 4 and len(common_b) >= 4:
-                                # Compute max corner movement
-                                move_a = 0
-                                for cid in common_a:
-                                    idx_cur = np.where(ida.flatten() == cid)[0][0]
-                                    idx_prev = np.where(prev_ida.flatten() == cid)[0][0]
-                                    move_a = max(move_a, np.linalg.norm(ca[idx_cur].flatten() - prev_a[idx_prev].flatten()))
-                                move_b = 0
-                                for cid in common_b:
-                                    idx_cur = np.where(idb.flatten() == cid)[0][0]
-                                    idx_prev = np.where(prev_idb.flatten() == cid)[0][0]
-                                    move_b = max(move_b, np.linalg.norm(cb[idx_cur].flatten() - prev_b[idx_prev].flatten()))
-                                board_still = (move_a < STILL_THRESH and move_b < STILL_THRESH)
+                    # v4.9: Check common corners between cameras BEFORE capture.
+                    # Previously only checked per-camera count (len >= 6), but
+                    # cameras can each see 6+ different corner IDs with no overlap.
+                    # This wastes the user's time capturing useless frames.
+                    MIN_COMMON_FOR_CAPTURE = 8
+                    common_ab = set(ida.flatten()) & set(idb.flatten())
+                    n_common = len(common_ab)
 
-                    self._prev_cal_corners_a = (ca, ida)
-                    self._prev_cal_corners_b = (cb, idb)
+                    # Show live corner count on both displays
+                    corner_color = (0, 255, 0) if n_common >= MIN_COMMON_FOR_CAPTURE else (0, 0, 255)
+                    corner_text = f"Common: {n_common} (A:{len(ca)} B:{len(cb)})"
+                    cv2.putText(display_a, corner_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, corner_color, 2)
+                    cv2.putText(display_b, corner_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, corner_color, 2)
 
-                    if board_still and time.time() - self._last_cal_time > 0.5:
-                        self.cal_frames_a.append(frame_a.copy())
-                        self.cal_frames_b.append(frame_b.copy())
-                        self._last_cal_time = time.time()
-                        print(f"  Captured frame {len(self.cal_frames_a)}")
-                    elif not board_still and time.time() - self._last_cal_time > 2.0:
-                        # Show hint if user hasn't gotten a frame in a while
-                        draw_status(display_a, "HOLD STILL to capture", (0, 165, 255))
-                        draw_status(display_b, "HOLD STILL to capture", (0, 165, 255))
+                    if n_common < MIN_COMMON_FOR_CAPTURE:
+                        # Not enough common corners — show guidance
+                        if n_common == 0:
+                            hint = "Board not seen by both cameras"
+                        else:
+                            hint = f"Angle board so BOTH cameras see it ({n_common}/8 common)"
+                        draw_status(display_a, hint, (0, 0, 255))
+                        draw_status(display_b, hint, (0, 0, 255))
+                        self._prev_cal_corners_a = None
+                        self._prev_cal_corners_b = None
+                    else:
+                        # Enough common corners — check stillness
+                        board_still = False
+                        STILL_THRESH = 2.0  # pixels — must move less than this
+                        if (self._prev_cal_corners_a is not None and
+                                self._prev_cal_corners_b is not None and
+                                len(ca) >= 6 and len(cb) >= 6):
+                            prev_a, prev_ida = self._prev_cal_corners_a
+                            prev_b, prev_idb = self._prev_cal_corners_b
+                            if prev_ida is not None and prev_idb is not None:
+                                common_a = set(ida.flatten()) & set(prev_ida.flatten())
+                                common_b = set(idb.flatten()) & set(prev_idb.flatten())
+                                if len(common_a) >= 4 and len(common_b) >= 4:
+                                    move_a = 0
+                                    for cid in common_a:
+                                        idx_cur = np.where(ida.flatten() == cid)[0][0]
+                                        idx_prev = np.where(prev_ida.flatten() == cid)[0][0]
+                                        move_a = max(move_a, np.linalg.norm(ca[idx_cur].flatten() - prev_a[idx_prev].flatten()))
+                                    move_b = 0
+                                    for cid in common_b:
+                                        idx_cur = np.where(idb.flatten() == cid)[0][0]
+                                        idx_prev = np.where(prev_idb.flatten() == cid)[0][0]
+                                        move_b = max(move_b, np.linalg.norm(cb[idx_cur].flatten() - prev_b[idx_prev].flatten()))
+                                    board_still = (move_a < STILL_THRESH and move_b < STILL_THRESH)
+
+                        self._prev_cal_corners_a = (ca, ida)
+                        self._prev_cal_corners_b = (cb, idb)
+
+                        if board_still and time.time() - self._last_cal_time > 0.5:
+                            self.cal_frames_a.append(frame_a.copy())
+                            self.cal_frames_b.append(frame_b.copy())
+                            self._last_cal_time = time.time()
+                            print(f"  Captured frame {len(self.cal_frames_a)} ({n_common} common corners)")
+                        elif not board_still and time.time() - self._last_cal_time > 2.0:
+                            draw_status(display_a, "HOLD STILL to capture", (0, 165, 255))
+                            draw_status(display_b, "HOLD STILL to capture", (0, 165, 255))
                 else:
                     self._prev_cal_corners_a = None
                     self._prev_cal_corners_b = None
