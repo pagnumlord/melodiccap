@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (4, 7),
+    "version": (4, 8),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -1118,16 +1118,16 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         DiagLog.data("Foot Z offset L", f"{foot_z_offset['L']:.4f}m")
         DiagLog.data("Foot Z offset R", f"{foot_z_offset['R']:.4f}m")
 
-        # Arm splay CLAMP: context-aware soft clamp (v4.7).
-        # v4.4 had ARM_SPLAY_MAX=0.10 which destroyed arm raises by crushing
-        # the outward X component. Now we scale the clamp based on how raised
-        # the arm is: when elbow is near shoulder height, the arm is raised
-        # and we allow full splay. When elbow is hanging at sides, we clamp
-        # tightly to prevent chicken-wing from triangulation noise.
-        ARM_SPLAY_REST = 0.15   # max |X| when arm hangs at side (tight)
-        ARM_SPLAY_RAISED = 0.95 # max |X| when arm is fully raised (permissive)
-        ARM_RAISE_THRESHOLD = 0.15  # elbow-shoulder Z delta (m) where raise starts
-        ARM_RAISE_FULL = 0.35       # elbow-shoulder Z delta (m) where raise is full
+        # Arm splay limit (v4.8): high fixed safety net.
+        # v4.4's ARM_SPLAY_MAX=0.10 destroyed arm raises. v4.7 tried context-
+        # aware clamp based on elbow height above shoulder — failed because
+        # lateral arm raises keep elbows at/below shoulder height, so splay_lim
+        # stayed at 0.15, still crushing X. Also caused seated chicken-wing
+        # (elbows pushed inside torso).
+        # The original chicken-wing was an IK solver artifact (v3.x), not a
+        # triangulation noise issue. In FK mode, arm_fk_conf + velocity clamp
+        # handle bad data. This is just a safety net for extreme artifacts.
+        ARM_SPLAY_LIMIT = 0.80  # max |X| in armature space — allows full lateral raises
 
         # Spine rest direction: logged for diagnostics but NOT subtracted
         # from spine FK. The torso bone already applies rest-subtracted pitch.
@@ -1506,27 +1506,17 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                             if p_start is not None and p_end is not None:
                                 target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
 
-                                # v4.7: Context-aware soft splay clamp.
-                                # Measure how raised the arm is: elbow Z relative
-                                # to shoulder Z. When raised, allow full splay.
-                                # When hanging at sides, clamp to prevent chicken-wing.
-                                elbow_raise = 0.0
-                                if p_start is not None and p_end is not None:
-                                    elbow_raise = p_end.z - p_start.z  # +ve = elbow above shoulder
-                                raise_t = max(0.0, min(1.0,
-                                    (elbow_raise - ARM_RAISE_THRESHOLD) /
-                                    (ARM_RAISE_FULL - ARM_RAISE_THRESHOLD)))
-                                # Smooth step for natural transition
-                                raise_t = raise_t * raise_t * (3.0 - 2.0 * raise_t)
-                                splay_limit = ARM_SPLAY_REST + raise_t * (ARM_SPLAY_RAISED - ARM_SPLAY_REST)
-
+                                # v4.8: Fixed high splay limit (safety net only).
                                 # Apply clamp: L arm outward is +X, R arm is -X
-                                if side == "L" and target_dir.x > splay_limit:
-                                    target_dir.x = splay_limit
+                                splay_clamped = False
+                                if side == "L" and target_dir.x > ARM_SPLAY_LIMIT:
+                                    target_dir.x = ARM_SPLAY_LIMIT
                                     target_dir = target_dir.normalized()
-                                elif side == "R" and target_dir.x < -splay_limit:
-                                    target_dir.x = -splay_limit
+                                    splay_clamped = True
+                                elif side == "R" and target_dir.x < -ARM_SPLAY_LIMIT:
+                                    target_dir.x = -ARM_SPLAY_LIMIT
                                     target_dir = target_dir.normalized()
+                                    splay_clamped = True
 
                                 ua_bone.rotation_mode = 'QUATERNION'
                                 ua_rot = compute_fk_rotation(ua_bone, target_dir, 'auto')
@@ -1562,8 +1552,9 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
                                 if do_log:
                                     hold_str = " HOLD" if arm_fk_conf < ARM_HOLD_CONF_THRESHOLD and last_good_arm_rot[ua_name] is not None else ""
+                                    clamp_str = " CLAMPED" if splay_clamped else ""
                                     DiagLog.data(f"  arm_fk.{ua_name}",
-                                        f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f}) splay_lim={splay_limit:.2f} raise={elbow_raise:+.3f}m{hold_str}")
+                                        f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f}){clamp_str}{hold_str}")
 
                         # Forearm second (uses upper_arm's computed matrix)
                         fa_mapping = V2R_MAPPING.get(fa_name)

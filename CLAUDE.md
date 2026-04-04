@@ -26,7 +26,7 @@ motion data onto Rigify character rigs. For a short film.
 - `MelodicCapRTM/blender_addon/` — Blender addon
   - `melodiccap_rtm_addon.py` — Main addon (v4.6): imports JSON takes, retargets to JaxRigify
 
-## Blender Addon - Current State (v4.7)
+## Blender Addon - Current State (v4.8)
 - Proportional retargeting: measures mocap vs rig proportions from frame 0
 - **Hybrid mode (default)**: Arms use FK rotations, legs use IK positioning
 - Torso: yaw + pitch rotation (pitch = forward lean, rest-subtracted)
@@ -95,12 +95,18 @@ motion data onto Rigify character rigs. For a short film.
 - Dense logging: every frame within ±12 of sit transitions
 - Per-frame arm_fk_conf + leg FK direction logging
 
-### v4.7 — Context-aware splay, direction stability, 4th-order Butterworth
-- **ARM_SPLAY_MAX replaced with context-aware soft clamp**: measures elbow Z
-  relative to shoulder Z. When arm is raised (elbow above shoulder by 0.15-0.35m),
-  splay limit opens from 0.15 → 0.95 with smooth-step interpolation.
-  When arm hangs at sides, tight clamp prevents chicken-wing. Fixes the #1
-  regression from v4.4 that destroyed arm raises.
+### v4.8 — Fix arm splay limit (actually works this time)
+- **ARM_SPLAY_LIMIT = 0.80 fixed**: v4.7's context-aware clamp using elbow height
+  above shoulder FAILED — lateral arm raises keep elbows at/below shoulder height,
+  so splay_lim stayed at 0.15, still crushing arm raises. Also caused seated
+  chicken-wing (elbows pushed inside torso). Replaced with a single high fixed
+  limit (0.80) that acts as a safety net for extreme triangulation artifacts only.
+  The original chicken-wing was an IK solver artifact (v3.x), not applicable to FK.
+  arm_fk_conf + velocity clamp handle noisy data.
+
+### v4.7 — Direction stability, 4th-order Butterworth, pipeline tightening
+- **Context-aware splay clamp (FAILED, replaced in v4.8)**: elbow height approach
+  didn't work for lateral raises or seated poses.
 - **Direction stability confidence boost**: arm_fk_conf no longer drops to 0 when
   wrist-shoulder distance is short. If shoulder→elbow direction is stable frame-
   to-frame (dot product > 0.95), confidence gets up to +0.5 boost. Fixes arms
@@ -116,28 +122,27 @@ motion data onto Rigify character rigs. For a short film.
   - keypoint_format now reflects actual mode (coco_body_17 vs coco_wholebody_133)
   - Per-keypoint confidence stored: min(conf_a, conf_b) per triangulated point
 
-## RESOLVED — ARM_SPLAY_MAX = 0.10 Destroyed Arm Raises (v4.4-v4.6)
+## RESOLVED — ARM_SPLAY_MAX = 0.10 Destroyed Arm Raises (v4.4-v4.7)
 
-**This is the #1 regression from v3.x.** The ARM_SPLAY_MAX clamp was added in
-v4.4 to fix chicken-wing (elbows splaying outward during standing). It clamps
+**This was the #1 regression from v3.x.** The ARM_SPLAY_MAX clamp was added in
+v4.4 to fix chicken-wing (elbows splaying outward during standing). It clamped
 the outward X component of the upper arm FK direction to 0.10 in armature space.
 
-**Problem**: When the user raises their arms out to the side or up, the outward
-X component in armature space can be 0.5-0.8+. Clamping to 0.10 crushes this,
-and after renormalization the downward Z component dominates, making the arm
-point nearly straight down. Example from v4.6 test at arm-raise peak:
-- Mocap shoulder→elbow world direction: ~(0.83, -0.08, -0.55) — arm raised ~33°
-- After armature transform + ARM_SPLAY_MAX clamp: (0.178, -0.134, -0.975) — CRUSHED
+**Problem**: Lateral arm raises produce X of 0.26+ in armature space. Even v4.7's
+context-aware clamp using elbow height kept splay_lim at 0.15 because elbows
+stay at/below shoulder height during lateral raises. Also made seated poses worse
+by pushing elbows inside the torso.
 
-**Why it worked in v3.x**: Arms used IK, not FK. The wrist IK target was
-positioned from mocap data without any splay clamp. IK solver pulled the hand
-to the correct position regardless of elbow direction.
+**Root cause**: The original chicken-wing was an IK solver artifact (v3.x) —
+when wrist is close to shoulder, IK solver bends elbow sideways. In FK mode,
+this doesn't happen. Triangulation noise is small (X varies ~0.15-0.25), not
+the 0.5-0.8 feared.
 
-**Fixed in v4.7**: Context-aware soft clamp (option 2+3 combined). Splay limit
-scales from 0.15 (arms at sides) to 0.95 (arms raised) based on elbow height
-relative to shoulder. Uses smooth-step interpolation for natural transitions.
+**Fixed in v4.8**: Single high fixed limit (ARM_SPLAY_LIMIT = 0.80). Acts as
+safety net for extreme triangulation artifacts only. arm_fk_conf + velocity
+clamp provide the real quality control for arm data.
 
-## Other Known Issues (as of v4.7)
+## Other Known Issues (as of v4.8)
 
 ### Left leg bending during sitting
 - Left shin_fk has consistent X offset (-0.115 to -0.145) vs right (-0.063 to -0.119)
@@ -176,7 +181,7 @@ relative to shoulder. Uses smooth-step interpolation for natural transitions.
 - Sit/stand detection with hysteresis
 - Depsgraph flush ordering (fixed in v4.6)
 - 4th-order Butterworth low-pass filter (custom implementation, no scipy) (v4.7)
-- Context-aware arm splay clamp (v4.7)
+- Arm splay: high fixed safety-net limit 0.80 (v4.8 — replaces broken context clamp)
 - Arm FK direction stability confidence boost (v4.7)
 - Per-keypoint confidence in data pipeline (v4.7)
 - Arm velocity clamping (rejects triangulation spikes)
