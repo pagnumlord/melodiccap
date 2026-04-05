@@ -417,8 +417,18 @@ class MelodicCapApp:
             t_cam = time.time() - t0
 
             if not ret_a or not ret_b:
-                print("[WARNING] Frame capture failed")
-                continue
+                # Cameras may need flushing after idle periods (calibration, etc.)
+                # Try a few more grabs before giving up on this frame
+                for _ in range(5):
+                    self.cap_a.grab()
+                    self.cap_b.grab()
+                grab_a = self.cap_a.grab()
+                grab_b = self.cap_b.grab()
+                ret_a, frame_a = self.cap_a.retrieve() if grab_a else (False, None)
+                ret_b, frame_b = self.cap_b.retrieve() if grab_b else (False, None)
+                if not ret_a or not ret_b:
+                    print("[WARNING] Frame capture failed")
+                    continue
 
             # Only run pose detection when NOT in calibration modes
             # (pose inference is expensive, skip it during calibration)
@@ -710,6 +720,13 @@ class MelodicCapApp:
 
                     if self.calibration.calibrate_stereo(self.cal_frames_a, self.cal_frames_b):
                         self.calibration.save(self.config.CALIBRATION_FILE)
+
+                    # v4.9: Flush camera buffers after long calibration processing.
+                    # grab()/retrieve() fails if cameras sit idle for seconds —
+                    # the USB buffer fills with stale frames that can't be grabbed.
+                    for _ in range(10):
+                        self.cap_a.grab()
+                        self.cap_b.grab()
 
                     self.cal_frames_a = []
                     self.cal_frames_b = []
