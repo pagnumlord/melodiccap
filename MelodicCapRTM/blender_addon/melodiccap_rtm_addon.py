@@ -1609,12 +1609,18 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                             if p_start is not None and p_end is not None:
                                 target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
 
-                                # v5.0: Apply same depth damping to forearm when sitting.
-                                # Elbow depth is overestimated during sitting, making
-                                # forearm point backward (-Y) instead of downward (-Z).
+                                # v5.0: Zero forearm depth (Y) when sitting.
+                                # Elbow depth is overestimated by stereo, making
+                                # forearm point backward (-Y) instead of down (-Z).
+                                # Multiplicative damping fails here because Y dominates
+                                # (raw_y=-0.96) — normalization re-inflates it.
+                                # Zeroing Y forces direction to X+Z plane (reliable axes).
+                                # Forearms at rest are vertical or horizontal — no depth.
                                 raw_fa_y = target_dir.y
                                 if is_sitting:
-                                    target_dir.y *= SEATED_ARM_DEPTH_DAMP
+                                    target_dir.y = 0.0
+                                    if target_dir.length < 0.01:
+                                        target_dir = Vector((0, 0, -1))
                                     target_dir = target_dir.normalized()
 
                                 fa_bone.rotation_mode = 'QUATERNION'
