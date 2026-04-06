@@ -1608,6 +1608,15 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                             p_end = get_landmark(landmarks_3d, fa_mapping[1])
                             if p_start is not None and p_end is not None:
                                 target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
+
+                                # v5.0: Apply same depth damping to forearm when sitting.
+                                # Elbow depth is overestimated during sitting, making
+                                # forearm point backward (-Y) instead of downward (-Z).
+                                raw_fa_y = target_dir.y
+                                if is_sitting:
+                                    target_dir.y *= SEATED_ARM_DEPTH_DAMP
+                                    target_dir = target_dir.normalized()
+
                                 fa_bone.rotation_mode = 'QUATERNION'
                                 fa_rot = compute_fk_rotation(
                                     fa_bone, target_dir, ua_expected_matrix)
@@ -1627,8 +1636,9 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
                                 if do_log:
                                     hold_str = " HOLD" if arm_fk_conf < ARM_HOLD_CONF_THRESHOLD and last_good_arm_rot[fa_name] is not None else ""
+                                    ydamp_fa_str = f" raw_y={raw_fa_y:.3f} YDAMP" if is_sitting else ""
                                     DiagLog.data(f"  arm_fk.{fa_name}",
-                                        f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f}){hold_str}")
+                                        f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f}){ydamp_fa_str}{hold_str}")
 
                     # Leg FK when sitting (parent→child: thigh → shin → foot)
                     if do_leg_fk:
