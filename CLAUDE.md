@@ -26,10 +26,10 @@ motion data onto Rigify character rigs. For a short film.
 - `MelodicCapRTM/blender_addon/` — Blender addon
   - `melodiccap_rtm_addon.py` — Main addon (v4.6): imports JSON takes, retargets to JaxRigify
 
-## Blender Addon - Current State (v4.9)
+## Blender Addon - Current State (v5.0)
 - Proportional retargeting: measures mocap vs rig proportions from frame 0
 - **Hybrid mode (default)**: Arms use FK rotations, legs use IK positioning
-- Torso: yaw + pitch rotation (pitch = forward lean, rest-subtracted)
+- Torso: yaw (rest-subtracted + depth-damped) + pitch (rest-subtracted) (v5.0)
 - Spine FK: single bone OR full 4-bone chain (distributes rotation 1/N per bone)
 - Neck FK: parent-aware ('auto' mode) — relative to current torso/spine
 - Head: yaw-only from ear line vs shoulder line
@@ -41,7 +41,9 @@ motion data onto Rigify character rigs. For a short film.
 - Arm FK confidence: wrist-to-shoulder ratio + direction stability boost (v4.7)
 - Arm splay: high fixed safety-net limit 0.80 (v4.8 — replaces broken context clamp)
 - Seated leg lateral damping: 0.25x on X component to correct camera bias (v4.8)
-- Seated arm depth damping: 0.30x on Y component of upper arm FK (v4.9)
+- Seated arm depth damping: 0.30x on Y component of upper arm AND forearm FK (v5.0)
+- Yaw depth damping: 0.35x on Y component before yaw atan2 (v5.0)
+- Yaw rest subtraction: frame 0 yaw bias removed (mirrors pitch pattern) (v5.0)
 - Arm velocity clamp: rejects >8 m/s hand IK spikes
 - 4th-order Butterworth low-pass filter (two cascaded biquads, zero-phase) (v4.7)
 - Per-keypoint confidence stored in JSON (min of both camera scores) (v4.7)
@@ -110,6 +112,18 @@ motion data onto Rigify character rigs. For a short film.
   right=-0.08, both negative = same direction = clearly camera bias not anatomy).
   During sitting, X component of all leg FK directions is damped to 25%, making
   shins hang mostly straight down. Fixes the left leg inward bend during sitting.
+
+### v5.0 — Yaw fix, forearm depth damping
+- **Yaw depth damping (YAW_DEPTH_DAMP = 0.35)**: the Y (depth) component of the
+  body-right vector was contaminating yaw computation. At 90° stereo angle, depth
+  is the worst-resolved axis. Damping Y before `atan2` reduces spurious rotation.
+  Always-on (not seated-only). Reduced sitting yaw from -13.5° to ~-5° (raw).
+- **Yaw rest subtraction (torso_rest_yaw)**: stores frame 0 yaw and subtracts it
+  from all frames, removing constant camera-geometry bias. Mirrors the existing
+  `torso_rest_pitch` pattern. Combined with depth damping: sitting yaw -13.5° → -2.7°.
+- **Forearm depth damping**: extended SEATED_ARM_DEPTH_DAMP to forearm FK (was
+  only upper arm). Forearm Y was -0.96 during sitting (pointing almost straight
+  backward from elbow depth overestimation). Damping fixes hands-pointing-down.
 
 ### v4.9 — Frame sync fix, seated arm depth damping
 - **Frame sync (capture pipeline)**: replaced threaded `.read()` with sequential
