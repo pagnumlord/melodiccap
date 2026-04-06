@@ -1151,6 +1151,14 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         # during sitting keeps arms roughly at the body's sides in depth.
         SEATED_ARM_DEPTH_DAMP = 0.30
 
+        # v5.0: Yaw depth-axis damping.
+        # Y (depth) is the noisiest axis in stereo — damping it before
+        # computing yaw reduces spurious rotation from depth noise.
+        # Always-on (not just seated) because depth is always the worst axis.
+        # At 0.35: small depth noise is heavily attenuated, real 90° turns
+        # are barely affected (atan2 dominated by X shrinking, not Y).
+        YAW_DEPTH_DAMP = 0.35
+
         # Spine rest direction: logged for diagnostics but NOT subtracted
         # from spine FK. The torso bone already applies rest-subtracted pitch.
         # Subtracting tilt from spine FK too causes double-rotation (v4.4 bug:
@@ -1313,9 +1321,15 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     body_right.z = 0  # Project to ground plane
 
                     yaw_angle = 0.0
+                    raw_yaw = 0.0
                     if body_right.length > 0.01:
+                        body_right.y *= YAW_DEPTH_DAMP
                         body_right = body_right.normalized()
-                        yaw_angle = math.atan2(-body_right.y, body_right.x)
+                        raw_yaw = math.atan2(-body_right.y, body_right.x)
+                        # Subtract rest yaw (frame 0 bias) — mirrors torso_rest_pitch pattern
+                        if 'torso_rest_yaw' not in mocap_props:
+                            mocap_props['torso_rest_yaw'] = raw_yaw
+                        yaw_angle = raw_yaw - mocap_props['torso_rest_yaw']
 
                     # --- PITCH (X rotation): forward/backward lean ---
                     # Measure spine tilt: angle between hip→shoulder and vertical
@@ -1350,7 +1364,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     mocap_props['_current_torso_yaw'] = yaw_angle
 
                     if do_log:
-                        DiagLog.data("  torso_yaw", f"{math.degrees(yaw_angle):.1f}°")
+                        DiagLog.data("  torso_yaw", f"{math.degrees(yaw_angle):.1f}° (raw={math.degrees(raw_yaw):.1f}° rest={math.degrees(mocap_props.get('torso_rest_yaw',0)):.1f}°)")
                         DiagLog.data("  torso_pitch", f"{math.degrees(pitch_angle):.1f}° (from vertical, rest-subtracted)")
 
             # =====================
