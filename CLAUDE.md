@@ -26,13 +26,14 @@ motion data onto Rigify character rigs. For a short film.
 - `MelodicCapRTM/blender_addon/` — Blender addon
   - `melodiccap_rtm_addon.py` — Main addon (v4.6): imports JSON takes, retargets to JaxRigify
 
-## Blender Addon - Current State (v5.0)
+## Blender Addon - Current State (v5.2)
 - Proportional retargeting: measures mocap vs rig proportions from frame 0
 - **Hybrid mode (default)**: Arms use FK rotations, legs use IK positioning
 - Torso: yaw (rest-subtracted + depth-damped) + pitch (rest-subtracted) (v5.0)
 - Spine FK: single bone OR full 4-bone chain (distributes rotation 1/N per bone)
 - Neck FK: parent-aware ('auto' mode) — relative to current torso/spine
-- Head: yaw-only from ear line vs shoulder line
+- Head: yaw-only from ear line vs shoulder line, ±60° cap (v5.2)
+- Neck FK: capped at 50° rotation (v5.2)
 - Foot IK: positioned with per-chain scaling, speed-based pinning with smooth blend
 - Foot pinning: walking-aware with hip-drift slide, smooth pin/unpin over 6-8 frames
 - Ankle Z offset: precomputed from first 20 standing frames
@@ -40,6 +41,8 @@ motion data onto Rigify character rigs. For a short film.
 - When sitting: legs switch to FK, foot pinning disabled
 - Arm FK confidence: wrist-to-shoulder ratio + direction stability boost (v4.7)
 - Arm splay: high fixed safety-net limit 0.80 (v4.8 — replaces broken context clamp)
+- Seated hip lateral damping: 0.30x on X displacement to correct camera bias (v5.2)
+- Seated torso pitch clamp: -20° to +35° to prevent extreme lean (v5.2)
 - Seated leg lateral damping: 0.25x on X component to correct camera bias (v4.8)
 - Seated arm depth damping: 0.30x on Y component of upper arm AND forearm FK (v5.0)
 - Yaw depth damping: 0.35x on Y component before yaw atan2 (v5.0)
@@ -124,6 +127,20 @@ motion data onto Rigify character rigs. For a short film.
 - **Forearm depth damping**: extended SEATED_ARM_DEPTH_DAMP to forearm FK (was
   only upper arm). Forearm Y was -0.96 during sitting (pointing almost straight
   backward from elbow depth overestimation). Damping fixes hands-pointing-down.
+
+### v5.2 — Seated posture fixes, hip lateral stabilization
+- **Hip lateral stabilization (SEATED_HIP_LATERAL_DAMP = 0.30)**: 90° stereo setup
+  causes 20cm lateral X drift during sit-down (triangulation noise, not real movement).
+  X displacement damped to 30% when seated, keeping character roughly vertical from
+  front view instead of leaning sideways. Mirrors SEATED_LEG_LATERAL_DAMP pattern.
+- **Neck rotation cap (NECK_ROT_MAX = 50°)**: global cap on neck FK rotation.
+  Take 2 data showed 75.6° neck rotation (physically impossible — human max ~50°).
+  Neck was over-compensating for backward torso lean.
+- **Head yaw cap raised (±40.1° → ±60°)**: previous ±0.7 rad cap was too restrictive.
+  Performer legitimately turned head past 40° and motion was flattened. Now ±1.05 rad.
+- **Seated torso pitch clamp (SEATED_PITCH_MIN=-20°, SEATED_PITCH_MAX=+35°)**: prevents
+  extreme backward lean when seated. Take 2 showed -30.2° pitch (extreme recline),
+  now clamped to -20°. Forward lean up to 35° still allowed.
 
 ### v4.9 — Frame sync fix, seated arm depth damping
 - **Frame sync (capture pipeline)**: replaced threaded `.read()` with sequential
@@ -226,6 +243,10 @@ clamp provide the real quality control for arm data.
 - Seated leg lateral damping (reduces camera placement bias in X) (v4.8)
 - Seated arm depth damping (reduces depth axis noise in upper arm Y) (v4.9)
 - Frame sync via sequential grab()/retrieve() (v4.9)
+- Seated hip lateral stabilization (reduces triangulation X drift) (v5.2)
+- Neck rotation cap at 50° (prevents physically impossible head tilt) (v5.2)
+- Head yaw cap ±60° (allows natural head turns) (v5.2)
+- Seated torso pitch clamp -20°/+35° (prevents extreme lean) (v5.2)
 - Dense diagnostic logging near transitions
 
 ## Known Limitations
