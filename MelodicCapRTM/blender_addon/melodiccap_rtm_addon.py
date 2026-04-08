@@ -1308,8 +1308,17 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                 if mocap_hip_frame0:
                     dx = hip_center.x - mocap_hip_frame0.x
                     dy = hip_center.y - mocap_hip_frame0.y
+                    # v5.2: Damp lateral (X) displacement when seated.
+                    # 90° stereo setup exaggerates X drift during sit-down
+                    # (20cm lateral shift is triangulation noise, not real movement).
+                    SEATED_HIP_LATERAL_DAMP = 0.3
+                    if is_sitting:
+                        dx *= SEATED_HIP_LATERAL_DAMP
                     scaled_hip.x = mocap_hip_frame0.x * global_scale + dx * global_scale
                     scaled_hip.y = mocap_hip_frame0.y * global_scale + dy * global_scale
+                    if do_log and is_sitting:
+                        raw_dx = hip_center.x - mocap_hip_frame0.x
+                        DiagLog.data("  hip_xdamp", f"raw_dx={raw_dx:+.3f} damped_dx={dx:+.3f} damp={SEATED_HIP_LATERAL_DAMP:.2f}")
 
                 set_bone_world_position(rig, torso, scaled_hip)
                 torso.keyframe_insert(data_path="location")
@@ -1363,6 +1372,12 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                             if 'torso_rest_pitch' not in mocap_props:
                                 mocap_props['torso_rest_pitch'] = pitch_from_vert
                             pitch_angle = pitch_from_vert - mocap_props['torso_rest_pitch']
+
+                    # v5.2: Clamp torso pitch when seated to prevent extreme lean
+                    SEATED_PITCH_MAX = math.radians(35)   # max forward lean
+                    SEATED_PITCH_MIN = math.radians(-20)  # max backward lean
+                    if is_sitting:
+                        pitch_angle = max(SEATED_PITCH_MIN, min(SEATED_PITCH_MAX, pitch_angle))
 
                     # Combine yaw + pitch as quaternion
                     # Order: yaw (Z) then pitch (X) — yaw first so pitch
@@ -1442,6 +1457,10 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         # 'auto' parent mode: now works correctly because
                         # depsgraph was flushed above with current torso+spine
                         neck_rot = compute_fk_rotation(neck_bone, neck_dir, 'auto')
+                        # v5.2: Cap neck rotation to human range (50°)
+                        NECK_ROT_MAX = math.radians(50)
+                        if neck_rot.angle > NECK_ROT_MAX:
+                            neck_rot = Quaternion(neck_rot.axis, NECK_ROT_MAX)
                         if head_confidence < 1.0:
                             neck_rot = Quaternion().slerp(neck_rot, head_confidence)
                         neck_bone.rotation_quaternion = neck_rot
@@ -1462,7 +1481,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                             ear_angle = math.atan2(ear_vec.y, ear_vec.x)
                             shoulder_angle = math.atan2(shoulder_vec.y, shoulder_vec.x)
                             head_yaw = ear_angle - shoulder_angle
-                            head_yaw = max(-0.7, min(0.7, head_yaw))
+                            head_yaw = max(-1.05, min(1.05, head_yaw))  # v5.2: ±60° (was ±40.1°)
                             head_yaw *= head_confidence
 
                             head_bone.rotation_mode = 'QUATERNION'
