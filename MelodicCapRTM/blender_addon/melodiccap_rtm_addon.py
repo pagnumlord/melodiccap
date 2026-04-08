@@ -1549,6 +1549,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         # Upper arm first
                         ua_mapping = V2R_MAPPING.get(ua_name)
                         ua_expected_matrix = None
+                        ua_damped_dir = None
                         if ua_bone and ua_mapping:
                             p_start = get_landmark(landmarks_3d, ua_mapping[0])
                             p_end = get_landmark(landmarks_3d, ua_mapping[1])
@@ -1580,6 +1581,9 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                     # v5.1: Log upper arm depth damping
                                     if do_log:
                                         DiagLog.data(f"    {ua_name} ua_damp", f"raw_y={raw_ua_y:.3f} damp={damp:.2f} near_trans={near_transition}")
+
+                                # Save upper arm's final direction for forearm rest context
+                                ua_damped_dir = target_dir.copy()
 
                                 ua_bone.rotation_mode = 'QUATERNION'
                                 ua_rot = compute_fk_rotation(ua_bone, target_dir, 'auto')
@@ -1641,7 +1645,12 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 # a neutral rest direction based on data quality (arm_ratio).
                                 raw_fa_y = target_dir.y
                                 if is_sitting:
-                                    FOREARM_REST_DIR = Vector((0, 0, -1))
+                                    # v5.1b: Context-aware forearm rest direction.
+                                    # Inherits upper arm's lateral lean so forearms
+                                    # follow the armrest shape instead of hanging straight down.
+                                    FOREARM_INHERIT_LATERAL = 0.5
+                                    fa_rest_x = ua_damped_dir.x * FOREARM_INHERIT_LATERAL if ua_damped_dir else 0.0
+                                    FOREARM_REST_DIR = Vector((fa_rest_x, 0, -1)).normalized()
                                     FA_RATIO_GOOD = 0.70
                                     FA_RATIO_BAD = 0.55
                                     if arm_ratio < FA_RATIO_BAD:
@@ -1650,9 +1659,8 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                         blend = (arm_ratio - FA_RATIO_BAD) / (FA_RATIO_GOOD - FA_RATIO_BAD)
                                         target_dir = FOREARM_REST_DIR.lerp(target_dir, blend).normalized()
                                     # else: ratio >= 0.70, trust computed FK direction
-                                    # v5.1: Log forearm blend state
                                     if do_log:
-                                        DiagLog.data(f"    {fa_name} forearm", f"ratio={arm_ratio:.3f} raw_y={raw_fa_y:.3f} dir=({target_dir.x:.2f},{target_dir.y:.2f},{target_dir.z:.2f})")
+                                        DiagLog.data(f"    {fa_name} forearm", f"ratio={arm_ratio:.3f} raw_y={raw_fa_y:.3f} rest=({FOREARM_REST_DIR.x:.2f},{FOREARM_REST_DIR.y:.2f},{FOREARM_REST_DIR.z:.2f}) dir=({target_dir.x:.2f},{target_dir.y:.2f},{target_dir.z:.2f})")
 
                                 fa_bone.rotation_mode = 'QUATERNION'
                                 fa_rot = compute_fk_rotation(
