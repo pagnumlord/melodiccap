@@ -1121,7 +1121,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     chain_k = f'leg.{side_key}'
                     cs = scales.get(chain_k, global_scale)
                     pos = scale_position(ankle, hip_c, cs)
-                    pos_z = pos.z + hip_z_shift
+                    pos_z = pos.z + (hip_height_scale - 1.0) * hip_c.z + hip_z_shift
                     z_samples.append(pos_z)
             if z_samples:
                 foot_z_offset[side_key] = sum(z_samples) / len(z_samples)
@@ -1254,11 +1254,13 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     # Show what the scaled hip will be (v5.1: delta-based)
                     sh_z = rig_rest_hip_z + (hip_center.z - mocap_props['hip_pos'].z) * hip_height_scale
                     DiagLog.data("  hip_scaled_z", f"{sh_z:.3f} (delta from rest={rig_rest_hip_z:.3f})")
+                    # v5.1: Delta hip Z component breakdown
+                    f0z = mocap_props['hip_pos'].z
+                    perframe_offset = (hip_height_scale - 1.0) * hip_center.z
+                    DiagLog.data("  hip_z_components", f"rest={rig_rest_hip_z:.3f} delta={(hip_center.z - f0z):+.3f} hhs={hip_height_scale:.3f} shift={hip_z_shift:+.4f} limb_perframe={perframe_offset:+.4f}")
                     # Hip drop from frame 0
-                    f0_hip = mocap_props.get('hip_pos')
-                    if f0_hip:
-                        dz = hip_center.z - f0_hip.z
-                        DiagLog.data("  hip_dz_from_f0", f"{dz:+.3f}m")
+                    dz = hip_center.z - f0z
+                    DiagLog.data("  hip_dz_from_f0", f"{dz:+.3f}m")
                     # v4.6: Hip XY velocity for sit-down arc investigation
                     if hip_xy_disp is not None:
                         DiagLog.data("  hip_xy_disp", f"{hip_xy_disp:.4f}m  vel={hip_xy_velocity:.3f}m/s")
@@ -1575,6 +1577,9 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                     damp = SEATED_ARM_DEPTH_DAMP * 0.5 if near_transition else SEATED_ARM_DEPTH_DAMP
                                     target_dir.y *= damp
                                     target_dir = target_dir.normalized()
+                                    # v5.1: Log upper arm depth damping
+                                    if do_log:
+                                        DiagLog.data(f"    {ua_name} ua_damp", f"raw_y={raw_ua_y:.3f} damp={damp:.2f} near_trans={near_transition}")
 
                                 ua_bone.rotation_mode = 'QUATERNION'
                                 ua_rot = compute_fk_rotation(ua_bone, target_dir, 'auto')
@@ -1645,6 +1650,9 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                         blend = (arm_ratio - FA_RATIO_BAD) / (FA_RATIO_GOOD - FA_RATIO_BAD)
                                         target_dir = FOREARM_REST_DIR.lerp(target_dir, blend).normalized()
                                     # else: ratio >= 0.70, trust computed FK direction
+                                    # v5.1: Log forearm blend state
+                                    if do_log:
+                                        DiagLog.data(f"    {fa_name} forearm", f"ratio={arm_ratio:.3f} raw_y={raw_fa_y:.3f} dir=({target_dir.x:.2f},{target_dir.y:.2f},{target_dir.z:.2f})")
 
                                 fa_bone.rotation_mode = 'QUATERNION'
                                 fa_rot = compute_fk_rotation(
@@ -1972,7 +1980,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         else:
                             pos = scale_position(pos, hip_center, chain_scale)
                             pos_scaled = pos.copy()
-                            pos_scaled.z += hip_z_shift
+                            pos_scaled.z += (hip_height_scale - 1.0) * hip_center.z + hip_z_shift
                             mocap_hip_frame0 = mocap_props.get('hip_pos')
                             if mocap_hip_frame0:
                                 pos_scaled.x += (global_scale - 1.0) * mocap_hip_frame0.x
@@ -1983,7 +1991,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
                         # Height/XY offset for leg IK targets
                         pos_scaled = pos.copy()
-                        pos_scaled.z += hip_z_shift
+                        pos_scaled.z += (hip_height_scale - 1.0) * hip_center.z + hip_z_shift
                         mocap_hip_frame0 = mocap_props.get('hip_pos')
                         if mocap_hip_frame0:
                             pos_scaled.x += (global_scale - 1.0) * mocap_hip_frame0.x
@@ -1991,6 +1999,11 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
                     is_foot = "foot" in bone_name
                     side = "L" if ".L" in bone_name else "R"
+
+                    # v5.1: Log Z offset components for feet
+                    if do_log and is_foot:
+                        z_perframe = (hip_height_scale - 1.0) * hip_center.z
+                        DiagLog.data(f"    {bone_name} z_offset", f"perframe={z_perframe:+.4f} + shift={hip_z_shift:+.4f} = {z_perframe + hip_z_shift:+.4f}")
 
                     if is_foot:
                         # Apply ankle-to-ground offset so feet naturally sit near floor.
@@ -2216,7 +2229,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     if not (is_arm and (rig_shoulder_L or rig_shoulder_R)):
                         # Only apply height/XY offset for non-arm poles (legs).
                         # Arm poles already use the rig's evaluated position.
-                        pole_pos.z += hip_z_shift
+                        pole_pos.z += (hip_height_scale - 1.0) * hip_center.z + hip_z_shift
                         mocap_hip_frame0 = mocap_props.get('hip_pos')
                         if mocap_hip_frame0:
                             pole_pos.x += (global_scale - 1.0) * mocap_hip_frame0.x
