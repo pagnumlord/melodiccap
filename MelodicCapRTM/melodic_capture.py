@@ -45,6 +45,7 @@ class Config:
     # Camera indices (change these to match your system)
     CAM_A_INDEX = 2  # Sony ZV-1F
     CAM_B_INDEX = 0  # Samsung S25 DroidCam
+    CAM_C_INDEX = 1  # Logitech C615 (set to -1 to disable third camera)
 
     # Resolution
     FRAME_WIDTH = 1280
@@ -56,6 +57,10 @@ class Config:
     # (assuming you cloned/copied this folder there)
     BASE_DIR = Path(__file__).resolve().parent
     CALIBRATION_FILE = BASE_DIR / "calibration" / "stereo_calibration.json"
+    # Multi-pair calibration files (3-camera mode)
+    CALIBRATION_FILE_AB = BASE_DIR / "calibration" / "stereo_calibration_ab.json"
+    CALIBRATION_FILE_AC = BASE_DIR / "calibration" / "stereo_calibration_ac.json"
+    CALIBRATION_FILE_BC = BASE_DIR / "calibration" / "stereo_calibration_bc.json"
     TAKES_DIR = BASE_DIR / "takes"
 
     # ChArUco board (must match your printed board)
@@ -70,7 +75,7 @@ class Config:
     # Recording
     RECORDING_COUNTDOWN = 5  # seconds before recording starts
     RECORDING_TRIM_END = 2.0  # seconds to trim from end of recording
-    OFFLINE_MODE = False  # True = save raw 2D only, triangulate later with offline_processor.py
+    OFFLINE_MODE = True   # Save raw 2D only, triangulate later with offline_processor.py
 
     # Pose detection
     # 'body' = RTMPose 17 keypoints (fast, all we need for IK)
@@ -174,7 +179,7 @@ class MelodicCapApp:
         self._cuda_was_requested = (self.config.POSE_DEVICE == 'cuda')
 
         # Thread pool for parallel inference on both cameras
-        self._infer_pool = ThreadPoolExecutor(max_workers=2)
+        self._infer_pool = ThreadPoolExecutor(max_workers=3)
 
         # Initialize pose detector
         print("\n[INITIALIZING POSE DETECTOR]")
@@ -222,18 +227,30 @@ class MelodicCapApp:
         # Cameras
         self.cap_a = None
         self.cap_b = None
+        self.cap_c = None
+        self.has_cam_c = False  # True if third camera opened successfully
 
-        # Systems
+        # Systems — primary calibration (AB pair, used for real-time preview)
         self.calibration = StereoCalibration(self.config)
+        # Additional calibrations for multi-pair offline triangulation
+        self.calibration_ac = StereoCalibration(self.config)
+        self.calibration_bc = StereoCalibration(self.config)
         self.recorder = MocapRecorder(self.config.TAKES_DIR)
 
-        # Calibration frame collection
-        self.cal_frames_a = []
-        self.cal_frames_b = []
+        # Calibration frame collection — per-pair for 3-camera support
+        # Each pair collects frames independently (board may not be visible
+        # to all 3 cameras simultaneously at every angle)
+        self.cal_frames_ab = ([], [])  # (cam_a_frames, cam_b_frames)
+        self.cal_frames_ac = ([], [])  # (cam_a_frames, cam_c_frames)
+        self.cal_frames_bc = ([], [])  # (cam_b_frames, cam_c_frames)
         self.collecting_cal_frames = False
         self._last_cal_time = 0
-        self._prev_cal_corners_a = None  # For stillness detection
-        self._prev_cal_corners_b = None
+        self._last_cal_time_ac = 0
+        self._last_cal_time_bc = 0
+        # Stillness detection state per pair (set by _check_pair_stillness)
+        self._prev_corners_ab = None
+        self._prev_corners_ac = None
+        self._prev_corners_bc = None
 
         # Floor calibration mode
         self.floor_cal_active = False
@@ -247,56 +264,103 @@ class MelodicCapApp:
         self._countdown_start = 0
         self._countdown_active = False
 
+    def _open_camera(self, index, label):
+        """Open a single camera by index. Returns (cap, success)."""
+        print(f"  Opening Camera {label} (index {index})...")
+        cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            cap = cv2.VideoCapture(index)
+
+        if cap.isOpened():
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.FRAME_WIDTH)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.FRAME_HEIGHT)
+            cap.set(cv2.CAP_PROP_FPS, self.config.FPS)
+            try:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
+            print(f"    [OK] Camera {label} opened")
+            return cap, True
+        else:
+            print(f"    [ERROR] Failed to open Camera {label}")
+            return cap, False
+
     def init_cameras(self):
-        """Initialize both cameras."""
+        """Initialize cameras (A + B required, C optional)."""
         print("\n[INITIALIZING CAMERAS]")
 
-        # Camera A
-        print(f"  Opening Camera A (index {self.config.CAM_A_INDEX})...")
-        self.cap_a = cv2.VideoCapture(self.config.CAM_A_INDEX, cv2.CAP_DSHOW)
-        if not self.cap_a.isOpened():
-            self.cap_a = cv2.VideoCapture(self.config.CAM_A_INDEX)
-
-        if self.cap_a.isOpened():
-            self.cap_a.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.FRAME_WIDTH)
-            self.cap_a.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.FRAME_HEIGHT)
-            self.cap_a.set(cv2.CAP_PROP_FPS, self.config.FPS)
-            # v4.9: minimize frame latency (not all drivers support this — ignore if fails)
-            try:
-                self.cap_a.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            except Exception:
-                pass
-            print(f"    [OK] Camera A opened")
-        else:
-            print(f"    [ERROR] Failed to open Camera A")
+        self.cap_a, ok_a = self._open_camera(self.config.CAM_A_INDEX, "A (Sony ZV-1F)")
+        if not ok_a:
             return False
 
-        # Camera B
-        print(f"  Opening Camera B (index {self.config.CAM_B_INDEX})...")
-        self.cap_b = cv2.VideoCapture(self.config.CAM_B_INDEX, cv2.CAP_DSHOW)
-        if not self.cap_b.isOpened():
-            self.cap_b = cv2.VideoCapture(self.config.CAM_B_INDEX)
-
-        if self.cap_b.isOpened():
-            self.cap_b.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.FRAME_WIDTH)
-            self.cap_b.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.FRAME_HEIGHT)
-            self.cap_b.set(cv2.CAP_PROP_FPS, self.config.FPS)
-            try:
-                self.cap_b.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            except Exception:
-                pass
-            print(f"    [OK] Camera B opened")
-        else:
-            print(f"    [ERROR] Failed to open Camera B")
+        self.cap_b, ok_b = self._open_camera(self.config.CAM_B_INDEX, "B (DroidCam)")
+        if not ok_b:
             return False
+
+        # Camera C is optional — skip if index is -1 or fails to open
+        if self.config.CAM_C_INDEX >= 0:
+            self.cap_c, ok_c = self._open_camera(self.config.CAM_C_INDEX, "C (Logitech)")
+            self.has_cam_c = ok_c
+            if not ok_c:
+                print(f"    [WARNING] Camera C failed — continuing with 2 cameras")
+        else:
+            print(f"  Camera C disabled (CAM_C_INDEX = -1)")
 
         return True
+
+    def _check_pair_stillness(self, corners_1, ids_1, corners_2, ids_2,
+                                  prev_attr, threshold=2.0):
+        """Check if board is held still in a camera pair.
+
+        Compares current corners with previous frame's corners. Returns True
+        if max corner movement is below threshold for both cameras.
+
+        Args:
+            corners_1, ids_1: ChArUco corners/ids from camera 1
+            corners_2, ids_2: ChArUco corners/ids from camera 2
+            prev_attr: attribute name on self to store/retrieve previous corners
+            threshold: max pixel movement for "still"
+        """
+        prev = getattr(self, prev_attr, None)
+        setattr(self, prev_attr, (corners_1, ids_1, corners_2, ids_2))
+
+        if prev is None or len(corners_1) < 6 or len(corners_2) < 6:
+            return False
+
+        prev_c1, prev_id1, prev_c2, prev_id2 = prev
+        if prev_id1 is None or prev_id2 is None:
+            return False
+
+        # Check stillness in camera 1
+        common_1 = set(ids_1.flatten()) & set(prev_id1.flatten())
+        common_2 = set(ids_2.flatten()) & set(prev_id2.flatten())
+        if len(common_1) < 4 or len(common_2) < 4:
+            return False
+
+        move_1 = 0
+        for cid in common_1:
+            idx_cur = np.where(ids_1.flatten() == cid)[0][0]
+            idx_prev = np.where(prev_id1.flatten() == cid)[0][0]
+            move_1 = max(move_1, np.linalg.norm(
+                corners_1[idx_cur].flatten() - prev_c1[idx_prev].flatten()))
+
+        move_2 = 0
+        for cid in common_2:
+            idx_cur = np.where(ids_2.flatten() == cid)[0][0]
+            idx_prev = np.where(prev_id2.flatten() == cid)[0][0]
+            move_2 = max(move_2, np.linalg.norm(
+                corners_2[idx_cur].flatten() - prev_c2[idx_prev].flatten()))
+
+        return move_1 < threshold and move_2 < threshold
 
     def _run_camera_diagnostics(self):
         """Run startup diagnostics on both cameras. Reports actual resolution and timing."""
         print("\n[CAMERA DIAGNOSTICS]")
 
-        for label, cap in [("A (Sony ZV-1F)", self.cap_a), ("B (DroidCam)", self.cap_b)]:
+        cam_list = [("A (Sony ZV-1F)", self.cap_a), ("B (DroidCam)", self.cap_b)]
+        if self.has_cam_c:
+            cam_list.append(("C (Logitech)", self.cap_c))
+        for label, cap in cam_list:
             # Read actual resolution (what the camera is ACTUALLY delivering)
             actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -344,15 +408,27 @@ class MelodicCapApp:
         print(f"  Frame sync delta: {sync_delta:.0f}ms {'(OK)' if sync_delta < 50 else '(HIGH — may cause triangulation errors)'}")
 
     def load_existing_calibration(self):
-        """Try to load existing calibration."""
+        """Try to load existing calibration (all pairs)."""
+        # Primary AB pair
+        loaded_ab = False
         if self.config.CALIBRATION_FILE.exists():
-            return self.calibration.load(self.config.CALIBRATION_FILE)
-        # Also try MelodicCapFresh calibration as fallback
-        fresh_cal = self.config.BASE_DIR.parent / "MelodicCapFresh" / "calibration" / "stereo_calibration.json"
-        if fresh_cal.exists():
-            print(f"[INFO] Found MelodicCapFresh calibration, loading...")
-            return self.calibration.load(fresh_cal)
-        return False
+            loaded_ab = self.calibration.load(self.config.CALIBRATION_FILE)
+        elif self.config.CALIBRATION_FILE_AB.exists():
+            loaded_ab = self.calibration.load(self.config.CALIBRATION_FILE_AB)
+        else:
+            # Also try MelodicCapFresh calibration as fallback
+            fresh_cal = self.config.BASE_DIR.parent / "MelodicCapFresh" / "calibration" / "stereo_calibration.json"
+            if fresh_cal.exists():
+                print(f"[INFO] Found MelodicCapFresh calibration, loading...")
+                loaded_ab = self.calibration.load(fresh_cal)
+
+        # Load additional pairs if available (for offline multi-pair triangulation)
+        if self.config.CALIBRATION_FILE_AC.exists():
+            self.calibration_ac.load(self.config.CALIBRATION_FILE_AC)
+        if self.config.CALIBRATION_FILE_BC.exists():
+            self.calibration_bc.load(self.config.CALIBRATION_FILE_BC)
+
+        return loaded_ab
 
     def run(self):
         """Main loop."""
@@ -419,8 +495,10 @@ class MelodicCapApp:
             t0 = time.time()
             grab_a = self.cap_a.grab()
             grab_b = self.cap_b.grab()
+            grab_c = self.cap_c.grab() if self.has_cam_c else False
             ret_a, frame_a = self.cap_a.retrieve() if grab_a else (False, None)
             ret_b, frame_b = self.cap_b.retrieve() if grab_b else (False, None)
+            ret_c, frame_c = self.cap_c.retrieve() if grab_c else (False, None)
             t_cam = time.time() - t0
 
             if not ret_a or not ret_b:
@@ -429,10 +507,14 @@ class MelodicCapApp:
                 for _ in range(5):
                     self.cap_a.grab()
                     self.cap_b.grab()
+                    if self.has_cam_c:
+                        self.cap_c.grab()
                 grab_a = self.cap_a.grab()
                 grab_b = self.cap_b.grab()
+                grab_c = self.cap_c.grab() if self.has_cam_c else False
                 ret_a, frame_a = self.cap_a.retrieve() if grab_a else (False, None)
                 ret_b, frame_b = self.cap_b.retrieve() if grab_b else (False, None)
+                ret_c, frame_c = self.cap_c.retrieve() if grab_c else (False, None)
                 if not ret_a or not ret_b:
                     print("[WARNING] Frame capture failed")
                     continue
@@ -441,11 +523,12 @@ class MelodicCapApp:
             # (pose inference is expensive, skip it during calibration)
             det_a = None
             det_b = None
+            det_c = None
             t_infer = 0
             if not self.collecting_cal_frames and not self.floor_cal_active:
                 t0 = time.time()
-                # Run both cameras' inference in parallel — overlaps CPU
-                # preprocessing of camera B with GPU inference of camera A
+                # Run cameras' inference in parallel — overlaps CPU
+                # preprocessing with GPU inference
                 min_conf = self.config.MIN_KEYPOINT_CONFIDENCE
                 future_a = self._infer_pool.submit(
                     self.detector.detect_single, frame_a, min_conf
@@ -453,16 +536,26 @@ class MelodicCapApp:
                 future_b = self._infer_pool.submit(
                     self.detector.detect_single, frame_b, min_conf
                 )
+                future_c = None
+                if self.has_cam_c and ret_c:
+                    future_c = self._infer_pool.submit(
+                        self.detector.detect_single, frame_c, min_conf
+                    )
                 det_a = future_a.result()
                 det_b = future_b.result()
+                if future_c is not None:
+                    det_c = future_c.result()
                 t_infer = time.time() - t0
 
             # Draw detections
             display_a = frame_a.copy()
             display_b = frame_b.copy()
+            display_c = frame_c.copy() if (self.has_cam_c and ret_c) else None
             if det_a is not None or det_b is not None:
                 draw_detections(display_a, det_a, self.config.MIN_KEYPOINT_CONFIDENCE)
                 draw_detections(display_b, det_b, self.config.MIN_KEYPOINT_CONFIDENCE)
+            if det_c is not None and display_c is not None:
+                draw_detections(display_c, det_c, self.config.MIN_KEYPOINT_CONFIDENCE)
 
             # Handle countdown → start recording transition
             if self._countdown_active:
@@ -482,6 +575,8 @@ class MelodicCapApp:
                     for _ in range(15):
                         grab_sa = self.cap_a.grab()
                         grab_sb = self.cap_b.grab()
+                        if self.has_cam_c:
+                            self.cap_c.grab()  # Keep C in sync even if not used for floor cal
                         ret_sa, sample_a = self.cap_a.retrieve() if grab_sa else (False, None)
                         ret_sb, sample_b = self.cap_b.retrieve() if grab_sb else (False, None)
                         if ret_sa and ret_sb:
@@ -532,8 +627,14 @@ class MelodicCapApp:
                     cv2.putText(disp, str(secs), (w // 2 - 40, h // 2 + 40),
                                 cv2.FONT_HERSHEY_SIMPLEX, 4, (0, 255, 128), 8)
             elif self.collecting_cal_frames:
-                draw_status(display_a, f"CALIBRATING: {len(self.cal_frames_a)} frames", (0, 255, 255))
-                draw_status(display_b, f"CALIBRATING: {len(self.cal_frames_b)} frames", (0, 255, 255))
+                n_ab_s = len(self.cal_frames_ab[0])
+                cal_parts = [f"AB:{n_ab_s}"]
+                if self.has_cam_c:
+                    cal_parts.append(f"AC:{len(self.cal_frames_ac[0])}")
+                    cal_parts.append(f"BC:{len(self.cal_frames_bc[0])}")
+                cal_text = f"CALIBRATING: {' | '.join(cal_parts)} frames"
+                draw_status(display_a, cal_text, (0, 255, 255))
+                draw_status(display_b, cal_text, (0, 255, 255))
             elif self._countdown_active:
                 remaining = self.config.RECORDING_COUNTDOWN - (time.time() - self._countdown_start)
                 secs = int(remaining) + 1
@@ -563,7 +664,7 @@ class MelodicCapApp:
                 if self.config.OFFLINE_MODE:
                     # Offline: skip triangulation, save raw 2D only
                     if self.recorder.is_recording:
-                        self.recorder.add_frame(None, det_a, det_b)
+                        self.recorder.add_frame(None, det_a, det_b, det_c)
                 else:
                     t0 = time.time()
                     points_3d = self.calibration.triangulate_pose(
@@ -572,80 +673,89 @@ class MelodicCapApp:
                     t_tri = time.time() - t0
 
                     if points_3d and self.recorder.is_recording:
-                        self.recorder.add_frame(points_3d, det_a, det_b)
+                        self.recorder.add_frame(points_3d, det_a, det_b, det_c)
 
-            # Collecting calibration frames — with stillness detection
+            # Collecting calibration frames — multi-pair with stillness detection
             if self.collecting_cal_frames:
                 ca, ida = self.calibration.detect_charuco(frame_a)
                 cb, idb = self.calibration.detect_charuco(frame_b)
+                cc, idc = (None, None)
+                if self.has_cam_c and ret_c:
+                    cc, idc = self.calibration.detect_charuco(frame_c)
 
-                if ca is not None and cb is not None:
+                # Draw detected corners on all displays
+                if ca is not None:
                     cv2.aruco.drawDetectedCornersCharuco(display_a, ca)
+                if cb is not None:
                     cv2.aruco.drawDetectedCornersCharuco(display_b, cb)
+                if cc is not None and display_c is not None:
+                    cv2.aruco.drawDetectedCornersCharuco(display_c, cc)
 
-                    # v4.9: Check common corners between cameras BEFORE capture.
-                    # Previously only checked per-camera count (len >= 6), but
-                    # cameras can each see 6+ different corner IDs with no overlap.
-                    # This wastes the user's time capturing useless frames.
-                    MIN_COMMON_FOR_CAPTURE = 8
+                MIN_COMMON_FOR_CAPTURE = 8
+                STILL_THRESH = 2.0
+                now = time.time()
+
+                # Check each camera pair for common corners + stillness
+                # AB pair (primary)
+                captured_any = False
+                if ca is not None and cb is not None:
                     common_ab = set(ida.flatten()) & set(idb.flatten())
-                    n_common = len(common_ab)
+                    n_ab = len(common_ab)
+                    if n_ab >= MIN_COMMON_FOR_CAPTURE:
+                        still_ab = self._check_pair_stillness(
+                            ca, ida, cb, idb, '_prev_corners_ab', STILL_THRESH)
+                        if still_ab and now - self._last_cal_time > 0.5:
+                            self.cal_frames_ab[0].append(frame_a.copy())
+                            self.cal_frames_ab[1].append(frame_b.copy())
+                            self._last_cal_time = now
+                            captured_any = True
+                            print(f"  [AB] Captured frame {len(self.cal_frames_ab[0])} ({n_ab} common)")
 
-                    # Show live corner count on both displays
-                    corner_color = (0, 255, 0) if n_common >= MIN_COMMON_FOR_CAPTURE else (0, 0, 255)
-                    corner_text = f"Common: {n_common} (A:{len(ca)} B:{len(cb)})"
-                    cv2.putText(display_a, corner_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, corner_color, 2)
-                    cv2.putText(display_b, corner_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, corner_color, 2)
+                # AC pair
+                if self.has_cam_c and ca is not None and cc is not None:
+                    common_ac = set(ida.flatten()) & set(idc.flatten())
+                    n_ac = len(common_ac)
+                    if n_ac >= MIN_COMMON_FOR_CAPTURE:
+                        still_ac = self._check_pair_stillness(
+                            ca, ida, cc, idc, '_prev_corners_ac', STILL_THRESH)
+                        if still_ac and now - self._last_cal_time_ac > 0.5:
+                            self.cal_frames_ac[0].append(frame_a.copy())
+                            self.cal_frames_ac[1].append(frame_c.copy())
+                            self._last_cal_time_ac = now
+                            captured_any = True
+                            print(f"  [AC] Captured frame {len(self.cal_frames_ac[0])} ({n_ac} common)")
 
-                    if n_common < MIN_COMMON_FOR_CAPTURE:
-                        # Not enough common corners — show guidance
-                        if n_common == 0:
-                            hint = "Board not seen by both cameras"
-                        else:
-                            hint = f"Angle board so BOTH cameras see it ({n_common}/8 common)"
-                        draw_status(display_a, hint, (0, 0, 255))
-                        draw_status(display_b, hint, (0, 0, 255))
-                        self._prev_cal_corners_a = None
-                        self._prev_cal_corners_b = None
+                # BC pair
+                if self.has_cam_c and cb is not None and cc is not None:
+                    common_bc = set(idb.flatten()) & set(idc.flatten())
+                    n_bc = len(common_bc)
+                    if n_bc >= MIN_COMMON_FOR_CAPTURE:
+                        still_bc = self._check_pair_stillness(
+                            cb, idb, cc, idc, '_prev_corners_bc', STILL_THRESH)
+                        if still_bc and now - self._last_cal_time_bc > 0.5:
+                            self.cal_frames_bc[0].append(frame_b.copy())
+                            self.cal_frames_bc[1].append(frame_c.copy())
+                            self._last_cal_time_bc = now
+                            captured_any = True
+                            print(f"  [BC] Captured frame {len(self.cal_frames_bc[0])} ({n_bc} common)")
+
+                # Status display
+                n_ab_frames = len(self.cal_frames_ab[0])
+                status_parts = [f"AB:{n_ab_frames}"]
+                if self.has_cam_c:
+                    status_parts.append(f"AC:{len(self.cal_frames_ac[0])}")
+                    status_parts.append(f"BC:{len(self.cal_frames_bc[0])}")
+                cal_status = f"CALIBRATING: {' | '.join(status_parts)} frames"
+                draw_status(display_a, cal_status, (0, 255, 255))
+                draw_status(display_b, cal_status, (0, 255, 255))
+
+                if not captured_any and now - self._last_cal_time > 2.0:
+                    if ca is None or cb is None:
+                        hint = "Board not seen by cameras"
                     else:
-                        # Enough common corners — check stillness
-                        board_still = False
-                        STILL_THRESH = 2.0  # pixels — must move less than this
-                        if (self._prev_cal_corners_a is not None and
-                                self._prev_cal_corners_b is not None and
-                                len(ca) >= 6 and len(cb) >= 6):
-                            prev_a, prev_ida = self._prev_cal_corners_a
-                            prev_b, prev_idb = self._prev_cal_corners_b
-                            if prev_ida is not None and prev_idb is not None:
-                                common_a = set(ida.flatten()) & set(prev_ida.flatten())
-                                common_b = set(idb.flatten()) & set(prev_idb.flatten())
-                                if len(common_a) >= 4 and len(common_b) >= 4:
-                                    move_a = 0
-                                    for cid in common_a:
-                                        idx_cur = np.where(ida.flatten() == cid)[0][0]
-                                        idx_prev = np.where(prev_ida.flatten() == cid)[0][0]
-                                        move_a = max(move_a, np.linalg.norm(ca[idx_cur].flatten() - prev_a[idx_prev].flatten()))
-                                    move_b = 0
-                                    for cid in common_b:
-                                        idx_cur = np.where(idb.flatten() == cid)[0][0]
-                                        idx_prev = np.where(prev_idb.flatten() == cid)[0][0]
-                                        move_b = max(move_b, np.linalg.norm(cb[idx_cur].flatten() - prev_b[idx_prev].flatten()))
-                                    board_still = (move_a < STILL_THRESH and move_b < STILL_THRESH)
-
-                        self._prev_cal_corners_a = (ca, ida)
-                        self._prev_cal_corners_b = (cb, idb)
-
-                        if board_still and time.time() - self._last_cal_time > 0.5:
-                            self.cal_frames_a.append(frame_a.copy())
-                            self.cal_frames_b.append(frame_b.copy())
-                            self._last_cal_time = time.time()
-                            print(f"  Captured frame {len(self.cal_frames_a)} ({n_common} common corners)")
-                        elif not board_still and time.time() - self._last_cal_time > 2.0:
-                            draw_status(display_a, "HOLD STILL to capture", (0, 165, 255))
-                            draw_status(display_b, "HOLD STILL to capture", (0, 165, 255))
-                else:
-                    self._prev_cal_corners_a = None
-                    self._prev_cal_corners_b = None
+                        hint = "HOLD STILL to capture"
+                    draw_status(display_a, hint, (0, 165, 255))
+                    draw_status(display_b, hint, (0, 165, 255))
 
             # FPS counter + timing breakdown
             t_total = time.time() - t_loop
@@ -670,11 +780,25 @@ class MelodicCapApp:
                 fps_timer = time.time()
                 timing_accum = {'cam': 0, 'infer': 0, 'tri': 0, 'total': 0, 'count': 0}
 
-            # Display
-            combined = np.hstack([
-                cv2.resize(display_a, (640, 360)),
-                cv2.resize(display_b, (640, 360))
-            ])
+            # Display — 2 or 3 camera layout
+            if self.has_cam_c and display_c is not None:
+                # 3-camera: top row = A + B (640x360 each), bottom row = C centered
+                row_top = np.hstack([
+                    cv2.resize(display_a, (640, 360)),
+                    cv2.resize(display_b, (640, 360))
+                ])
+                cam_c_resized = cv2.resize(display_c, (640, 360))
+                # Pad C to same width as top row (center it)
+                pad_w = (row_top.shape[1] - 640) // 2
+                pad_left = np.zeros((360, pad_w, 3), dtype=np.uint8)
+                pad_right = np.zeros((360, row_top.shape[1] - 640 - pad_w, 3), dtype=np.uint8)
+                row_bottom = np.hstack([pad_left, cam_c_resized, pad_right])
+                combined = np.vstack([row_top, row_bottom])
+            else:
+                combined = np.hstack([
+                    cv2.resize(display_a, (640, 360)),
+                    cv2.resize(display_b, (640, 360))
+                ])
 
             # FPS bar at bottom — shows model, device, FPS, and warnings
             bar = np.zeros((30, combined.shape[1], 3), dtype=np.uint8)
@@ -710,35 +834,69 @@ class MelodicCapApp:
                     print("\n[CALIBRATION] Starting frame collection...")
                     print("  Hold the board STILL at each position — captures when stationary.")
                     print("  Move to a new position, hold still, repeat. Cover the full frame.")
-                    print("  Press 'S' when you have 20+ frames to run calibration.")
-                    self.cal_frames_a = []
-                    self.cal_frames_b = []
-                    self._prev_cal_corners_a = None
-                    self._prev_cal_corners_b = None
+                    if self.has_cam_c:
+                        print("  3-CAMERA MODE: collecting frames for all pairs (AB, AC, BC)")
+                        print("  Try to show the board where 2+ cameras can see it at once.")
+                    print("  Press 'S' when you have 10+ frames per pair to run calibration.")
+                    self.cal_frames_ab = ([], [])
+                    self.cal_frames_ac = ([], [])
+                    self.cal_frames_bc = ([], [])
+                    self._prev_corners_ab = None
+                    self._prev_corners_ac = None
+                    self._prev_corners_bc = None
                     self.collecting_cal_frames = True
                 else:
                     print("\n[CALIBRATION] Stopped collecting.")
                     self.collecting_cal_frames = False
 
             elif key == ord('s'):
-                if len(self.cal_frames_a) >= 10:
-                    print(f"\n[CALIBRATION] Running with {len(self.cal_frames_a)} frames...")
+                n_ab = len(self.cal_frames_ab[0])
+                n_ac = len(self.cal_frames_ac[0])
+                n_bc = len(self.cal_frames_bc[0])
+
+                if n_ab < 10:
+                    print(f"\n[ERROR] Need at least 10 AB frames (have {n_ab})")
+                else:
                     self.collecting_cal_frames = False
 
-                    if self.calibration.calibrate_stereo(self.cal_frames_a, self.cal_frames_b):
+                    # Calibrate AB pair (primary — required)
+                    print(f"\n[CALIBRATION] AB pair: {n_ab} frames...")
+                    if self.calibration.calibrate_stereo(
+                            self.cal_frames_ab[0], self.cal_frames_ab[1]):
                         self.calibration.save(self.config.CALIBRATION_FILE)
+                        self.calibration.save(self.config.CALIBRATION_FILE_AB)
+                        print(f"  [OK] AB calibration saved")
 
-                    # v4.9: Flush camera buffers after long calibration processing.
-                    # grab()/retrieve() fails if cameras sit idle for seconds —
-                    # the USB buffer fills with stale frames that can't be grabbed.
+                    # Calibrate AC pair (optional)
+                    if n_ac >= 10:
+                        print(f"\n[CALIBRATION] AC pair: {n_ac} frames...")
+                        if self.calibration_ac.calibrate_stereo(
+                                self.cal_frames_ac[0], self.cal_frames_ac[1]):
+                            self.calibration_ac.save(self.config.CALIBRATION_FILE_AC)
+                            print(f"  [OK] AC calibration saved")
+                    elif self.has_cam_c:
+                        print(f"  [SKIP] AC pair: only {n_ac} frames (need 10)")
+
+                    # Calibrate BC pair (optional)
+                    if n_bc >= 10:
+                        print(f"\n[CALIBRATION] BC pair: {n_bc} frames...")
+                        if self.calibration_bc.calibrate_stereo(
+                                self.cal_frames_bc[0], self.cal_frames_bc[1]):
+                            self.calibration_bc.save(self.config.CALIBRATION_FILE_BC)
+                            print(f"  [OK] BC calibration saved")
+                    elif self.has_cam_c:
+                        print(f"  [SKIP] BC pair: only {n_bc} frames (need 10)")
+
+                    # Flush camera buffers after long calibration processing
                     for _ in range(10):
                         self.cap_a.grab()
                         self.cap_b.grab()
+                        if self.has_cam_c:
+                            self.cap_c.grab()
 
-                    self.cal_frames_a = []
-                    self.cal_frames_b = []
-                else:
-                    print(f"\n[ERROR] Need at least 10 frames (have {len(self.cal_frames_a)})")
+                    self.cal_frames_ab = ([], [])
+                    self.cal_frames_ac = ([], [])
+                    self.cal_frames_bc = ([], [])
 
             elif key == ord('f'):
                 if not self.calibration.is_calibrated:
@@ -795,6 +953,8 @@ class MelodicCapApp:
         self._infer_pool.shutdown(wait=False)
         self.cap_a.release()
         self.cap_b.release()
+        if self.has_cam_c and self.cap_c is not None:
+            self.cap_c.release()
         cv2.destroyAllWindows()
 
         print("\n[DONE]")

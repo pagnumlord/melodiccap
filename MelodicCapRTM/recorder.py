@@ -33,7 +33,8 @@ class MocapRecorder:
         self.take_name = f"take_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         print(f"\n[RECORDING] Started: {self.take_name}")
 
-    def add_frame(self, points_3d=None, detections_a=None, detections_b=None):
+    def add_frame(self, points_3d=None, detections_a=None, detections_b=None,
+                   detections_c=None):
         """
         Add a frame to the recording.
 
@@ -41,6 +42,7 @@ class MocapRecorder:
             points_3d: dict of {keypoint_idx: [x, y, z]}, or None for offline mode
             detections_a: optional dict of {idx: (px, py, conf)} from camera A
             detections_b: optional dict of {idx: (px, py, conf)} from camera B
+            detections_c: optional dict of {idx: (px, py, conf)} from camera C
         """
         if not self.is_recording:
             return
@@ -77,6 +79,12 @@ class MocapRecorder:
             frame_data["raw_2d_b"] = {
                 str(k): [v[0], v[1], v[2]]
                 for k, v in detections_b.items()
+            }
+
+        if detections_c is not None:
+            frame_data["raw_2d_c"] = {
+                str(k): [v[0], v[1], v[2]]
+                for k, v in detections_c.items()
             }
 
         self.frames.append(frame_data)
