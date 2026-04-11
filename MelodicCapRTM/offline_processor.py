@@ -8,8 +8,12 @@ JSON files ready for the Blender addon.
 Supports multi-pair triangulation: when 3 cameras are calibrated, per-frame
 pair selection picks the best camera pair for each frame (by mean reprojection
 error), then routes all keypoints through the full triangulate_pose() pipeline
-(Kalman + outlier rejection + bone constraints). Calibration pairs with
-stereo RMS above a threshold (default 1.0) are automatically rejected.
+(Kalman + outlier rejection + bone constraints).
+
+Quality gates automatically reject inadequate calibration pairs:
+  - stereo RMS > 1.0 (too noisy)
+  - baseline < 0.8m (poor depth resolution)
+  - no floor offset (would shift skeleton origin between pairs)
 
 Usage:
     python offline_processor.py takes/take_20260328_143000_raw.json
@@ -79,13 +83,17 @@ def _triangulate_keypoint(calibration, px1, py1, px2, py2):
 
 
 PAIR_RMS_MAX_DEFAULT = 1.0  # Reject calibration pairs with stereo RMS above this
+MIN_BASELINE_DEFAULT = 0.8  # Reject pairs with baseline below this (meters)
 
 
-def _load_calibrations(calibration_dir, pair_rms_max=PAIR_RMS_MAX_DEFAULT):
+def _load_calibrations(calibration_dir, pair_rms_max=PAIR_RMS_MAX_DEFAULT,
+                       min_baseline=MIN_BASELINE_DEFAULT):
     """Load all available calibration pairs from a directory.
 
-    Pairs with stereo RMS above pair_rms_max are rejected (too noisy for
-    accurate triangulation).
+    Quality gates (any failure rejects the pair):
+      - stereo RMS must be <= pair_rms_max
+      - baseline must be >= min_baseline (short baselines have poor depth)
+      - floor_z_offset must be nonzero (required for correct world coordinates)
 
     Returns:
         list of (label, StereoCalibration, cam_key_1, cam_key_2) tuples
@@ -105,22 +113,40 @@ def _load_calibrations(calibration_dir, pair_rms_max=PAIR_RMS_MAX_DEFAULT):
     for label, filename, key1, key2 in pair_files:
         cal_file = calibration_dir / filename
         if cal_file.exists():
-            # Read stereo RMS from JSON (load() doesn't restore it)
+            # Read quality metrics from JSON (load() doesn't restore stereo_rms)
             try:
                 with open(cal_file, 'r') as f:
                     cal_json = json.load(f)
                 rms = cal_json.get('stereo_rms', 0.0) or 0.0
+                baseline = cal_json.get('baseline_meters', 0.0) or 0.0
+                floor_offset = cal_json.get('floor_z_offset', 0.0) or 0.0
             except Exception:
                 rms = 0.0
+                baseline = 0.0
+                floor_offset = 0.0
 
+            # Quality gate: RMS
             if rms > pair_rms_max:
                 print(f"  [SKIP] {label}: stereo RMS {rms:.3f} > {pair_rms_max} (too noisy)")
+                continue
+
+            # Quality gate: baseline
+            if baseline > 0 and baseline < min_baseline:
+                print(f"  [SKIP] {label}: baseline {baseline:.3f}m < {min_baseline}m "
+                      f"(poor depth resolution)")
+                continue
+
+            # Quality gate: floor offset
+            if abs(floor_offset) < 0.01:
+                print(f"  [SKIP] {label}: no floor offset calibrated "
+                      f"(would shift skeleton origin)")
                 continue
 
             cal = StereoCalibration(config)
             if cal.load(cal_file):
                 rms_str = f" (RMS {rms:.3f})" if rms > 0 else ""
-                print(f"  [OK] {label}{rms_str}")
+                base_str = f", baseline {baseline:.3f}m" if baseline > 0 else ""
+                print(f"  [OK] {label}{rms_str}{base_str}")
                 pairs.append((label, cal, key1, key2))
 
     # If no pair-specific files found, fall back to the single calibration
@@ -137,7 +163,8 @@ def _load_calibrations(calibration_dir, pair_rms_max=PAIR_RMS_MAX_DEFAULT):
 def process_take(raw_path, calibration_path, smooth=True,
                  min_conf=0.3, skip_face_hands=True,
                  kalman_process=1e-4, kalman_measure=1e-2,
-                 pair_rms_max=PAIR_RMS_MAX_DEFAULT, force_pair=None):
+                 pair_rms_max=PAIR_RMS_MAX_DEFAULT,
+                 min_baseline=MIN_BASELINE_DEFAULT, force_pair=None):
     """
     Process a single raw detection file into triangulated 3D output.
 
@@ -155,6 +182,7 @@ def process_take(raw_path, calibration_path, smooth=True,
         kalman_process: Kalman process noise
         kalman_measure: Kalman measurement noise
         pair_rms_max: max stereo RMS for calibration pairs (default 1.0)
+        min_baseline: min stereo baseline in meters (default 0.8)
         force_pair: force a specific calibration pair label (e.g. 'AB')
 
     Returns:
@@ -194,7 +222,8 @@ def process_take(raw_path, calibration_path, smooth=True,
         cal_dir = calibration_path.parent
 
     # Load all available calibration pairs
-    cal_pairs = _load_calibrations(cal_dir, pair_rms_max=pair_rms_max)
+    cal_pairs = _load_calibrations(cal_dir, pair_rms_max=pair_rms_max,
+                                    min_baseline=min_baseline)
 
     # Force a specific pair if requested
     if force_pair and cal_pairs:
@@ -442,6 +471,8 @@ def main():
                         help='Force specific calibration pair (e.g., AB, BC)')
     parser.add_argument('--pair-rms-max', type=float, default=1.0,
                         help='Max stereo RMS for calibration pairs (default: 1.0)')
+    parser.add_argument('--min-baseline', type=float, default=0.8,
+                        help='Min stereo baseline in meters (default: 0.8)')
 
     args = parser.parse_args()
 
@@ -463,6 +494,7 @@ def main():
             kalman_process=args.kalman_process,
             kalman_measure=args.kalman_measure,
             pair_rms_max=args.pair_rms_max,
+            min_baseline=args.min_baseline,
             force_pair=args.pair,
         )
         if result:
