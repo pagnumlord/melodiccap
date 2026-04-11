@@ -342,8 +342,9 @@ class MelodicCapApp:
             else:
                 cap.release()
 
-            # If we got perfect score, stop trying
-            if res_match and read_ms < 200:
+            # If we got correct resolution, stop trying — don't risk
+            # other backends hanging (MSMF can hang 30+ seconds on some cameras)
+            if res_match:
                 break
 
         if best_cap is not None and best_cap.isOpened():
