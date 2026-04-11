@@ -265,13 +265,38 @@ class MelodicCapApp:
         self._countdown_active = False
 
     def _open_camera(self, index, label):
-        """Open a single camera by index. Returns (cap, success)."""
-        print(f"  Opening Camera {label} (index {index})...")
-        cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
-        if not cap.isOpened():
-            cap = cv2.VideoCapture(index)
+        """Open a single camera by index, trying multiple backends.
 
-        if cap.isOpened():
+        Tries DirectShow first, then Media Foundation, then default.
+        Picks the backend that delivers frames fastest at the right resolution.
+        Returns (cap, success).
+        """
+        import time as _time
+        print(f"  Opening Camera {label} (index {index})...")
+
+        backends = [
+            (cv2.CAP_DSHOW, "DirectShow"),
+            (cv2.CAP_MSMF, "Media Foundation"),
+            (None, "default"),
+        ]
+
+        best_cap = None
+        best_info = None
+        best_score = -1  # Higher is better
+
+        for backend_id, backend_name in backends:
+            try:
+                if backend_id is not None:
+                    cap = cv2.VideoCapture(index, backend_id)
+                else:
+                    cap = cv2.VideoCapture(index)
+            except Exception:
+                continue
+
+            if not cap.isOpened():
+                cap.release()
+                continue
+
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.FRAME_WIDTH)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.FRAME_HEIGHT)
             cap.set(cv2.CAP_PROP_FPS, self.config.FPS)
@@ -279,11 +304,54 @@ class MelodicCapApp:
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             except Exception:
                 pass
-            print(f"    [OK] Camera {label} opened")
-            return cap, True
+
+            # Test: read one frame and check resolution + speed
+            t0 = _time.time()
+            ret, frame = cap.read()
+            read_ms = (_time.time() - t0) * 1000
+
+            if not ret or frame is None:
+                cap.release()
+                continue
+
+            actual_w = frame.shape[1]
+            actual_h = frame.shape[0]
+            res_match = (actual_w == self.config.FRAME_WIDTH and
+                         actual_h == self.config.FRAME_HEIGHT)
+
+            # Score: prefer correct resolution + fast reads
+            score = 0
+            if res_match:
+                score += 100
+            if read_ms < 200:
+                score += 50
+            elif read_ms < 500:
+                score += 20
+
+            info = f"{backend_name}: {actual_w}x{actual_h}, {read_ms:.0f}ms"
+            print(f"    [{backend_name}] {actual_w}x{actual_h}, {read_ms:.0f}ms"
+                  f" {'OK' if res_match else 'res mismatch'}")
+
+            if score > best_score:
+                # Release previous best
+                if best_cap is not None:
+                    best_cap.release()
+                best_cap = cap
+                best_info = info
+                best_score = score
+            else:
+                cap.release()
+
+            # If we got perfect score, stop trying
+            if res_match and read_ms < 200:
+                break
+
+        if best_cap is not None and best_cap.isOpened():
+            print(f"    [OK] Camera {label} opened ({best_info})")
+            return best_cap, True
         else:
-            print(f"    [ERROR] Failed to open Camera {label}")
-            return cap, False
+            print(f"    [ERROR] Failed to open Camera {label} on any backend")
+            return cv2.VideoCapture(), False
 
     def init_cameras(self):
         """Initialize cameras (A + B required, C optional)."""
