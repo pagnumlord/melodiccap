@@ -28,6 +28,7 @@ import time
 import sys
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+import threading
 
 from keypoint_map import LM, BODY_SKELETON
 from pose_detector import PoseDetector
@@ -167,6 +168,55 @@ def draw_status(frame, text, color=(0, 255, 0)):
 
 
 # =============================================================================
+# NON-BLOCKING CAMERA READER
+# =============================================================================
+
+class _CamCReader:
+    """Background frame reader for optional Camera C.
+
+    Continuously reads frames in a daemon thread. The main loop
+    retrieves the latest frame without blocking. Each frame is only
+    returned once (consumed on read), so a 1fps camera doesn't flood
+    the pipeline with duplicate frames.
+    """
+
+    def __init__(self, cap):
+        self.cap = cap
+        self._frame = None
+        self._new = False
+        self._lock = threading.Lock()
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self):
+        while self._running:
+            ret, frame = self.cap.read()
+            if ret and frame is not None:
+                with self._lock:
+                    self._frame = frame
+                    self._new = True
+
+    def read(self):
+        """Get latest NEW frame. Non-blocking.
+
+        Returns (True, frame) if a new frame is available.
+        Returns (False, None) if no new frame since last read.
+        """
+        with self._lock:
+            if self._new and self._frame is not None:
+                self._new = False
+                return True, self._frame.copy()
+            return False, None
+
+    def stop(self):
+        """Stop background thread and release camera."""
+        self._running = False
+        self._thread.join(timeout=2)
+        self.cap.release()
+
+
+# =============================================================================
 # MAIN APPLICATION
 # =============================================================================
 
@@ -230,6 +280,7 @@ class MelodicCapApp:
         self.cap_b = None
         self.cap_c = None
         self.has_cam_c = False  # True if third camera opened successfully
+        self._cam_c_reader = None  # Background thread reader for Camera C
 
         # Systems — primary calibration (AB pair, used for real-time preview)
         self.calibration = StereoCalibration(self.config)
@@ -370,12 +421,58 @@ class MelodicCapApp:
         # Camera C is optional — skip if index is -1 or fails to open
         if self.config.CAM_C_INDEX >= 0:
             self.cap_c, ok_c = self._open_camera(self.config.CAM_C_INDEX, "C (Sony ZV-1F)")
+            if ok_c:
+                ok_c = self._validate_optional_camera(self.cap_c, "C")
             self.has_cam_c = ok_c
             if not ok_c:
-                print(f"    [WARNING] Camera C failed — continuing with 2 cameras")
+                print(f"    [WARNING] Camera C disabled — continuing with 2 cameras")
+                if self.cap_c is not None:
+                    self.cap_c.release()
+                    self.cap_c = None
         else:
             print(f"  Camera C disabled (CAM_C_INDEX = -1)")
 
+        return True
+
+    def _validate_optional_camera(self, cap, label):
+        """Validate an optional camera delivers correct resolution at acceptable speed.
+
+        Returns False (camera should be disabled) if:
+        - Resolution doesn't match expected FRAME_WIDTH x FRAME_HEIGHT
+        - Average frame delivery > 300ms (would block main loop)
+        """
+        # Check resolution
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            print(f"    [FAIL] Camera {label}: can't deliver frames")
+            return False
+
+        actual_w, actual_h = frame.shape[1], frame.shape[0]
+        if actual_w != self.config.FRAME_WIDTH or actual_h != self.config.FRAME_HEIGHT:
+            print(f"    [FAIL] Camera {label}: resolution {actual_w}x{actual_h} "
+                  f"!= expected {self.config.FRAME_WIDTH}x{self.config.FRAME_HEIGHT}")
+            print(f"    Check camera mode/settings. Sony ZV-1F: use 'i sq' mode for 720p.")
+            return False
+
+        # Check frame delivery speed (3 frames, skip first for warmup)
+        times = []
+        for _ in range(4):
+            t0 = time.time()
+            ret, _ = cap.read()
+            if ret:
+                times.append(time.time() - t0)
+
+        if len(times) < 2:
+            print(f"    [FAIL] Camera {label}: stopped delivering frames during speed test")
+            return False
+
+        avg_ms = np.mean(times[1:]) * 1000  # Skip first (cold start)
+        if avg_ms > 300:
+            print(f"    [FAIL] Camera {label}: too slow ({avg_ms:.0f}ms/frame avg)")
+            print(f"    Would block main loop. Check USB cable/port and camera settings.")
+            return False
+
+        print(f"    [OK] Camera {label} validated: {actual_w}x{actual_h}, {avg_ms:.0f}ms/frame avg")
         return True
 
     def _check_pair_stillness(self, corners_1, ids_1, corners_2, ids_2,
@@ -526,6 +623,14 @@ class MelodicCapApp:
         # ── Camera Diagnostics ────────────────────────────────────
         self._run_camera_diagnostics()
 
+        # Start non-blocking background reader for Camera C.
+        # Must be AFTER diagnostics (which reads from cap_c directly).
+        # The reader continuously grabs frames on a daemon thread so
+        # Camera C never blocks the main loop, even if it's slow.
+        if self.has_cam_c and self.cap_c is not None:
+            self._cam_c_reader = _CamCReader(self.cap_c)
+            print("[INFO] Camera C background reader started")
+
         # Try to load existing calibration
         self.load_existing_calibration()
 
@@ -558,17 +663,18 @@ class MelodicCapApp:
             t_loop = time.time()
 
             # v4.9: Sequential grab/retrieve for frame synchronization.
-            # .read() = .grab() + .retrieve() combined. Using threaded .read()
-            # means each camera grabs its frame at different times (50-100ms apart
-            # with USB cameras). Sequential grab() calls happen microseconds apart
-            # on the main thread, so both cameras capture the same moment.
+            # A + B: sequential grab() on main thread (microseconds apart).
+            # Camera C: non-blocking read from background thread.
             t0 = time.time()
             grab_a = self.cap_a.grab()
             grab_b = self.cap_b.grab()
-            grab_c = self.cap_c.grab() if self.has_cam_c else False
             ret_a, frame_a = self.cap_a.retrieve() if grab_a else (False, None)
             ret_b, frame_b = self.cap_b.retrieve() if grab_b else (False, None)
-            ret_c, frame_c = self.cap_c.retrieve() if grab_c else (False, None)
+            # Camera C: get latest frame from background reader (never blocks)
+            if self._cam_c_reader:
+                ret_c, frame_c = self._cam_c_reader.read()
+            else:
+                ret_c, frame_c = False, None
             t_cam = time.time() - t0
 
             if not ret_a or not ret_b:
@@ -577,14 +683,10 @@ class MelodicCapApp:
                 for _ in range(5):
                     self.cap_a.grab()
                     self.cap_b.grab()
-                    if self.has_cam_c:
-                        self.cap_c.grab()
                 grab_a = self.cap_a.grab()
                 grab_b = self.cap_b.grab()
-                grab_c = self.cap_c.grab() if self.has_cam_c else False
                 ret_a, frame_a = self.cap_a.retrieve() if grab_a else (False, None)
                 ret_b, frame_b = self.cap_b.retrieve() if grab_b else (False, None)
-                ret_c, frame_c = self.cap_c.retrieve() if grab_c else (False, None)
                 if not ret_a or not ret_b:
                     print("[WARNING] Frame capture failed")
                     continue
@@ -641,8 +743,7 @@ class MelodicCapApp:
                     for _ in range(15):
                         grab_sa = self.cap_a.grab()
                         grab_sb = self.cap_b.grab()
-                        if self.has_cam_c:
-                            self.cap_c.grab()  # Keep C in sync even if not used for floor cal
+                        # Camera C reader handles its own flushing in background
                         ret_sa, sample_a = self.cap_a.retrieve() if grab_sa else (False, None)
                         ret_sb, sample_b = self.cap_b.retrieve() if grab_sb else (False, None)
                         if ret_sa and ret_sb:
@@ -954,11 +1055,10 @@ class MelodicCapApp:
                         print(f"  [SKIP] BC pair: only {n_bc} frames (need 10)")
 
                     # Flush camera buffers after long calibration processing
+                    # Camera C reader handles its own flushing in background
                     for _ in range(10):
                         self.cap_a.grab()
                         self.cap_b.grab()
-                        if self.has_cam_c:
-                            self.cap_c.grab()
 
                     self.cal_frames_ab = ([], [])
                     self.cal_frames_ac = ([], [])
@@ -1019,8 +1119,8 @@ class MelodicCapApp:
         self._infer_pool.shutdown(wait=False)
         self.cap_a.release()
         self.cap_b.release()
-        if self.has_cam_c and self.cap_c is not None:
-            self.cap_c.release()
+        if self._cam_c_reader is not None:
+            self._cam_c_reader.stop()
         cv2.destroyAllWindows()
 
         print("\n[DONE]")
