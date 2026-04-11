@@ -43,9 +43,10 @@ class Config:
     """All settings in one place."""
 
     # Camera indices (change these to match your system)
-    CAM_A_INDEX = 2  # Sony ZV-1F
-    CAM_B_INDEX = 0  # Samsung S25 DroidCam
-    CAM_C_INDEX = 1  # Logitech C615 (set to -1 to disable third camera)
+    # A + B are REQUIRED, C is optional. Put most reliable cameras as A/B.
+    CAM_A_INDEX = 0  # Samsung S25 DroidCam
+    CAM_B_INDEX = 1  # Logitech C615
+    CAM_C_INDEX = 2  # Sony ZV-1F (set to -1 to disable third camera)
 
     # Resolution
     FRAME_WIDTH = 1280
@@ -358,17 +359,17 @@ class MelodicCapApp:
         """Initialize cameras (A + B required, C optional)."""
         print("\n[INITIALIZING CAMERAS]")
 
-        self.cap_a, ok_a = self._open_camera(self.config.CAM_A_INDEX, "A (Sony ZV-1F)")
+        self.cap_a, ok_a = self._open_camera(self.config.CAM_A_INDEX, "A (DroidCam)")
         if not ok_a:
             return False
 
-        self.cap_b, ok_b = self._open_camera(self.config.CAM_B_INDEX, "B (DroidCam)")
+        self.cap_b, ok_b = self._open_camera(self.config.CAM_B_INDEX, "B (Logitech)")
         if not ok_b:
             return False
 
         # Camera C is optional — skip if index is -1 or fails to open
         if self.config.CAM_C_INDEX >= 0:
-            self.cap_c, ok_c = self._open_camera(self.config.CAM_C_INDEX, "C (Logitech)")
+            self.cap_c, ok_c = self._open_camera(self.config.CAM_C_INDEX, "C (Sony ZV-1F)")
             self.has_cam_c = ok_c
             if not ok_c:
                 print(f"    [WARNING] Camera C failed — continuing with 2 cameras")
@@ -426,9 +427,9 @@ class MelodicCapApp:
         """Run startup diagnostics on both cameras. Reports actual resolution and timing."""
         print("\n[CAMERA DIAGNOSTICS]")
 
-        cam_list = [("A (Sony ZV-1F)", self.cap_a), ("B (DroidCam)", self.cap_b)]
+        cam_list = [("A (DroidCam)", self.cap_a), ("B (Logitech)", self.cap_b)]
         if self.has_cam_c:
-            cam_list.append(("C (Logitech)", self.cap_c))
+            cam_list.append(("C (Sony ZV-1F)", self.cap_c))
         for label, cap in cam_list:
             # Read actual resolution (what the camera is ACTUALLY delivering)
             actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -596,24 +597,20 @@ class MelodicCapApp:
             t_infer = 0
             if not self.collecting_cal_frames and not self.floor_cal_active:
                 t0 = time.time()
-                # Run cameras' inference in parallel — overlaps CPU
-                # preprocessing with GPU inference
                 min_conf = self.config.MIN_KEYPOINT_CONFIDENCE
+                # Run A+B in parallel (2 threads), then C sequentially.
+                # Running all 3 in parallel overloads the GPU (10fps → ~15fps).
                 future_a = self._infer_pool.submit(
                     self.detector.detect_single, frame_a, min_conf
                 )
                 future_b = self._infer_pool.submit(
                     self.detector.detect_single, frame_b, min_conf
                 )
-                future_c = None
-                if self.has_cam_c and ret_c:
-                    future_c = self._infer_pool.submit(
-                        self.detector.detect_single, frame_c, min_conf
-                    )
                 det_a = future_a.result()
                 det_b = future_b.result()
-                if future_c is not None:
-                    det_c = future_c.result()
+                # Camera C runs after A+B finish (sequential to avoid GPU contention)
+                if self.has_cam_c and ret_c:
+                    det_c = self.detector.detect_single(frame_c, min_conf)
                 t_infer = time.time() - t0
 
             # Draw detections
