@@ -5,22 +5,23 @@ Loads raw 2D detection recordings (melodiccap_raw_v1 format) and runs
 stereo triangulation + filtering offline. Outputs standard melodiccap_rtm_v1
 JSON files ready for the Blender addon.
 
-Supports multi-pair triangulation: when 3 cameras are calibrated, each
-keypoint is triangulated by all available pairs (AB, AC, BC) and the
-result with the lowest reprojection error is selected. This significantly
-improves accuracy, especially on the depth axis which is worst-resolved
-with a single stereo pair.
+Supports multi-pair triangulation: when 3 cameras are calibrated, per-frame
+pair selection picks the best camera pair for each frame (by mean reprojection
+error), then routes all keypoints through the full triangulate_pose() pipeline
+(Kalman + outlier rejection + bone constraints). Calibration pairs with
+stereo RMS above a threshold (default 1.0) are automatically rejected.
 
 Usage:
     python offline_processor.py takes/take_20260328_143000_raw.json
     python offline_processor.py takes/take_20260328_143000_raw.json --no-smooth
+    python offline_processor.py takes/take_20260328_143000_raw.json --pair AB
     python offline_processor.py takes/*.json  (batch mode)
 
 Benefits over real-time triangulation:
     - No frame drops from GPU contention (pose detection vs triangulation)
     - Can re-process the same take with different filter settings
     - Can apply bi-directional smoothing (forward + backward Kalman)
-    - Multi-pair triangulation picks best result per keypoint
+    - Multi-pair triangulation picks best camera pair per frame
 """
 
 import argparse
@@ -77,8 +78,14 @@ def _triangulate_keypoint(calibration, px1, py1, px2, py2):
     return bpt.tolist(), (err_a + err_b) / 2.0
 
 
-def _load_calibrations(calibration_dir):
+PAIR_RMS_MAX_DEFAULT = 1.0  # Reject calibration pairs with stereo RMS above this
+
+
+def _load_calibrations(calibration_dir, pair_rms_max=PAIR_RMS_MAX_DEFAULT):
     """Load all available calibration pairs from a directory.
+
+    Pairs with stereo RMS above pair_rms_max are rejected (too noisy for
+    accurate triangulation).
 
     Returns:
         list of (label, StereoCalibration, cam_key_1, cam_key_2) tuples
@@ -98,8 +105,22 @@ def _load_calibrations(calibration_dir):
     for label, filename, key1, key2 in pair_files:
         cal_file = calibration_dir / filename
         if cal_file.exists():
+            # Read stereo RMS from JSON (load() doesn't restore it)
+            try:
+                with open(cal_file, 'r') as f:
+                    cal_json = json.load(f)
+                rms = cal_json.get('stereo_rms', 0.0) or 0.0
+            except Exception:
+                rms = 0.0
+
+            if rms > pair_rms_max:
+                print(f"  [SKIP] {label}: stereo RMS {rms:.3f} > {pair_rms_max} (too noisy)")
+                continue
+
             cal = StereoCalibration(config)
             if cal.load(cal_file):
+                rms_str = f" (RMS {rms:.3f})" if rms > 0 else ""
+                print(f"  [OK] {label}{rms_str}")
                 pairs.append((label, cal, key1, key2))
 
     # If no pair-specific files found, fall back to the single calibration
@@ -115,13 +136,15 @@ def _load_calibrations(calibration_dir):
 
 def process_take(raw_path, calibration_path, smooth=True,
                  min_conf=0.3, skip_face_hands=True,
-                 kalman_process=1e-4, kalman_measure=1e-2):
+                 kalman_process=1e-4, kalman_measure=1e-2,
+                 pair_rms_max=PAIR_RMS_MAX_DEFAULT, force_pair=None):
     """
     Process a single raw detection file into triangulated 3D output.
 
-    Supports multi-pair triangulation: if multiple calibration files exist
-    (stereo_calibration_ab.json, _ac.json, _bc.json), each keypoint is
-    triangulated by all pairs and the lowest reprojection error wins.
+    When multiple calibration pairs exist, uses per-frame pair selection:
+    each frame is triangulated by the pair with lowest mean reprojection
+    error, routed through the full triangulate_pose() pipeline (Kalman +
+    outlier rejection + bone constraints).
 
     Args:
         raw_path: path to the _raw.json file
@@ -131,6 +154,8 @@ def process_take(raw_path, calibration_path, smooth=True,
         skip_face_hands: skip face/hand keypoints in wholebody mode
         kalman_process: Kalman process noise
         kalman_measure: Kalman measurement noise
+        pair_rms_max: max stereo RMS for calibration pairs (default 1.0)
+        force_pair: force a specific calibration pair label (e.g. 'AB')
 
     Returns:
         output filepath, or None on failure
@@ -169,7 +194,19 @@ def process_take(raw_path, calibration_path, smooth=True,
         cal_dir = calibration_path.parent
 
     # Load all available calibration pairs
-    cal_pairs = _load_calibrations(cal_dir)
+    cal_pairs = _load_calibrations(cal_dir, pair_rms_max=pair_rms_max)
+
+    # Force a specific pair if requested
+    if force_pair and cal_pairs:
+        filtered = [(l, c, k1, k2) for l, c, k1, k2 in cal_pairs
+                     if l == force_pair.upper()]
+        if filtered:
+            cal_pairs = filtered
+            print(f"  Forced pair: {force_pair.upper()}")
+        else:
+            print(f"  [WARN] Requested pair {force_pair.upper()} not available, "
+                  f"using: {', '.join(l for l, _, _, _ in cal_pairs)}")
+
     if not cal_pairs:
         # Fall back to the explicit path
         config = OfflineConfig(
@@ -211,11 +248,12 @@ def process_take(raw_path, calibration_path, smooth=True,
                                     smooth, min_conf, skip_face_hands,
                                     kalman_process, kalman_measure)
 
-    # Multi-pair mode: triangulate each keypoint with all pairs,
-    # pick best per keypoint, then pass through primary pair's pipeline
-    # for smoothing and bone constraints.
-    primary_cal = cal_pairs[0][1]  # AB pair for smoothing/constraints
-    primary_cal.reset_filters()
+    # Multi-pair mode: per-frame pair selection.
+    # For each frame, score all pairs by mean reprojection error, then route
+    # ALL keypoints through the winning pair's triangulate_pose() pipeline.
+    # This keeps the skeleton in a single consistent coordinate frame per frame
+    # and gets the full quality pipeline (Kalman + outlier rejection + bone
+    # constraints) instead of the raw per-keypoint approach which bypassed it.
 
     # Reset filters on all calibrations
     for _, cal, _, _ in cal_pairs:
@@ -232,76 +270,46 @@ def process_take(raw_path, calibration_path, smooth=True,
             if key in frame:
                 dets[key] = {int(k): tuple(v) for k, v in frame[key].items()}
 
-        # Find all keypoint indices across all cameras
-        all_indices = set()
-        for d in dets.values():
-            all_indices.update(d.keys())
+        # Pass 1: Score each pair for this frame by mean reprojection error
+        best_pair_label = None
+        best_pair_cal = None
+        best_pair_keys = None
+        best_mean_err = float('inf')
 
-        if skip_face_hands:
-            all_indices = {idx for idx in all_indices if idx <= 22}
+        for label, cal, key1, key2 in cal_pairs:
+            if key1 not in dets or key2 not in dets:
+                continue
 
-        # For each keypoint, triangulate with all pairs, pick best
-        best_points = {}
-        for idx in all_indices:
-            best_pt = None
-            best_err = float('inf')
-            best_pair = None
-
-            for label, cal, key1, key2 in cal_pairs:
-                if key1 not in dets or key2 not in dets:
+            errors = []
+            for idx in dets[key1]:
+                if idx not in dets[key2]:
                     continue
-                if idx not in dets[key1] or idx not in dets[key2]:
+                if skip_face_hands and idx > 22:
                     continue
-
                 px1, py1, conf1 = dets[key1][idx]
                 px2, py2, conf2 = dets[key2][idx]
-
                 if conf1 < min_conf or conf2 < min_conf:
                     continue
+                _, err = _triangulate_keypoint(cal, px1, py1, px2, py2)
+                if err < float('inf'):
+                    errors.append(err)
 
-                pt, err = _triangulate_keypoint(cal, px1, py1, px2, py2)
-                if pt is not None and err < best_err:
-                    best_pt = pt
-                    best_err = err
-                    best_pair = label
+            if errors:
+                mean_err = sum(errors) / len(errors)
+                if mean_err < best_mean_err:
+                    best_mean_err = mean_err
+                    best_pair_label = label
+                    best_pair_cal = cal
+                    best_pair_keys = (key1, key2)
 
-            if best_pt is not None:
-                best_points[idx] = best_pt
-                if best_pair:
-                    pair_win_counts[best_pair] += 1
-
-        # Pass best points through primary calibration's smoothing pipeline
-        # (Kalman + outlier rejection + bone constraints)
-        if best_points:
-            # Feed as if it were a single-pair result — primary_cal handles
-            # smoothing, outlier rejection, bone constraints
-            smoothed = primary_cal.triangulate_pose(
-                dets.get('raw_2d_a', {}), dets.get('raw_2d_b', {}),
-                smooth=smooth
-            )
-
-            # Replace with multi-pair results where available
-            # For keypoints that only the primary pair saw, keep its result.
-            # For keypoints with multi-pair data, use the best triangulation
-            # but still apply the primary pair's Kalman filter state.
-            if smoothed:
-                for idx, pt in best_points.items():
-                    if idx in smoothed:
-                        # The Kalman filter in primary_cal already has state
-                        # for this keypoint from the AB triangulation above.
-                        # For multi-pair, we update the Kalman with the best point.
-                        if smooth and idx in primary_cal.filters:
-                            pt = [
-                                primary_cal.filters[idx][0].update(pt[0]),
-                                primary_cal.filters[idx][1].update(pt[1]),
-                                primary_cal.filters[idx][2].update(pt[2]),
-                            ]
-                        smoothed[idx] = pt
-                points_3d = smoothed
-            else:
-                points_3d = best_points
-        else:
-            points_3d = None
+        # Pass 2: Route winning pair through full triangulate_pose()
+        points_3d = None
+        if best_pair_cal and best_pair_keys:
+            det1 = dets.get(best_pair_keys[0], {})
+            det2 = dets.get(best_pair_keys[1], {})
+            points_3d = best_pair_cal.triangulate_pose(
+                det1, det2, smooth=smooth)
+            pair_win_counts[best_pair_label] += 1
 
         out_frame = {"timestamp": frame["timestamp"]}
 
@@ -322,11 +330,11 @@ def process_take(raw_path, calibration_path, smooth=True,
     # Report pair selection stats
     total_selections = sum(pair_win_counts.values())
     if total_selections > 0:
-        print(f"\n  [PAIR SELECTION]")
+        print(f"\n  [PAIR SELECTION] (per-frame)")
         for label in pair_labels:
             count = pair_win_counts[label]
             pct = count / total_selections * 100
-            print(f"    {label}: {count} keypoints ({pct:.0f}%)")
+            print(f"    {label}: {count} frames ({pct:.0f}%)")
 
     # Build output
     return _write_output(raw_path, raw_data, output_frames, frames,
@@ -430,6 +438,10 @@ def main():
                         help='Kalman measurement noise (default: 1e-2)')
     parser.add_argument('--include-face-hands', action='store_true',
                         help='Include face/hand keypoints (wholebody mode)')
+    parser.add_argument('--pair', default=None,
+                        help='Force specific calibration pair (e.g., AB, BC)')
+    parser.add_argument('--pair-rms-max', type=float, default=1.0,
+                        help='Max stereo RMS for calibration pairs (default: 1.0)')
 
     args = parser.parse_args()
 
@@ -450,6 +462,8 @@ def main():
             skip_face_hands=not args.include_face_hands,
             kalman_process=args.kalman_process,
             kalman_measure=args.kalman_measure,
+            pair_rms_max=args.pair_rms_max,
+            force_pair=args.pair,
         )
         if result:
             processed += 1
