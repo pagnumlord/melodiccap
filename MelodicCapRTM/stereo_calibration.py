@@ -143,6 +143,15 @@ class StereoCalibration:
             self.P2 = np.array(data['P2'])
             self.floor_z_offset = data.get('floor_z_offset', 0.0)
 
+            # Restore quality metrics. save() writes these but load() used to
+            # drop them, forcing offline_processor.py and chain_calibration.py
+            # to re-read the JSON themselves to get RMS/baseline.
+            self._stereo_rms = data.get('stereo_rms')
+            self._cam_a_rms = data.get('cam_a_rms')
+            self._cam_b_rms = data.get('cam_b_rms')
+            self.baseline_meters = data.get('baseline_meters')
+            self.derivation_method = data.get('derivation_method')
+
             self._cal_image_size = data.get('image_size', None)
             self.is_calibrated = True
             print(f"[OK] Loaded calibration from {filepath}")
@@ -181,6 +190,10 @@ class StereoCalibration:
             'cam_b_rms': getattr(self, '_cam_b_rms', None),
             'floor_z_offset': float(self.floor_z_offset),
         }
+        # Preserve chain-derived flag when re-saving an already-loaded calibration.
+        derivation = getattr(self, 'derivation_method', None)
+        if derivation:
+            data['derivation_method'] = derivation
 
         with open(filepath, 'w') as f:
             json.dump(data, f, indent=2)

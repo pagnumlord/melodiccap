@@ -117,14 +117,34 @@ def derive_ac(ab_path, bc_path, out_path):
         flags=cv2.CALIB_ZERO_DISPARITY, alpha=0.0,
     )
 
-    # AC inherits AB's floor offset because A is the shared reference frame
+    # AC inherits AB's floor offset because A is the shared reference frame.
+    # Abort if AB has no floor calibrated — downstream (offline_processor.py)
+    # will reject the derived pair at the floor gate anyway, and a silent
+    # floor_z_offset=0.0 is a subtle footgun worth surfacing here.
+    if abs(ab['floor_z_offset']) < 1e-4:
+        print("[ERROR] AB calibration has no floor offset "
+              "(floor_z_offset == 0).")
+        print("        Run floor calibration for AB first (press 'F' in "
+              "the capture app with the ChArUco board flat on the ground,")
+        print("        or 'G' to auto-calibrate from ankles), save, then "
+              "re-run chain calibration.")
+        return False
+
     floor_z_offset = ab['floor_z_offset']
+
+    # Propagated RMS: combine as independent errors (quadrature) rather than
+    # a worst-case sum. The previous sum was pessimistic enough to trip the
+    # offline processor's quality gate even for decent inputs.
+    propagated_rms = float(np.sqrt(ab['stereo_rms']**2 + bc['stereo_rms']**2))
 
     out_data = {
         'version': 'melodiccap_rtm_v1',
         'timestamp': datetime.now().isoformat(),
         'derived_from': ['stereo_calibration_ab.json', 'stereo_calibration_bc.json'],
-        'derivation_method': 'chain (R_AC = R_BC @ R_AB, T_AC = R_BC @ T_AB + T_BC)',
+        # Short programmatic tag (read by offline_processor.py to relax the
+        # RMS gate) plus a human-readable description of the math.
+        'derivation_method': 'chain',
+        'derivation_formula': 'R_AC = R_BC @ R_AB, T_AC = R_BC @ T_AB + T_BC',
         'image_size': list(image_size),
         'K1': K_A.tolist(),
         'K2': K_C.tolist(),
@@ -137,8 +157,7 @@ def derive_ac(ab_path, bc_path, out_path):
         'P1': P1.tolist(),
         'P2': P2.tolist(),
         'baseline_meters': baseline_AC,
-        # Propagated RMS: worst-case sum of the contributing pairs
-        'stereo_rms': ab['stereo_rms'] + bc['stereo_rms'],
+        'stereo_rms': propagated_rms,
         'cam_a_rms': None,
         'cam_b_rms': None,
         'floor_z_offset': floor_z_offset,
@@ -149,14 +168,19 @@ def derive_ac(ab_path, bc_path, out_path):
         json.dump(out_data, f, indent=2)
 
     print(f"[OK]   Saved derived AC calibration to {out_path}")
-    print(f"         Propagated stereo RMS: {out_data['stereo_rms']:.3f}")
+    print(f"         Propagated stereo RMS: {propagated_rms:.3f} "
+          f"(sqrt({ab['stereo_rms']:.3f}^2 + {bc['stereo_rms']:.3f}^2))")
     print(f"         Floor offset (inherited from AB): {floor_z_offset:.3f}m")
 
-    # Quality warnings
-    if out_data['stereo_rms'] > 1.0:
-        print(f"[WARN] Propagated RMS {out_data['stereo_rms']:.3f} > 1.0 — "
-              f"the offline processor's quality gate will reject this pair. "
-              f"Recalibrate AB and/or BC for better quality first.")
+    # Quality warnings. The offline processor applies a 1.5x relaxation to
+    # the RMS gate for chain-derived pairs, so the effective threshold is
+    # pair_rms_max * 1.5 (1.5 by default).
+    relaxed_gate = 1.0 * 1.5
+    if propagated_rms > relaxed_gate:
+        print(f"[WARN] Propagated RMS {propagated_rms:.3f} > {relaxed_gate:.2f} "
+              f"(offline processor's relaxed gate for chain pairs) — "
+              f"the pair will still be rejected. Recalibrate AB and/or BC "
+              f"for better quality first.")
     if baseline_AC < 0.8:
         print(f"[WARN] AC baseline {baseline_AC:.3f}m < 0.8m — "
               f"the offline processor's baseline gate will reject this pair.")

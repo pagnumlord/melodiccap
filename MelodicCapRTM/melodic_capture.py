@@ -650,6 +650,8 @@ class MelodicCapApp:
         print("  S = Run stereo calibration (after collecting frames)")
         print("  F = Calibrate floor with ChArUco board")
         print("  G = Auto floor calibration from ankles (stand still, feet flat)")
+        if self.has_cam_c:
+            print("  X = Derive AC from AB + BC (chain calibration, when A/C too far apart)")
         print("  R = Start/Stop recording")
         print("  Q = Quit")
         print()
@@ -1026,6 +1028,10 @@ class MelodicCapApp:
                 else:
                     self.collecting_cal_frames = False
 
+                    ab_ok = False
+                    ac_ok = False
+                    bc_ok = False
+
                     # Calibrate AB pair (primary — required)
                     print(f"\n[CALIBRATION] AB pair: {n_ab} frames...")
                     if self.calibration.calibrate_stereo(
@@ -1033,6 +1039,7 @@ class MelodicCapApp:
                         self.calibration.save(self.config.CALIBRATION_FILE)
                         self.calibration.save(self.config.CALIBRATION_FILE_AB)
                         print(f"  [OK] AB calibration saved")
+                        ab_ok = True
 
                     # Calibrate AC pair (optional)
                     if n_ac >= 10:
@@ -1041,6 +1048,7 @@ class MelodicCapApp:
                                 self.cal_frames_ac[0], self.cal_frames_ac[1]):
                             self.calibration_ac.save(self.config.CALIBRATION_FILE_AC)
                             print(f"  [OK] AC calibration saved")
+                            ac_ok = True
                     elif self.has_cam_c:
                         print(f"  [SKIP] AC pair: only {n_ac} frames (need 10)")
 
@@ -1051,8 +1059,29 @@ class MelodicCapApp:
                                 self.cal_frames_bc[0], self.cal_frames_bc[1]):
                             self.calibration_bc.save(self.config.CALIBRATION_FILE_BC)
                             print(f"  [OK] BC calibration saved")
+                            bc_ok = True
                     elif self.has_cam_c:
                         print(f"  [SKIP] BC pair: only {n_bc} frames (need 10)")
+
+                    # Auto-chain: if AB + BC both calibrated but AC didn't,
+                    # derive AC from the chain. Saves the user a round-trip to
+                    # a separate terminal and the chain_calibration.py CLI.
+                    if self.has_cam_c and ab_ok and bc_ok and not ac_ok:
+                        print("\n[CHAIN] AC not directly calibrated — "
+                              "deriving from AB + BC...")
+                        try:
+                            from chain_calibration import derive_ac
+                            if derive_ac(self.config.CALIBRATION_FILE_AB,
+                                         self.config.CALIBRATION_FILE_BC,
+                                         self.config.CALIBRATION_FILE_AC):
+                                print("[CHAIN] Auto-derived AC saved. "
+                                      "(Press 'X' to re-derive after floor cal.)")
+                            else:
+                                print("[CHAIN] Auto-derivation failed — see "
+                                      "error above. Press 'X' to retry after "
+                                      "floor calibration.")
+                        except Exception as e:
+                            print(f"[CHAIN] Auto-derivation crashed: {e}")
 
                     # Flush camera buffers after long calibration processing
                     # Camera C reader handles its own flushing in background
@@ -1090,6 +1119,27 @@ class MelodicCapApp:
                     self._floor_auto_start = time.time()
                     print(f"\n[FLOOR-AUTO] Stand still with feet flat in {self.config.RECORDING_COUNTDOWN}s... (G to cancel)")
 
+            elif key == ord('x'):
+                # Chain calibration: derive AC from the AB and BC files on
+                # disk. Useful when Camera A and Camera C are too far apart
+                # for the ChArUco board to be detectable in both at once,
+                # or after re-running floor calibration (so the derived AC
+                # picks up the new floor offset).
+                if not self.has_cam_c:
+                    print("\n[CHAIN] Chain calibration requires Camera C. "
+                          "Disabled in 2-camera mode.")
+                else:
+                    print("\n[CHAIN] Deriving AC from AB + BC on disk...")
+                    try:
+                        from chain_calibration import derive_ac
+                        ok = derive_ac(self.config.CALIBRATION_FILE_AB,
+                                       self.config.CALIBRATION_FILE_BC,
+                                       self.config.CALIBRATION_FILE_AC)
+                        if not ok:
+                            print("[CHAIN] Derivation failed — see error above.")
+                    except Exception as e:
+                        print(f"[CHAIN] Derivation crashed: {e}")
+
             elif key == ord('r'):
                 if not self.calibration.is_calibrated:
                     print("\n[ERROR] Calibrate cameras first (press C)")
@@ -1104,8 +1154,20 @@ class MelodicCapApp:
                     self.recorder.stop(detector_info=detector_info, trim_end=trim_secs,
                                        offline_mode=self.config.OFFLINE_MODE,
                                        keypoint_count=kp_count)
+                elif (abs(self.calibration.floor_z_offset) < 0.01
+                      and not getattr(self, '_floor_missing_ack', False)):
+                    # Pre-flight: floor not calibrated. The offline processor
+                    # will reject every pair without a floor offset, so the
+                    # take would be useless. Warn and require a confirm press.
+                    print("\n[WARNING] No floor offset calibrated — the "
+                          "offline processor will reject every pair and the "
+                          "take will be unusable.")
+                    print("          Press 'F' (or 'G') to calibrate the floor "
+                          "first, or press 'R' again to record anyway.")
+                    self._floor_missing_ack = True
                 else:
                     # Start countdown
+                    self._floor_missing_ack = False
                     self._countdown_active = True
                     self._countdown_start = time.time()
                     print(f"\n[RECORDING] Starting in {self.config.RECORDING_COUNTDOWN} seconds... (R to cancel)")

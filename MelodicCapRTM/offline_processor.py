@@ -113,21 +113,42 @@ def _load_calibrations(calibration_dir, pair_rms_max=PAIR_RMS_MAX_DEFAULT,
     for label, filename, key1, key2 in pair_files:
         cal_file = calibration_dir / filename
         if cal_file.exists():
-            # Read quality metrics from JSON (load() doesn't restore stereo_rms)
-            try:
-                with open(cal_file, 'r') as f:
-                    cal_json = json.load(f)
-                rms = cal_json.get('stereo_rms', 0.0) or 0.0
-                baseline = cal_json.get('baseline_meters', 0.0) or 0.0
-                floor_offset = cal_json.get('floor_z_offset', 0.0) or 0.0
-            except Exception:
-                rms = 0.0
-                baseline = 0.0
-                floor_offset = 0.0
+            cal = StereoCalibration(config)
+            if not cal.load(cal_file):
+                continue
+
+            # Prefer metrics restored by load(); fall back to JSON for legacy
+            # files that pre-date the load() fix.
+            rms = cal._stereo_rms if getattr(cal, '_stereo_rms', None) is not None else 0.0
+            baseline = (cal.baseline_meters
+                        if getattr(cal, 'baseline_meters', None) is not None else 0.0)
+            floor_offset = cal.floor_z_offset or 0.0
+            derivation = getattr(cal, 'derivation_method', None)
+            if rms == 0.0 or baseline == 0.0 or derivation is None:
+                try:
+                    with open(cal_file, 'r') as f:
+                        cal_json = json.load(f)
+                    if rms == 0.0:
+                        rms = cal_json.get('stereo_rms', 0.0) or 0.0
+                    if baseline == 0.0:
+                        baseline = cal_json.get('baseline_meters', 0.0) or 0.0
+                    if derivation is None:
+                        derivation = cal_json.get('derivation_method')
+                except Exception:
+                    pass
+
+            # Chain-derived pairs get a relaxed RMS gate. Their propagated
+            # RMS is combined-in-quadrature from two real calibrations, so
+            # it's systematically higher even when the geometry is fine.
+            is_chain = (derivation == 'chain')
+            effective_rms_max = pair_rms_max * 1.5 if is_chain else pair_rms_max
 
             # Quality gate: RMS
-            if rms > pair_rms_max:
-                print(f"  [SKIP] {label}: stereo RMS {rms:.3f} > {pair_rms_max} (too noisy)")
+            if rms > effective_rms_max:
+                gate_label = (f"{effective_rms_max:.2f} (chain relaxed)"
+                              if is_chain else f"{pair_rms_max}")
+                print(f"  [SKIP] {label}: stereo RMS {rms:.3f} > {gate_label} "
+                      f"(too noisy)")
                 continue
 
             # Quality gate: baseline
@@ -142,12 +163,11 @@ def _load_calibrations(calibration_dir, pair_rms_max=PAIR_RMS_MAX_DEFAULT,
                       f"(would shift skeleton origin)")
                 continue
 
-            cal = StereoCalibration(config)
-            if cal.load(cal_file):
-                rms_str = f" (RMS {rms:.3f})" if rms > 0 else ""
-                base_str = f", baseline {baseline:.3f}m" if baseline > 0 else ""
-                print(f"  [OK] {label}{rms_str}{base_str}")
-                pairs.append((label, cal, key1, key2))
+            rms_str = f" (RMS {rms:.3f})" if rms > 0 else ""
+            base_str = f", baseline {baseline:.3f}m" if baseline > 0 else ""
+            chain_str = " [chain-derived]" if is_chain else ""
+            print(f"  [OK] {label}{rms_str}{base_str}{chain_str}")
+            pairs.append((label, cal, key1, key2))
 
     # If no pair-specific files found, fall back to the single calibration
     if not pairs:
