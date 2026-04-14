@@ -40,6 +40,84 @@ BONE_PAIRS_FOR_SCALE = [
 ]
 
 
+# =============================================================================
+# Per-camera intrinsics file I/O (stand-alone, no stereo pair required)
+# =============================================================================
+#
+# Splitting intrinsics capture from extrinsics capture is what every
+# professional CV calibration tool does (MATLAB Camera Calibrator, Kalibr,
+# OpenCV's own sample calibrator). Intrinsics (K, D) are stable across
+# sessions because they depend on the lens and sensor, not camera pose.
+# Stereo extrinsics (R, T) change every time you move the cameras.
+#
+# The "one board, both cameras must see it" flow forces the intrinsics
+# solver to use only frames that happen to be in the overlap volume, which
+# is a narrow cluster in a small room. That's how you end up with a 9.9%
+# Camera B K-matrix mismatch between AB and BC calibrations.
+
+def save_intrinsics(filepath, K, D, rms, image_size, coverage_map=None,
+                    n_frames=0, camera_label=None):
+    """Save per-camera intrinsics to a stand-alone JSON file.
+
+    This is deliberately separate from StereoCalibration.save() — an
+    intrinsics file has NO R/T and can be produced from a single camera.
+
+    Args:
+        filepath: Path to write (e.g. calibration/intrinsics_a.json)
+        K: 3x3 camera matrix
+        D: 1xN distortion coefficients
+        rms: reprojection RMS from calibrateCameraCharuco
+        image_size: (width, height) the calibration was captured at
+        coverage_map: optional 3x3 int array of per-cell capture counts
+        n_frames: total number of capture frames used
+        camera_label: optional human tag ('A', 'B', 'C')
+    """
+    filepath = Path(filepath)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+
+    data = {
+        'version': 'melodiccap_intrinsics_v1',
+        'timestamp': datetime.now().isoformat(),
+        'camera_label': camera_label,
+        'image_size': list(image_size),
+        'K': np.asarray(K).tolist(),
+        'D': np.asarray(D).tolist(),
+        'rms': float(rms),
+        'n_frames': int(n_frames),
+    }
+    if coverage_map is not None:
+        data['coverage_map'] = np.asarray(coverage_map, dtype=int).tolist()
+
+    with open(filepath, 'w') as f:
+        json.dump(data, f, indent=2)
+
+
+def load_intrinsics(filepath):
+    """Load per-camera intrinsics. Returns dict or None if missing/invalid.
+
+    Returned dict has: K (3x3 np.ndarray), D (1xN np.ndarray),
+    rms (float), image_size (list), n_frames (int), coverage_map (optional).
+    """
+    filepath = Path(filepath)
+    if not filepath.exists():
+        return None
+    try:
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+        return {
+            'K': np.array(data['K'], dtype=np.float64),
+            'D': np.array(data['D'], dtype=np.float64),
+            'rms': float(data.get('rms', 0.0)),
+            'image_size': list(data.get('image_size', [0, 0])),
+            'n_frames': int(data.get('n_frames', 0)),
+            'coverage_map': data.get('coverage_map'),
+            'camera_label': data.get('camera_label'),
+        }
+    except Exception as e:
+        print(f"[WARN] Failed to load intrinsics from {filepath}: {e}")
+        return None
+
+
 class StereoCalibration:
     """Handles stereo camera calibration and 3D triangulation."""
 
@@ -240,18 +318,37 @@ class StereoCalibration:
             )
         return True, coverage, f"Camera {label}: {coverage:.0%} spatial coverage"
 
-    def calibrate_stereo(self, frames_a, frames_b):
+    def calibrate_stereo(self, frames_a, frames_b,
+                         K1_fixed=None, D1_fixed=None,
+                         K2_fixed=None, D2_fixed=None):
         """
         Calibrate stereo cameras from synchronized frame pairs.
 
         Args:
             frames_a: List of frames from camera A
             frames_b: List of frames from camera B
+            K1_fixed, D1_fixed: pre-computed intrinsics for Camera A. If
+                provided, monocular estimation for Camera A is skipped and
+                these matrices are passed straight into stereoCalibrate with
+                CALIB_FIX_INTRINSIC. This is the fast path you get when
+                per-camera intrinsics were already captured via the `I` key.
+            K2_fixed, D2_fixed: same, for Camera B.
+
+        When fixed intrinsics are supplied for both cameras, the required
+        per-camera spatial coverage gate is relaxed (intrinsics are already
+        trusted, so extrinsics only need ~8 shared views).
 
         Returns:
             True if successful
         """
-        print("\n[CALIBRATING STEREO CAMERAS]")
+        extrinsics_only = (K1_fixed is not None and D1_fixed is not None
+                           and K2_fixed is not None and D2_fixed is not None)
+
+        if extrinsics_only:
+            print("\n[CALIBRATING STEREO EXTRINSICS ONLY "
+                  "— using saved per-camera intrinsics]")
+        else:
+            print("\n[CALIBRATING STEREO CAMERAS]")
 
         all_corners_a = []
         all_corners_b = []
@@ -283,51 +380,72 @@ class StereoCalibration:
                 if cb is not None: detected.append(f"B={len(cb)}")
                 print(f"  Frame {i+1}: Board not detected in {'both cameras' if not detected else 'one camera'}")
 
-        if len(all_corners_a) < 10:
-            print(f"[ERROR] Not enough valid frames ({len(all_corners_a)}). Need at least 10.")
+        # Extrinsics-only needs ~8 shared views; legacy joint path still needs 10.
+        min_required = 8 if extrinsics_only else 10
+        if len(all_corners_a) < min_required:
+            print(f"[ERROR] Not enough valid frames ({len(all_corners_a)}). "
+                  f"Need at least {min_required}.")
             return False
 
         img_size = (self.config.FRAME_WIDTH, self.config.FRAME_HEIGHT)
 
-        # Check spatial coverage before attempting calibration
-        ok_a, cov_a, msg_a = self._check_spatial_coverage(all_corners_a, img_size, "A")
-        ok_b, cov_b, msg_b = self._check_spatial_coverage(all_corners_b, img_size, "B")
-        print(f"\n  {msg_a}")
-        print(f"  {msg_b}")
+        # Spatial coverage gate. Only matters when we're solving intrinsics
+        # here — if the caller already passed fixed K/D (from per-camera
+        # intrinsics capture), we just need a handful of matched views for R/T.
+        if not extrinsics_only:
+            ok_a, cov_a, msg_a = self._check_spatial_coverage(all_corners_a, img_size, "A")
+            ok_b, cov_b, msg_b = self._check_spatial_coverage(all_corners_b, img_size, "B")
+            print(f"\n  {msg_a}")
+            print(f"  {msg_b}")
 
-        if not ok_a or not ok_b:
-            print(f"\n[ERROR] Insufficient spatial coverage!")
-            print(f"  The board needs to appear in different parts of the frame.")
-            print(f"  Move it: left/right, up/down, near/far, and tilt it.")
-            print(f"  This is especially important for Camera B (DroidCam).")
-            return False
+            if not ok_a or not ok_b:
+                print(f"\n[ERROR] Insufficient spatial coverage!")
+                print(f"  The board needs to appear in different parts of the frame.")
+                print(f"  Move it: left/right, up/down, near/far, and tilt it.")
+                print(f"  This is especially important for Camera B (DroidCam).")
+                return False
+        else:
+            print(f"\n  [OK] Skipping spatial coverage check "
+                  f"(intrinsics are pre-computed; only need {min_required}+ shared views)")
 
-        # Calibrate camera A
-        print("\n  Calibrating Camera A...")
-        try:
-            ret_a, K1, D1, _, _ = cv2.aruco.calibrateCameraCharuco(
-                all_corners_a, all_ids_a, self.charuco_board, img_size, None, None
-            )
-            print(f"    RMS Error: {ret_a:.4f}")
-        except cv2.error as e:
-            print(f"    [FAILED] Camera A calibration error: {e}")
-            print(f"    Board positions likely too similar. Move board more.")
-            return False
+        if extrinsics_only:
+            # Use the caller-supplied matrices as both the seed and the fixed
+            # intrinsics for stereoCalibrate. CALIB_FIX_INTRINSIC at line ~400
+            # makes stereoCalibrate only solve for R and T.
+            K1 = np.array(K1_fixed, dtype=np.float64)
+            D1 = np.array(D1_fixed, dtype=np.float64)
+            K2 = np.array(K2_fixed, dtype=np.float64)
+            D2 = np.array(D2_fixed, dtype=np.float64)
+            ret_a = 0.0  # unknown — came from a separate intrinsics session
+            ret_b = 0.0
+            print("  Using pre-computed Camera A intrinsics")
+            print("  Using pre-computed Camera B intrinsics")
+        else:
+            # Calibrate camera A
+            print("\n  Calibrating Camera A...")
+            try:
+                ret_a, K1, D1, _, _ = cv2.aruco.calibrateCameraCharuco(
+                    all_corners_a, all_ids_a, self.charuco_board, img_size, None, None
+                )
+                print(f"    RMS Error: {ret_a:.4f}")
+            except cv2.error as e:
+                print(f"    [FAILED] Camera A calibration error: {e}")
+                print(f"    Board positions likely too similar. Move board more.")
+                return False
 
-        # Calibrate camera B
-        print("  Calibrating Camera B...")
-        try:
-            ret_b, K2, D2, _, _ = cv2.aruco.calibrateCameraCharuco(
-                all_corners_b, all_ids_b, self.charuco_board, img_size, None, None
-            )
-            print(f"    RMS Error: {ret_b:.4f}")
-        except cv2.error as e:
-            print(f"    [FAILED] Camera B calibration error: {e}")
-            print(f"    Board positions from DroidCam likely too similar.")
-            print(f"    Make sure the board appears at different positions and angles")
-            print(f"    from DroidCam's perspective — not just the Sony's.")
-            return False
-        print(f"    RMS Error: {ret_b:.4f}")
+            # Calibrate camera B
+            print("  Calibrating Camera B...")
+            try:
+                ret_b, K2, D2, _, _ = cv2.aruco.calibrateCameraCharuco(
+                    all_corners_b, all_ids_b, self.charuco_board, img_size, None, None
+                )
+                print(f"    RMS Error: {ret_b:.4f}")
+            except cv2.error as e:
+                print(f"    [FAILED] Camera B calibration error: {e}")
+                print(f"    Board positions from DroidCam likely too similar.")
+                print(f"    Make sure the board appears at different positions and angles")
+                print(f"    from DroidCam's perspective — not just the Sony's.")
+                return False
 
         # Build stereo correspondences
         obj_points = []
@@ -437,15 +555,18 @@ class StereoCalibration:
         # ── Quality Gate ──────────────────────────────────────────────
         quality_issues = []
 
-        if ret_a > 1.0:
-            quality_issues.append(f"Camera A intrinsic RMS {ret_a:.3f} > 1.0 (bad)")
-        elif ret_a > 0.5:
-            quality_issues.append(f"Camera A intrinsic RMS {ret_a:.3f} > 0.5 (mediocre)")
+        # Only check per-camera intrinsic RMS when we actually computed it.
+        # Extrinsics-only path trusts the caller-supplied intrinsics.
+        if not extrinsics_only:
+            if ret_a > 1.0:
+                quality_issues.append(f"Camera A intrinsic RMS {ret_a:.3f} > 1.0 (bad)")
+            elif ret_a > 0.5:
+                quality_issues.append(f"Camera A intrinsic RMS {ret_a:.3f} > 0.5 (mediocre)")
 
-        if ret_b > 1.0:
-            quality_issues.append(f"Camera B intrinsic RMS {ret_b:.3f} > 1.0 (bad)")
-        elif ret_b > 0.5:
-            quality_issues.append(f"Camera B intrinsic RMS {ret_b:.3f} > 0.5 (mediocre)")
+            if ret_b > 1.0:
+                quality_issues.append(f"Camera B intrinsic RMS {ret_b:.3f} > 1.0 (bad)")
+            elif ret_b > 0.5:
+                quality_issues.append(f"Camera B intrinsic RMS {ret_b:.3f} > 0.5 (mediocre)")
 
         if ret_stereo > 1.5:
             quality_issues.append(f"Stereo RMS {ret_stereo:.3f} > 1.5 (BAD — will produce stretched/jittery results)")
@@ -489,8 +610,11 @@ class StereoCalibration:
         self.is_calibrated = True
         self._cal_image_size = list(img_size)
         self._stereo_rms = float(ret_stereo)
-        self._cam_a_rms = float(ret_a)
-        self._cam_b_rms = float(ret_b)
+        # In extrinsics-only mode the per-camera RMS was never recomputed
+        # (we trusted the caller's intrinsics). Store None so offline tools
+        # don't mis-read a placeholder zero as "excellent".
+        self._cam_a_rms = None if extrinsics_only else float(ret_a)
+        self._cam_b_rms = None if extrinsics_only else float(ret_b)
 
         print(f"\n[OK] Stereo calibration complete!")
         print(f"     Baseline: {baseline:.3f}m")

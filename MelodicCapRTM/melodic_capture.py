@@ -11,13 +11,22 @@ Hardware:
 - Camera B (Samsung S25 via DroidCam): default index 0
 - GPU: RTX 3060 Ti (CUDA acceleration for RTMW)
 
-Usage:
+Usage (first-run / hardware changed):
 1. Run this script
-2. Press 'C' to start collecting calibration frames (show ChArUco board to both)
-3. Press 'S' to run stereo calibration (after collecting 20+ frames)
-4. Press 'F' to calibrate floor (place board on ground)
-5. Press 'R' to start/stop recording
-6. Press 'Q' to quit
+2. Press 'I' to capture per-camera intrinsics for Camera A. Fill the 3x3
+   grid overlay by holding the ChArUco board in each quadrant at varied
+   distances and tilts. Press 'S' to solve + save, auto-advances to the
+   next camera. Repeat until all cameras are done.
+3. Press 'C' to collect paired calibration frames (show the board to both
+   cameras at once at various positions).
+4. Press 'S' to run stereo calibration. If intrinsics JSONs exist, only
+   extrinsics are solved (much faster, much more accurate).
+5. Press 'F' (or 'G') to calibrate floor.
+6. Press 'R' to start/stop recording.
+7. Press 'Q' to quit.
+
+Subsequent sessions where only the cameras moved (intrinsics unchanged):
+skip step 2 — the saved intrinsics get reused automatically.
 
 Output: JSON files in takes/ directory, ready for Blender import.
 """
@@ -32,7 +41,7 @@ import threading
 
 from keypoint_map import LM, BODY_SKELETON
 from pose_detector import PoseDetector
-from stereo_calibration import StereoCalibration
+from stereo_calibration import StereoCalibration, save_intrinsics, load_intrinsics
 from recorder import MocapRecorder
 
 
@@ -63,16 +72,30 @@ class Config:
     CALIBRATION_FILE_AB = BASE_DIR / "calibration" / "stereo_calibration_ab.json"
     CALIBRATION_FILE_AC = BASE_DIR / "calibration" / "stereo_calibration_ac.json"
     CALIBRATION_FILE_BC = BASE_DIR / "calibration" / "stereo_calibration_bc.json"
+    # Per-camera intrinsics files (captured via the `I` key — stand-alone,
+    # not tied to any stereo pair). Loaded by the `S` key to short-circuit
+    # the monocular step of stereo calibration.
+    INTRINSICS_FILE_A = BASE_DIR / "calibration" / "intrinsics_a.json"
+    INTRINSICS_FILE_B = BASE_DIR / "calibration" / "intrinsics_b.json"
+    INTRINSICS_FILE_C = BASE_DIR / "calibration" / "intrinsics_c.json"
     TAKES_DIR = BASE_DIR / "takes"
 
+    # Per-camera intrinsics capture gates
+    INTRINSICS_MIN_CELLS = 8      # 3x3 grid; require at least 8 of 9 filled
+    INTRINSICS_MIN_FRAMES = 25    # enough views to solve K+D reliably
+    INTRINSICS_MAX_RMS = 1.0      # reject if solver reports worse than this
+
     # ChArUco board (must match your printed board)
-    # 5x7 board, single letter page — no edge truncation
-    # IMPORTANT: measure actual printed square with ruler, update if different
+    # Defaults are the small A4 5x7 board at 35mm squares. If you print a
+    # larger board (recommended: A2/A1 foamcore), drop a board_config.json
+    # next to this file and the loader below will override these at startup.
+    # IMPORTANT: measure your actual printed square size with calipers.
     CHARUCO_SQUARES_X = 5
     CHARUCO_SQUARES_Y = 7
     CHARUCO_SQUARE_SIZE = 0.035    # 35mm target — MEASURE YOUR PRINT
     CHARUCO_MARKER_SIZE = 0.025    # 25mm target — MEASURE YOUR PRINT
     ARUCO_DICT = cv2.aruco.DICT_4X4_50
+    BOARD_CONFIG_FILE = None  # populated in __post_init__ below
 
     # Recording
     RECORDING_COUNTDOWN = 5  # seconds before recording starts
@@ -96,6 +119,64 @@ class Config:
     # Smoothing
     KALMAN_PROCESS_NOISE = 1e-4
     KALMAN_MEASUREMENT_NOISE = 1e-2
+
+
+def _load_board_config(config):
+    """Override ChArUco board geometry from calibration/board_config.json.
+
+    Called once from MelodicCapApp.__init__. Lets the user swap to a bigger
+    printed board (A2/A1 foamcore) without editing source or restarting
+    through an IDE — just edit the JSON and relaunch.
+
+    JSON schema (all keys optional, fall back to Config defaults):
+        {
+          "squares_x": 5,
+          "squares_y": 7,
+          "square_size_m": 0.080,
+          "marker_size_m": 0.060,
+          "aruco_dict": "DICT_4X4_50",
+          "notes": "Printed on A1 foamcore at Staples, measured 80.1mm"
+        }
+    """
+    path = config.BASE_DIR / "calibration" / "board_config.json"
+    if not path.exists():
+        print(f"[BOARD] Using hardcoded defaults: "
+              f"{config.CHARUCO_SQUARES_X}x{config.CHARUCO_SQUARES_Y} @ "
+              f"{config.CHARUCO_SQUARE_SIZE*1000:.0f}mm")
+        print(f"        (drop a board_config.json in calibration/ to override)")
+        return
+
+    try:
+        import json
+        with open(path, 'r') as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"[BOARD] Failed to read {path}: {e}")
+        return
+
+    if 'squares_x' in data:
+        config.CHARUCO_SQUARES_X = int(data['squares_x'])
+    if 'squares_y' in data:
+        config.CHARUCO_SQUARES_Y = int(data['squares_y'])
+    if 'square_size_m' in data:
+        config.CHARUCO_SQUARE_SIZE = float(data['square_size_m'])
+    if 'marker_size_m' in data:
+        config.CHARUCO_MARKER_SIZE = float(data['marker_size_m'])
+    if 'aruco_dict' in data:
+        dict_name = str(data['aruco_dict'])
+        dict_attr = getattr(cv2.aruco, dict_name, None)
+        if dict_attr is not None:
+            config.ARUCO_DICT = dict_attr
+        else:
+            print(f"[BOARD] Unknown aruco_dict '{dict_name}' — keeping default")
+
+    config.BOARD_CONFIG_FILE = str(path)
+    print(f"[BOARD] Loaded {path.name}: "
+          f"{config.CHARUCO_SQUARES_X}x{config.CHARUCO_SQUARES_Y} @ "
+          f"{config.CHARUCO_SQUARE_SIZE*1000:.1f}mm squares, "
+          f"{config.CHARUCO_MARKER_SIZE*1000:.1f}mm markers")
+    if 'notes' in data:
+        print(f"        Notes: {data['notes']}")
 
 
 # =============================================================================
@@ -226,6 +307,11 @@ class MelodicCapApp:
     def __init__(self):
         self.config = Config()
 
+        # Apply board_config.json overrides BEFORE any StereoCalibration is
+        # constructed, because StereoCalibration.__init__ builds the ChArUco
+        # board from these values.
+        _load_board_config(self.config)
+
         # Track if user wanted CUDA (to warn if we fell back)
         self._cuda_was_requested = (self.config.POSE_DEVICE == 'cuda')
 
@@ -310,6 +396,22 @@ class MelodicCapApp:
         # Auto floor calibration countdown
         self._floor_auto_countdown = False
         self._floor_auto_start = 0
+
+        # Per-camera intrinsics capture mode (I key).
+        # None = off, 'A'/'B'/'C' = that camera's capture is active.
+        # Intrinsics are stored as lists of (corners, ids) so we can call
+        # cv2.aruco.calibrateCameraCharuco directly when the user presses S.
+        self._intrinsics_mode = None
+        self._intrinsics_corners = {'A': [], 'B': [], 'C': []}  # list of charuco corners arrays
+        self._intrinsics_ids = {'A': [], 'B': [], 'C': []}      # list of charuco ids arrays
+        self._intrinsics_coverage = {
+            'A': np.zeros((3, 3), dtype=int),
+            'B': np.zeros((3, 3), dtype=int),
+            'C': np.zeros((3, 3), dtype=int),
+        }
+        self._intrinsics_last_cell = {'A': None, 'B': None, 'C': None}
+        self._intrinsics_prev_corners = {'A': None, 'B': None, 'C': None}
+        self._intrinsics_last_cap_time = {'A': 0.0, 'B': 0.0, 'C': 0.0}
 
         # State
         self.running = True
@@ -520,6 +622,244 @@ class MelodicCapApp:
 
         return move_1 < threshold and move_2 < threshold
 
+    # ─────────────────────────────────────────────────────────────────
+    # Per-camera intrinsics capture (I key)
+    # ─────────────────────────────────────────────────────────────────
+
+    def _intrinsics_cycle(self):
+        """Advance `I` key through off → A → B → C → off.
+
+        Skips Camera C when it's unavailable.
+        """
+        order = [None, 'A', 'B']
+        if self.has_cam_c:
+            order.append('C')
+        try:
+            i = order.index(self._intrinsics_mode)
+        except ValueError:
+            i = 0
+        self._intrinsics_mode = order[(i + 1) % len(order)]
+
+        if self._intrinsics_mode is None:
+            print("\n[INTRINSICS] Capture OFF")
+        else:
+            label = self._intrinsics_mode
+            n_frames = len(self._intrinsics_corners[label])
+            n_cells = int(np.count_nonzero(self._intrinsics_coverage[label]))
+            print(f"\n[INTRINSICS] Capturing Camera {label}")
+            print(f"  Fill the 3x3 grid by moving the board into every quadrant,")
+            print(f"  at different distances and tilts. Hold still between moves.")
+            print(f"  Goal: {self.config.INTRINSICS_MIN_CELLS}/9 cells, "
+                  f"{self.config.INTRINSICS_MIN_FRAMES}+ frames.")
+            print(f"  Current progress: {n_cells}/9 cells, {n_frames} frames.")
+            print(f"  Press S to solve + save, or I to advance to the next camera.")
+
+    def _intrinsics_grid_cell(self, corners, img_size):
+        """Return (row, col) cell index 0..2 for the board centroid."""
+        pts = corners.reshape(-1, 2)
+        if len(pts) == 0:
+            return None
+        cx = float(np.mean(pts[:, 0]))
+        cy = float(np.mean(pts[:, 1]))
+        w, h = img_size
+        col = max(0, min(2, int(cx / (w / 3))))
+        row = max(0, min(2, int(cy / (h / 3))))
+        return (row, col)
+
+    def _intrinsics_still(self, label, corners, ids, threshold=2.0):
+        """Single-camera stillness check adapted from `_check_pair_stillness`."""
+        prev = self._intrinsics_prev_corners[label]
+        self._intrinsics_prev_corners[label] = (corners, ids)
+        if prev is None:
+            return False
+        prev_c, prev_id = prev
+        if prev_id is None or ids is None:
+            return False
+        common = set(ids.flatten()) & set(prev_id.flatten())
+        if len(common) < 4:
+            return False
+        max_move = 0.0
+        for cid in common:
+            idx_cur = np.where(ids.flatten() == cid)[0][0]
+            idx_prev = np.where(prev_id.flatten() == cid)[0][0]
+            max_move = max(max_move, float(np.linalg.norm(
+                corners[idx_cur].flatten() - prev_c[idx_prev].flatten())))
+        return max_move < threshold
+
+    def _intrinsics_maybe_capture(self, frame):
+        """Detect board on the active intrinsics camera and maybe store it.
+
+        Returns the same frame with a 3x3 grid overlay and HUD text drawn
+        on it, ready for display. No-op if mode is off.
+        """
+        label = self._intrinsics_mode
+        if label is None:
+            return frame
+
+        img_size = (self.config.FRAME_WIDTH, self.config.FRAME_HEIGHT)
+        display = frame.copy()
+
+        # Draw the 3x3 grid with green fills for cells already covered.
+        cov = self._intrinsics_coverage[label]
+        w, h = img_size
+        for r in range(3):
+            for c in range(3):
+                x0 = int(c * w / 3)
+                y0 = int(r * h / 3)
+                x1 = int((c + 1) * w / 3)
+                y1 = int((r + 1) * h / 3)
+                if cov[r, c] >= 2:
+                    overlay = display.copy()
+                    cv2.rectangle(overlay, (x0, y0), (x1, y1), (0, 180, 0), -1)
+                    cv2.addWeighted(overlay, 0.25, display, 0.75, 0, display)
+                cv2.rectangle(display, (x0, y0), (x1 - 1, y1 - 1),
+                              (80, 80, 80), 1)
+
+        corners, ids = self.calibration.detect_charuco(frame)
+        if corners is not None:
+            cv2.aruco.drawDetectedCornersCharuco(display, corners)
+            cell = self._intrinsics_grid_cell(corners, img_size)
+            still = self._intrinsics_still(label, corners, ids)
+            now = time.time()
+            cooldown_ok = (now - self._intrinsics_last_cap_time[label]) > 0.5
+            new_cell = (cell is not None and cell != self._intrinsics_last_cell[label])
+            cell_wants_more = (cell is not None and cov[cell[0], cell[1]] < 3)
+
+            if still and cooldown_ok and (new_cell or cell_wants_more):
+                # Only store frames with at least 6 corners — same bar used
+                # in calibrate_stereo's pair capture.
+                if len(corners) >= 6:
+                    self._intrinsics_corners[label].append(corners.copy())
+                    self._intrinsics_ids[label].append(ids.copy())
+                    cov[cell[0], cell[1]] += 1
+                    self._intrinsics_last_cell[label] = cell
+                    self._intrinsics_last_cap_time[label] = now
+                    n_frames = len(self._intrinsics_corners[label])
+                    n_cells = int(np.count_nonzero(cov))
+                    print(f"  [I/{label}] Captured at cell {cell} "
+                          f"({n_frames} frames, {n_cells}/9 cells)")
+
+        # HUD
+        n_frames = len(self._intrinsics_corners[label])
+        n_cells = int(np.count_nonzero(cov))
+        hud = (f"INTRINSICS {label}: {n_cells}/9 cells, {n_frames} frames  "
+               f"(I=next cam  S=solve+save)")
+        draw_status(display, hud, (0, 255, 255))
+        return display
+
+    def _intrinsics_solve_and_save(self):
+        """Solve the monocular intrinsics for the active camera and save to JSON."""
+        label = self._intrinsics_mode
+        if label is None:
+            return
+
+        n_frames = len(self._intrinsics_corners[label])
+        n_cells = int(np.count_nonzero(self._intrinsics_coverage[label]))
+        if n_frames < self.config.INTRINSICS_MIN_FRAMES:
+            print(f"\n[INTRINSICS] Camera {label}: only {n_frames} frames "
+                  f"(need {self.config.INTRINSICS_MIN_FRAMES}+). Keep capturing.")
+            return
+        if n_cells < self.config.INTRINSICS_MIN_CELLS:
+            print(f"\n[INTRINSICS] Camera {label}: only {n_cells}/9 grid cells "
+                  f"filled (need {self.config.INTRINSICS_MIN_CELLS}+). "
+                  f"Move the board into the empty quadrants.")
+            return
+
+        img_size = (self.config.FRAME_WIDTH, self.config.FRAME_HEIGHT)
+        print(f"\n[INTRINSICS] Solving Camera {label} from {n_frames} frames...")
+        try:
+            rms, K, D, _, _ = cv2.aruco.calibrateCameraCharuco(
+                self._intrinsics_corners[label],
+                self._intrinsics_ids[label],
+                self.calibration.charuco_board,
+                img_size, None, None,
+            )
+        except cv2.error as e:
+            print(f"  [FAILED] {e}")
+            print(f"  Try capturing more varied tilts/distances and retry.")
+            return
+
+        print(f"  RMS: {rms:.4f}")
+        if rms > self.config.INTRINSICS_MAX_RMS:
+            print(f"  [REJECTED] RMS {rms:.3f} > {self.config.INTRINSICS_MAX_RMS:.2f}. "
+                  f"Re-capture with slower, steadier board positions.")
+            return
+
+        out_path = {
+            'A': self.config.INTRINSICS_FILE_A,
+            'B': self.config.INTRINSICS_FILE_B,
+            'C': self.config.INTRINSICS_FILE_C,
+        }[label]
+        save_intrinsics(
+            out_path, K, D, rms, img_size,
+            coverage_map=self._intrinsics_coverage[label],
+            n_frames=n_frames,
+            camera_label=label,
+        )
+        print(f"  [OK] Saved {out_path.name}")
+
+        # Clear the buffer so the user can recapture this camera if they
+        # want, and auto-advance to the next camera so a single S press
+        # keeps the flow going.
+        self._intrinsics_corners[label] = []
+        self._intrinsics_ids[label] = []
+        self._intrinsics_coverage[label][:] = 0
+        self._intrinsics_last_cell[label] = None
+        self._intrinsics_prev_corners[label] = None
+
+        # Advance to the next camera that still needs capture.
+        self._intrinsics_cycle()
+
+    def _propagate_floor_offset(self, offset):
+        """Write the new floor offset into every pair calibration file.
+
+        The F/G keys used to only update `stereo_calibration.json` (the
+        "primary" file) and the in-memory self.calibration. Chain derivation
+        reads `stereo_calibration_ab.json`, so it saw stale floor=0 even
+        after a fresh F press — the user then had to manually patch the
+        AB JSON before re-running chain_calibration.py. Propagating to
+        every pair file closes that gap.
+        """
+        pair_files = [
+            self.config.CALIBRATION_FILE_AB,
+            self.config.CALIBRATION_FILE_AC,
+            self.config.CALIBRATION_FILE_BC,
+        ]
+        touched = []
+        import json
+        for p in pair_files:
+            if not p.exists():
+                continue
+            try:
+                with open(p, 'r') as f:
+                    data = json.load(f)
+                data['floor_z_offset'] = float(offset)
+                with open(p, 'w') as f:
+                    json.dump(data, f, indent=2)
+                touched.append(p.name)
+            except Exception as e:
+                print(f"  [WARN] Failed to propagate floor to {p.name}: {e}")
+        if touched:
+            print(f"  [OK] Floor offset {offset:.3f}m propagated to "
+                  f"{', '.join(touched)}")
+
+        # If a chain-derived AC now needs refreshing (its rectification
+        # matrices were computed with the old floor), re-derive so the
+        # updated floor flows through end-to-end. Best-effort — if it
+        # fails, the user can press X manually.
+        if (self.has_cam_c
+                and self.config.CALIBRATION_FILE_AB.exists()
+                and self.config.CALIBRATION_FILE_BC.exists()):
+            try:
+                from chain_calibration import derive_ac
+                print("  [CHAIN] Re-deriving AC to pick up the new floor...")
+                derive_ac(self.config.CALIBRATION_FILE_AB,
+                          self.config.CALIBRATION_FILE_BC,
+                          self.config.CALIBRATION_FILE_AC)
+            except Exception as e:
+                print(f"  [CHAIN] Re-derivation failed ({e}); "
+                      f"run X manually if AC is stale.")
+
     def _run_camera_diagnostics(self):
         """Run startup diagnostics on both cameras. Reports actual resolution and timing."""
         print("\n[CAMERA DIAGNOSTICS]")
@@ -646,14 +986,24 @@ class MelodicCapApp:
                     print(f"  !!! Recalibrate at current resolution, or fix camera settings.")
 
         print("\n[CONTROLS]")
-        print("  C = Collect calibration frames (hold board steady)")
-        print("  S = Run stereo calibration (after collecting frames)")
+        print("  I = Per-camera intrinsics capture (cycles A/B" +
+              ("/C" if self.has_cam_c else "") +
+              "); grid coverage UI")
+        print("  C = Collect paired calibration frames (hold board steady)")
+        print("  S = In I mode: solve + save intrinsics for the active camera")
+        print("      Otherwise: run stereo calibration on collected pair frames")
         print("  F = Calibrate floor with ChArUco board")
         print("  G = Auto floor calibration from ankles (stand still, feet flat)")
         if self.has_cam_c:
             print("  X = Derive AC from AB + BC (chain calibration, when A/C too far apart)")
         print("  R = Start/Stop recording")
         print("  Q = Quit")
+        print()
+        print("  Recommended flow (first run after any hardware change):")
+        print("    1) I → fill Camera A's 3x3 grid → S → advance → same for B (and C)")
+        print("    2) C → hold board in positions both cameras see → S → solve extrinsics")
+        print("    3) F or G → calibrate floor")
+        print("    4) R → record")
         print()
 
         frame_count = 0
@@ -699,7 +1049,9 @@ class MelodicCapApp:
             det_b = None
             det_c = None
             t_infer = 0
-            if not self.collecting_cal_frames and not self.floor_cal_active:
+            in_intrinsics = self._intrinsics_mode is not None
+            if (not self.collecting_cal_frames and not self.floor_cal_active
+                    and not in_intrinsics):
                 t0 = time.time()
                 min_conf = self.config.MIN_KEYPOINT_CONFIDENCE
                 # Run A+B in parallel (2 threads), then C sequentially.
@@ -726,6 +1078,24 @@ class MelodicCapApp:
                 draw_detections(display_b, det_b, self.config.MIN_KEYPOINT_CONFIDENCE)
             if det_c is not None and display_c is not None:
                 draw_detections(display_c, det_c, self.config.MIN_KEYPOINT_CONFIDENCE)
+
+            # Intrinsics mode: overlay grid on the active camera's display.
+            # The capture-grid overlay is drawn *on top* of the raw frame,
+            # not on the already-decorated display, so pose detection icons
+            # (there won't be any, because inference is gated off in this
+            # mode) never interfere with corner detection.
+            if in_intrinsics:
+                active_frame = {'A': frame_a, 'B': frame_b,
+                                'C': frame_c if (self.has_cam_c and ret_c) else None
+                                }[self._intrinsics_mode]
+                if active_frame is not None:
+                    active_display = self._intrinsics_maybe_capture(active_frame)
+                    if self._intrinsics_mode == 'A':
+                        display_a = active_display
+                    elif self._intrinsics_mode == 'B':
+                        display_b = active_display
+                    elif self._intrinsics_mode == 'C':
+                        display_c = active_display
 
             # Handle countdown → start recording transition
             if self._countdown_active:
@@ -760,6 +1130,7 @@ class MelodicCapApp:
                         self.calibration.floor_z_offset = median_offset
                         self.calibration.save(self.config.CALIBRATION_FILE)
                         print(f"  [OK] Floor set from ankles (offset: {median_offset:.3f}m, {len(ankle_samples)} samples)")
+                        self._propagate_floor_offset(median_offset)
                     else:
                         print("  [FAILED] Ankles not detected. Make sure both cameras can see your feet.")
 
@@ -776,6 +1147,7 @@ class MelodicCapApp:
                     if success:
                         self.calibration.save(self.config.CALIBRATION_FILE)
                         print(f"  [OK] {msg}")
+                        self._propagate_floor_offset(self.calibration.floor_z_offset)
                         self.floor_cal_active = False
                     else:
                         # Show status but keep trying
@@ -998,7 +1370,21 @@ class MelodicCapApp:
                 print("\n[QUIT]")
                 self.running = False
 
+            elif key == ord('i'):
+                # Intrinsics capture: cycle through Camera A, B, (C).
+                # Entering intrinsics mode stops paired-capture mode so the
+                # two states don't compete for the same key.
+                if self.collecting_cal_frames:
+                    self.collecting_cal_frames = False
+                    print("\n[CALIBRATION] Pair-capture stopped (switching to I mode).")
+                self._intrinsics_cycle()
+
             elif key == ord('c'):
+                # Entering pair-capture mode stops intrinsics mode for the
+                # same reason.
+                if self._intrinsics_mode is not None:
+                    self._intrinsics_mode = None
+                    print("\n[INTRINSICS] Capture OFF (switching to C mode).")
                 if not self.collecting_cal_frames:
                     print("\n[CALIBRATION] Starting frame collection...")
                     print("  Hold the board STILL at each position — captures when stationary.")
@@ -1019,14 +1405,64 @@ class MelodicCapApp:
                     self.collecting_cal_frames = False
 
             elif key == ord('s'):
+                # Polymorphic S: in intrinsics mode it saves the current
+                # camera's K/D; otherwise it runs stereo calibration on
+                # whatever pair frames were collected via C.
+                if self._intrinsics_mode is not None:
+                    self._intrinsics_solve_and_save()
+                    continue
+
                 n_ab = len(self.cal_frames_ab[0])
                 n_ac = len(self.cal_frames_ac[0])
                 n_bc = len(self.cal_frames_bc[0])
 
-                if n_ab < 10:
-                    print(f"\n[ERROR] Need at least 10 AB frames (have {n_ab})")
+                if n_ab < 8:
+                    print(f"\n[ERROR] Need at least 8 AB frames (have {n_ab})")
                 else:
                     self.collecting_cal_frames = False
+
+                    # Try to load saved per-camera intrinsics. When both
+                    # cameras of a pair have saved intrinsics, stereo
+                    # calibration skips the monocular pass and only solves
+                    # R/T — much faster and far more accurate because each
+                    # camera's K was measured against a full 3x3 grid
+                    # coverage instead of whatever positions happened to be
+                    # shared during pair capture.
+                    intr_a = load_intrinsics(self.config.INTRINSICS_FILE_A)
+                    intr_b = load_intrinsics(self.config.INTRINSICS_FILE_B)
+                    intr_c = (load_intrinsics(self.config.INTRINSICS_FILE_C)
+                              if self.has_cam_c else None)
+                    if intr_a is not None:
+                        print(f"[S] Found saved intrinsics for Camera A "
+                              f"(rms {intr_a['rms']:.3f}, "
+                              f"{intr_a['n_frames']} frames)")
+                    else:
+                        print(f"[WARN] No saved intrinsics for Camera A; "
+                              f"using legacy joint estimation")
+                    if intr_b is not None:
+                        print(f"[S] Found saved intrinsics for Camera B "
+                              f"(rms {intr_b['rms']:.3f}, "
+                              f"{intr_b['n_frames']} frames)")
+                    else:
+                        print(f"[WARN] No saved intrinsics for Camera B; "
+                              f"using legacy joint estimation")
+                    if self.has_cam_c:
+                        if intr_c is not None:
+                            print(f"[S] Found saved intrinsics for Camera C "
+                                  f"(rms {intr_c['rms']:.3f}, "
+                                  f"{intr_c['n_frames']} frames)")
+                        else:
+                            print(f"[WARN] No saved intrinsics for Camera C; "
+                                  f"using legacy joint estimation")
+
+                    def _kd(intr):
+                        if intr is None:
+                            return (None, None)
+                        return (intr['K'], intr['D'])
+
+                    K_a, D_a = _kd(intr_a)
+                    K_b, D_b = _kd(intr_b)
+                    K_c, D_c = _kd(intr_c)
 
                     ab_ok = False
                     ac_ok = False
@@ -1035,33 +1471,39 @@ class MelodicCapApp:
                     # Calibrate AB pair (primary — required)
                     print(f"\n[CALIBRATION] AB pair: {n_ab} frames...")
                     if self.calibration.calibrate_stereo(
-                            self.cal_frames_ab[0], self.cal_frames_ab[1]):
+                            self.cal_frames_ab[0], self.cal_frames_ab[1],
+                            K1_fixed=K_a, D1_fixed=D_a,
+                            K2_fixed=K_b, D2_fixed=D_b):
                         self.calibration.save(self.config.CALIBRATION_FILE)
                         self.calibration.save(self.config.CALIBRATION_FILE_AB)
                         print(f"  [OK] AB calibration saved")
                         ab_ok = True
 
                     # Calibrate AC pair (optional)
-                    if n_ac >= 10:
+                    if n_ac >= 8:
                         print(f"\n[CALIBRATION] AC pair: {n_ac} frames...")
                         if self.calibration_ac.calibrate_stereo(
-                                self.cal_frames_ac[0], self.cal_frames_ac[1]):
+                                self.cal_frames_ac[0], self.cal_frames_ac[1],
+                                K1_fixed=K_a, D1_fixed=D_a,
+                                K2_fixed=K_c, D2_fixed=D_c):
                             self.calibration_ac.save(self.config.CALIBRATION_FILE_AC)
                             print(f"  [OK] AC calibration saved")
                             ac_ok = True
                     elif self.has_cam_c:
-                        print(f"  [SKIP] AC pair: only {n_ac} frames (need 10)")
+                        print(f"  [SKIP] AC pair: only {n_ac} frames (need 8)")
 
                     # Calibrate BC pair (optional)
-                    if n_bc >= 10:
+                    if n_bc >= 8:
                         print(f"\n[CALIBRATION] BC pair: {n_bc} frames...")
                         if self.calibration_bc.calibrate_stereo(
-                                self.cal_frames_bc[0], self.cal_frames_bc[1]):
+                                self.cal_frames_bc[0], self.cal_frames_bc[1],
+                                K1_fixed=K_b, D1_fixed=D_b,
+                                K2_fixed=K_c, D2_fixed=D_c):
                             self.calibration_bc.save(self.config.CALIBRATION_FILE_BC)
                             print(f"  [OK] BC calibration saved")
                             bc_ok = True
                     elif self.has_cam_c:
-                        print(f"  [SKIP] BC pair: only {n_bc} frames (need 10)")
+                        print(f"  [SKIP] BC pair: only {n_bc} frames (need 8)")
 
                     # Auto-chain: if AB + BC both calibrated but AC didn't,
                     # derive AC from the chain. Saves the user a round-trip to
