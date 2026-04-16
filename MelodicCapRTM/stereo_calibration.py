@@ -217,8 +217,12 @@ class StereoCalibration:
             self.T = np.array(data['T']) if data.get('T') is not None else np.zeros((3, 1))
             self.R1 = np.array(data.get('R1', np.eye(3).tolist()))
             self.R2 = np.array(data.get('R2', np.eye(3).tolist()))
-            self.P1 = np.array(data['P1'])
-            self.P2 = np.array(data['P2'])
+            # P1/P2 may be absent in very old calibration files. Use a zero
+            # 3x4 identity-ish fallback that will produce wrong results but
+            # at least won't crash — the user will recalibrate anyway.
+            _P_default = np.hstack([np.eye(3), np.zeros((3, 1))]).tolist()
+            self.P1 = np.array(data.get('P1', _P_default))
+            self.P2 = np.array(data.get('P2', _P_default))
             self.floor_z_offset = data.get('floor_z_offset', 0.0)
 
             # Restore quality metrics. save() writes these but load() used to
@@ -790,6 +794,7 @@ class StereoCalibration:
                 # Use previous frame's value if available
                 if idx in self._prev_points:
                     pt_3d = self._prev_points[idx]
+                    pt = np.array(pt_3d)  # update pt so velocity check below uses the fallback
                 else:
                     continue  # Skip entirely if no history
 
@@ -1051,7 +1056,7 @@ class StereoCalibration:
             board_origin_stereo = board_origin_cam
         else:
             # This is camera B — transform to camera A's frame
-            # P_A = R * P_B + T  (stereo relationship)
+            # OpenCV stereo: P_B = R @ P_A + T → so P_A = R^T @ (P_B - T)
             if self.R is not None and self.T is not None:
                 board_origin_stereo = (self.R.T @ (board_origin_cam.reshape(3, 1) - self.T)).flatten()
             else:
