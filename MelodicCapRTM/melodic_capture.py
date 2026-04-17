@@ -728,7 +728,7 @@ class MelodicCapApp:
             if still and cooldown_ok and (new_cell or cell_wants_more):
                 # Only store frames with at least 6 corners — same bar used
                 # in calibrate_stereo's pair capture.
-                if len(corners) >= 6:
+                if len(corners) >= 8:
                     self._intrinsics_corners[label].append(corners.copy())
                     self._intrinsics_ids[label].append(ids.copy())
                     cov[cell[0], cell[1]] += 1
@@ -766,11 +766,40 @@ class MelodicCapApp:
             return
 
         img_size = (self.config.FRAME_WIDTH, self.config.FRAME_HEIGHT)
-        print(f"\n[INTRINSICS] Solving Camera {label} from {n_frames} frames...")
+
+        # Filter out frames where the detected corners are nearly collinear
+        # on the board grid.  OpenCV's initIntrinsicParams2D needs a valid
+        # homography from each frame, and that requires corners spanning at
+        # least 2 board rows AND 2 board columns.
+        cols_per_row = self.config.CHARUCO_SQUARES_X - 1  # inner corners per row
+        good_corners = []
+        good_ids = []
+        for corners_i, ids_i in zip(self._intrinsics_corners[label],
+                                    self._intrinsics_ids[label]):
+            flat_ids = ids_i.ravel()
+            rows_seen = set(int(cid) // cols_per_row for cid in flat_ids)
+            cols_seen = set(int(cid) % cols_per_row for cid in flat_ids)
+            if len(rows_seen) >= 2 and len(cols_seen) >= 2:
+                good_corners.append(corners_i)
+                good_ids.append(ids_i)
+
+        n_dropped = n_frames - len(good_corners)
+        if n_dropped:
+            print(f"\n[INTRINSICS] Dropped {n_dropped}/{n_frames} frames "
+                  f"with nearly-collinear corners.")
+        if len(good_corners) < self.config.INTRINSICS_MIN_FRAMES:
+            print(f"\n[INTRINSICS] Camera {label}: only {len(good_corners)} "
+                  f"usable frames after filtering (need "
+                  f"{self.config.INTRINSICS_MIN_FRAMES}+). "
+                  f"Capture more frames with the full board visible.")
+            return
+
+        print(f"\n[INTRINSICS] Solving Camera {label} from "
+              f"{len(good_corners)} frames ({n_dropped} dropped)...")
         try:
             rms, K, D, _, _ = cv2.aruco.calibrateCameraCharuco(
-                self._intrinsics_corners[label],
-                self._intrinsics_ids[label],
+                good_corners,
+                good_ids,
                 self.calibration.charuco_board,
                 img_size, None, None,
             )
