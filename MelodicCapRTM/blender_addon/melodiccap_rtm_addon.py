@@ -1234,6 +1234,12 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                abs(frame_idx - sit_transition_frame) <= 12)
             do_log = (frame_idx % log_every == 0) or near_transition
 
+            # v5.3: Smooth sit_blend ramp instead of binary is_sitting.
+            # All seated damping uses sit_blend (0→1 over SIT_BLEND_FRAMES)
+            # so behaviors crossfade instead of snapping on/off.
+            SIT_BLEND_FRAMES = 8
+            prev_blend = mocap_props.get('_sit_blend', 0.0)
+
             # v4.6: Hip path velocity (XY displacement per frame)
             hip_xy_velocity = 0.0
             hip_xy_disp = None
@@ -1295,6 +1301,17 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     DiagLog.info(f"  SIT DETECT: {'SITTING' if is_sitting else 'STANDING'} (hip_dz={hip_dz:+.3f}m) at frame_idx={frame_idx}")
                     mocap_props['_prev_sitting'] = is_sitting
 
+            # v5.3: Ramp sit_blend toward target (1.0 sitting, 0.0 standing)
+            target_blend = 1.0 if is_sitting else 0.0
+            step = 1.0 / max(SIT_BLEND_FRAMES, 1)
+            if prev_blend < target_blend:
+                sit_blend = min(target_blend, prev_blend + step)
+            elif prev_blend > target_blend:
+                sit_blend = max(target_blend, prev_blend - step)
+            else:
+                sit_blend = target_blend
+            mocap_props['_sit_blend'] = sit_blend
+
             # =====================
             # ROOT / TORSO POSITION (scaled)
             # =====================
@@ -1312,11 +1329,12 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     # 90° stereo setup exaggerates X drift during sit-down
                     # (20cm lateral shift is triangulation noise, not real movement).
                     SEATED_HIP_LATERAL_DAMP = 0.3
-                    if is_sitting:
-                        dx *= SEATED_HIP_LATERAL_DAMP
+                    if sit_blend > 0:
+                        effective_damp = 1.0 - sit_blend * (1.0 - SEATED_HIP_LATERAL_DAMP)
+                        dx *= effective_damp
                     scaled_hip.x = mocap_hip_frame0.x * global_scale + dx * global_scale
                     scaled_hip.y = mocap_hip_frame0.y * global_scale + dy * global_scale
-                    if do_log and is_sitting:
+                    if do_log and sit_blend > 0:
                         raw_dx = hip_center.x - mocap_hip_frame0.x
                         DiagLog.data("  hip_xdamp", f"raw_dx={raw_dx:+.3f} damped_dx={dx:+.3f} damp={SEATED_HIP_LATERAL_DAMP:.2f}")
 
@@ -1376,8 +1394,9 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     # v5.2: Clamp torso pitch when seated to prevent extreme lean
                     SEATED_PITCH_MAX = math.radians(35)   # max forward lean
                     SEATED_PITCH_MIN = math.radians(-20)  # max backward lean
-                    if is_sitting:
-                        pitch_angle = max(SEATED_PITCH_MIN, min(SEATED_PITCH_MAX, pitch_angle))
+                    if sit_blend > 0:
+                        clamped = max(SEATED_PITCH_MIN, min(SEATED_PITCH_MAX, pitch_angle))
+                        pitch_angle = pitch_angle + sit_blend * (clamped - pitch_angle)
 
                     # Combine yaw + pitch as quaternion
                     # Order: yaw (Z) then pitch (X) — yaw first so pitch
@@ -1457,10 +1476,11 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         # 'auto' parent mode: now works correctly because
                         # depsgraph was flushed above with current torso+spine
                         neck_rot = compute_fk_rotation(neck_bone, neck_dir, 'auto')
-                        # v5.2: Cap neck rotation to human range (50°)
-                        NECK_ROT_MAX = math.radians(50)
-                        if neck_rot.angle > NECK_ROT_MAX:
-                            neck_rot = Quaternion(neck_rot.axis, NECK_ROT_MAX)
+                        NECK_ROT_MAX_STAND = math.radians(50)
+                        NECK_ROT_MAX_SIT = math.radians(25)
+                        neck_cap = NECK_ROT_MAX_STAND - sit_blend * (NECK_ROT_MAX_STAND - NECK_ROT_MAX_SIT)
+                        if neck_rot.angle > neck_cap:
+                            neck_rot = Quaternion(neck_rot.axis, neck_cap)
                         if head_confidence < 1.0:
                             neck_rot = Quaternion().slerp(neck_rot, head_confidence)
                         neck_bone.rotation_quaternion = neck_rot
@@ -1539,13 +1559,14 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         if p_sh_raw is not None and p_wr_raw is not None and rig_arm_len > 0:
                             raw_dist = (p_wr_raw - p_sh_raw).length
                             arm_ratio = raw_dist / rig_arm_len
-                            if arm_ratio < 0.7:
-                                # Base confidence: 0.7 → 1.0, 0.55 → 0.0
-                                arm_fk_conf = max(0.0, (arm_ratio - 0.55) / 0.15)
+                            if arm_ratio < 0.8:
+                                arm_fk_conf = max(0.0, (arm_ratio - 0.55) / 0.25)
 
                             # v4.7: Direction stability boost.
                             # If shoulder→elbow direction is stable, the FK data
                             # is trustworthy even at short reach (e.g. armrests).
+                            # v5.3: Scale boost by ratio so it can't rescue garbage
+                            # data (ratio 0.5-0.6 = wrist at elbow distance).
                             if p_el_raw is not None:
                                 cur_dir = (p_el_raw - p_sh_raw)
                                 if cur_dir.length > 0.01:
@@ -1553,9 +1574,9 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                     if prev_arm_dir[side] is not None:
                                         dot = cur_dir.dot(prev_arm_dir[side])
                                         if dot > ARM_STABILITY_DOT_THRESHOLD:
-                                            # Stable: boost confidence proportionally
                                             stab_t = (dot - ARM_STABILITY_DOT_THRESHOLD) / (1.0 - ARM_STABILITY_DOT_THRESHOLD)
-                                            stability_boost = stab_t * ARM_STABILITY_BOOST
+                                            ratio_scale = max(0.0, min(1.0, (arm_ratio - 0.55) / 0.25))
+                                            stability_boost = stab_t * ARM_STABILITY_BOOST * ratio_scale
                                             arm_fk_conf = min(1.0, arm_fk_conf + stability_boost)
                                     prev_arm_dir[side] = cur_dir.copy()
 
@@ -1591,10 +1612,8 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 # in Y component when sitting (arms should hang down, not
                                 # project forward/backward from triangulation error)
                                 raw_ua_y = target_dir.y
-                                if is_sitting:
-                                    # v5.1: Stronger damping during sit transitions — raw_y peaks
-                                    # at 0.90 during transition (vs ~0.58 steady sitting)
-                                    damp = SEATED_ARM_DEPTH_DAMP * 0.5 if near_transition else SEATED_ARM_DEPTH_DAMP
+                                if sit_blend > 0:
+                                    damp = 1.0 - sit_blend * (1.0 - SEATED_ARM_DEPTH_DAMP)
                                     target_dir.y *= damp
                                     target_dir = target_dir.normalized()
                                     # v5.1: Log upper arm depth damping
@@ -1639,7 +1658,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 if do_log:
                                     hold_str = " HOLD" if arm_fk_conf < ARM_HOLD_CONF_THRESHOLD and last_good_arm_rot[ua_name] is not None else ""
                                     clamp_str = " CLAMPED" if splay_clamped else ""
-                                    ydamp_str = f" raw_y={raw_ua_y:.3f} YDAMP" if is_sitting else ""
+                                    ydamp_str = f" raw_y={raw_ua_y:.3f} YDAMP" if sit_blend > 0 else ""
                                     DiagLog.data(f"  arm_fk.{ua_name}",
                                         f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f}){clamp_str}{ydamp_str}{hold_str}")
 
@@ -1663,21 +1682,20 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 # (Y=0 amplifies X noise via normalization), blend toward
                                 # a neutral rest direction based on data quality (arm_ratio).
                                 raw_fa_y = target_dir.y
-                                if is_sitting:
-                                    # v5.1b: Context-aware forearm rest direction.
-                                    # Inherits upper arm's lateral lean so forearms
-                                    # follow the armrest shape instead of hanging straight down.
+                                if sit_blend > 0:
                                     FOREARM_INHERIT_LATERAL = 0.5
                                     fa_rest_x = ua_damped_dir.x * FOREARM_INHERIT_LATERAL if ua_damped_dir else 0.0
                                     FOREARM_REST_DIR = Vector((fa_rest_x, 0, -1)).normalized()
                                     FA_RATIO_GOOD = 0.70
                                     FA_RATIO_BAD = 0.55
                                     if arm_ratio < FA_RATIO_BAD:
-                                        target_dir = FOREARM_REST_DIR.copy()
+                                        seated_dir = FOREARM_REST_DIR.copy()
                                     elif arm_ratio < FA_RATIO_GOOD:
                                         blend = (arm_ratio - FA_RATIO_BAD) / (FA_RATIO_GOOD - FA_RATIO_BAD)
-                                        target_dir = FOREARM_REST_DIR.lerp(target_dir, blend).normalized()
-                                    # else: ratio >= 0.70, trust computed FK direction
+                                        seated_dir = FOREARM_REST_DIR.lerp(target_dir, blend).normalized()
+                                    else:
+                                        seated_dir = target_dir.copy()
+                                    target_dir = target_dir.lerp(seated_dir, sit_blend).normalized()
                                     if do_log:
                                         DiagLog.data(f"    {fa_name} forearm", f"ratio={arm_ratio:.3f} raw_y={raw_fa_y:.3f} rest=({FOREARM_REST_DIR.x:.2f},{FOREARM_REST_DIR.y:.2f},{FOREARM_REST_DIR.z:.2f}) dir=({target_dir.x:.2f},{target_dir.y:.2f},{target_dir.z:.2f})")
 
@@ -1700,7 +1718,7 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
                                 if do_log:
                                     hold_str = " HOLD" if arm_fk_conf < ARM_HOLD_CONF_THRESHOLD and last_good_arm_rot[fa_name] is not None else ""
-                                    ydamp_fa_str = f" raw_y={raw_fa_y:.3f} YDAMP" if is_sitting else ""
+                                    ydamp_fa_str = f" raw_y={raw_fa_y:.3f} YDAMP" if sit_blend > 0 else ""
                                     DiagLog.data(f"  arm_fk.{fa_name}",
                                         f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f}){ydamp_fa_str}{hold_str}")
 
@@ -1729,7 +1747,9 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 # v4.8: Seated lateral damping — reduce camera
                                 # placement bias in X component of leg FK
                                 raw_x = target_dir.x
-                                target_dir.x *= SEATED_LEG_LATERAL_DAMP
+                                if sit_blend > 0:
+                                    eff_leg_damp = 1.0 - sit_blend * (1.0 - SEATED_LEG_LATERAL_DAMP)
+                                    target_dir.x *= eff_leg_damp
                                 target_dir = target_dir.normalized()
 
                                 parent_ovr = prev_expected if prev_expected is not None else 'auto'
@@ -1917,8 +1937,8 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 DiagLog.data(f"  arm.{side_label}_elbow",
                                     f"({p_el.x:.3f},{p_el.y:.3f},{p_el.z:.3f})")
                             # Warn on bad ratios
-                            if arm_len > 0 and ratio < 0.7:
-                                DiagLog.info(f"  !! ARM {side_label} RATIO {ratio:.3f} < 0.7 — "
+                            if arm_len > 0 and ratio < 0.8:
+                                DiagLog.info(f"  !! ARM {side_label} RATIO {ratio:.3f} < 0.8 — "
                                     f"wrist target too close to shoulder. "
                                     f"Capture or retargeting error!")
 
