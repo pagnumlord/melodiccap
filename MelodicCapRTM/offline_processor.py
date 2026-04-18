@@ -38,6 +38,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from stereo_calibration import StereoCalibration
+from skeleton_solver import SkeletonSolver
 
 
 class OfflineConfig:
@@ -184,7 +185,8 @@ def process_take(raw_path, calibration_path, smooth=True,
                  min_conf=0.3, skip_face_hands=True,
                  kalman_process=1e-4, kalman_measure=1e-2,
                  pair_rms_max=PAIR_RMS_MAX_DEFAULT,
-                 min_baseline=MIN_BASELINE_DEFAULT, force_pair=None):
+                 min_baseline=MIN_BASELINE_DEFAULT, force_pair=None,
+                 use_skeleton_solver=True):
     """
     Process a single raw detection file into triangulated 3D output.
 
@@ -204,6 +206,7 @@ def process_take(raw_path, calibration_path, smooth=True,
         pair_rms_max: max stereo RMS for calibration pairs (default 1.0)
         min_baseline: min stereo baseline in meters (default 0.8)
         force_pair: force a specific calibration pair label (e.g. 'AB')
+        use_skeleton_solver: apply skeleton solver post-processing (default True)
 
     Returns:
         output filepath, or None on failure
@@ -295,7 +298,8 @@ def process_take(raw_path, calibration_path, smooth=True,
         primary_cal.reset_filters()
         return _process_single_pair(raw_path, raw_data, frames, primary_cal,
                                     smooth, min_conf, skip_face_hands,
-                                    kalman_process, kalman_measure)
+                                    kalman_process, kalman_measure,
+                                    use_skeleton_solver=use_skeleton_solver)
 
     # Multi-pair mode: per-frame pair selection.
     # For each frame, score all pairs by mean reprojection error, then route
@@ -357,7 +361,8 @@ def process_take(raw_path, calibration_path, smooth=True,
             det1 = dets.get(best_pair_keys[0], {})
             det2 = dets.get(best_pair_keys[1], {})
             points_3d = best_pair_cal.triangulate_pose(
-                det1, det2, smooth=smooth)
+                det1, det2, smooth=smooth,
+                enforce_bones=not use_skeleton_solver)
             pair_win_counts[best_pair_label] += 1
 
         out_frame = {"timestamp": frame["timestamp"]}
@@ -385,16 +390,25 @@ def process_take(raw_path, calibration_path, smooth=True,
             pct = count / total_selections * 100
             print(f"    {label}: {count} frames ({pct:.0f}%)")
 
+    # Skeleton solver: enforce fixed bone lengths + joint angle limits
+    solver_meta = None
+    if use_skeleton_solver:
+        solver = SkeletonSolver(n_cal_frames=30)
+        output_frames = solver.solve_sequence(output_frames)
+        solver_meta = solver.get_metadata()
+
     # Build output
     return _write_output(raw_path, raw_data, output_frames, frames,
                          triangulated_count, smooth, min_conf,
                          skip_face_hands, kalman_process, kalman_measure,
-                         multi_pair=True, pair_labels=pair_labels)
+                         multi_pair=True, pair_labels=pair_labels,
+                         solver_meta=solver_meta)
 
 
 def _process_single_pair(raw_path, raw_data, frames, calibration,
                          smooth, min_conf, skip_face_hands,
-                         kalman_process, kalman_measure):
+                         kalman_process, kalman_measure,
+                         use_skeleton_solver=True):
     """Original single-pair processing pipeline."""
     output_frames = []
     triangulated_count = 0
@@ -403,7 +417,9 @@ def _process_single_pair(raw_path, raw_data, frames, calibration,
         det_a = {int(k): tuple(v) for k, v in frame['raw_2d_a'].items()}
         det_b = {int(k): tuple(v) for k, v in frame['raw_2d_b'].items()}
 
-        points_3d = calibration.triangulate_pose(det_a, det_b, smooth=smooth)
+        points_3d = calibration.triangulate_pose(
+            det_a, det_b, smooth=smooth,
+            enforce_bones=not use_skeleton_solver)
 
         out_frame = {"timestamp": frame["timestamp"]}
 
@@ -421,18 +437,38 @@ def _process_single_pair(raw_path, raw_data, frames, calibration,
         if (i + 1) % 100 == 0:
             print(f"  {i + 1}/{len(frames)} frames...")
 
+    # Skeleton solver: enforce fixed bone lengths + joint angle limits
+    solver_meta = None
+    if use_skeleton_solver:
+        solver = SkeletonSolver(n_cal_frames=30)
+        output_frames = solver.solve_sequence(output_frames)
+        solver_meta = solver.get_metadata()
+
     return _write_output(raw_path, raw_data, output_frames, frames,
                          triangulated_count, smooth, min_conf,
-                         skip_face_hands, kalman_process, kalman_measure)
+                         skip_face_hands, kalman_process, kalman_measure,
+                         solver_meta=solver_meta)
 
 
 def _write_output(raw_path, raw_data, output_frames, frames,
                   triangulated_count, smooth, min_conf,
                   skip_face_hands, kalman_process, kalman_measure,
-                  multi_pair=False, pair_labels=None):
+                  multi_pair=False, pair_labels=None, solver_meta=None):
     """Write output JSON file."""
     duration = raw_data.get('duration', 0)
     fps = len(output_frames) / duration if duration > 0 else 0
+
+    processing_settings = {
+        "smooth": smooth,
+        "min_confidence": min_conf,
+        "skip_face_hands": skip_face_hands,
+        "kalman_process_noise": kalman_process,
+        "kalman_measurement_noise": kalman_measure,
+        "multi_pair": multi_pair,
+        "calibration_pairs": pair_labels or [],
+    }
+    if solver_meta:
+        processing_settings["skeleton_solver"] = solver_meta
 
     output_data = {
         "format": "melodiccap_rtm_v1",
@@ -444,15 +480,7 @@ def _write_output(raw_path, raw_data, output_frames, frames,
         "frame_count": len(output_frames),
         "created": raw_data.get("created", ""),
         "processed_from": raw_path.name,
-        "processing_settings": {
-            "smooth": smooth,
-            "min_confidence": min_conf,
-            "skip_face_hands": skip_face_hands,
-            "kalman_process_noise": kalman_process,
-            "kalman_measurement_noise": kalman_measure,
-            "multi_pair": multi_pair,
-            "calibration_pairs": pair_labels or [],
-        },
+        "processing_settings": processing_settings,
         "frames": output_frames
     }
 
@@ -493,6 +521,8 @@ def main():
                         help='Max stereo RMS for calibration pairs (default: 1.0)')
     parser.add_argument('--min-baseline', type=float, default=0.8,
                         help='Min stereo baseline in meters (default: 0.8)')
+    parser.add_argument('--no-skeleton', action='store_true',
+                        help='Disable skeleton solver (bone length + angle limit enforcement)')
 
     args = parser.parse_args()
 
@@ -516,6 +546,7 @@ def main():
             pair_rms_max=args.pair_rms_max,
             min_baseline=args.min_baseline,
             force_pair=args.pair,
+            use_skeleton_solver=not args.no_skeleton,
         )
         if result:
             processed += 1

@@ -723,7 +723,8 @@ class StereoCalibration:
 
         return float(np.mean(err_a)), float(np.mean(err_b)), float(max(np.max(err_a), np.max(err_b)))
 
-    def triangulate_pose(self, detections_a, detections_b, smooth=True):
+    def triangulate_pose(self, detections_a, detections_b, smooth=True,
+                         enforce_bones=True):
         """
         Triangulate 3D pose from two sets of 2D detections.
 
@@ -731,6 +732,8 @@ class StereoCalibration:
             detections_a: dict of {keypoint_idx: (pixel_x, pixel_y, confidence)}
             detections_b: dict of {keypoint_idx: (pixel_x, pixel_y, confidence)}
             smooth: whether to apply Kalman filtering
+            enforce_bones: whether to apply bone length clamping (disable when
+                          skeleton_solver handles it downstream)
 
         Returns:
             dict of {keypoint_idx: [x, y, z]} in Blender space
@@ -832,7 +835,10 @@ class StereoCalibration:
         # ── Bone-Length Constraint ─────────────────────────────────
         # Like FreeMoCap/Pose2Sim: learn body proportions from first
         # N frames, then enforce them to prevent stretching.
-        if self._bone_cal_frames < self._bone_cal_target:
+        # Skipped when enforce_bones=False (skeleton_solver handles it).
+        if not enforce_bones:
+            pass
+        elif self._bone_cal_frames < self._bone_cal_target:
             # Learning phase: collect bone length samples
             for parent, child, _, _ in BONE_PAIRS_FOR_SCALE:
                 if parent in points_3d and child in points_3d:
