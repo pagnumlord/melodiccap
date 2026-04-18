@@ -33,7 +33,7 @@ BONE_DEFS = [
     (LM.RIGHT_KNEE, LM.RIGHT_ANKLE, 'shin_r'),
 ]
 
-VIRTUAL_BONE_NAMES = ['spine', 'neck', 'shoulder_width', 'hip_width']
+VIRTUAL_BONE_NAMES = ['spine', 'hip_width']
 
 ARM_CHAINS = [
     ('left_arm', LM.LEFT_SHOULDER, [
@@ -71,7 +71,7 @@ JOINT_ANGLE_DEFS = [
     (LM.RIGHT_HIP, LM.RIGHT_KNEE, LM.RIGHT_ANKLE, 'knee_r'),
 ]
 
-DIRECTION_SMOOTH_ALPHA = 0.3
+DIRECTION_SMOOTH_ALPHA = 0.5
 LOG_INTERVAL = 50
 
 
@@ -152,7 +152,6 @@ class SkeletonSolver:
         required = [
             LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER,
             LM.LEFT_HIP, LM.RIGHT_HIP,
-            LM.NOSE,
         ]
         return all(self._get_point(landmarks, idx) is not None for idx in required)
 
@@ -179,7 +178,6 @@ class SkeletonSolver:
             rs = self._get_point(lm, LM.RIGHT_SHOULDER)
             lh = self._get_point(lm, LM.LEFT_HIP)
             rh = self._get_point(lm, LM.RIGHT_HIP)
-            nose = self._get_point(lm, LM.NOSE)
 
             if ls is not None and rs is not None and lh is not None and rh is not None:
                 hip_mid = (lh + rh) / 2
@@ -188,18 +186,9 @@ class SkeletonSolver:
                 if 0.1 < spine_len < 1.0:
                     samples['spine'].append(spine_len)
 
-                sw = np.linalg.norm(ls - rs)
-                if 0.1 < sw < 0.8:
-                    samples['shoulder_width'].append(sw)
-
                 hw = np.linalg.norm(lh - rh)
                 if 0.05 < hw < 0.6:
                     samples['hip_width'].append(hw)
-
-                if nose is not None:
-                    neck_len = np.linalg.norm(nose - shoulder_mid)
-                    if 0.05 < neck_len < 0.6:
-                        samples['neck'].append(neck_len)
 
             good_frames += 1
             if good_frames >= self.n_cal_frames:
@@ -248,7 +237,6 @@ class SkeletonSolver:
         rh = pts.get(LM.RIGHT_HIP)
         ls = pts.get(LM.LEFT_SHOULDER)
         rs = pts.get(LM.RIGHT_SHOULDER)
-        nose = pts.get(LM.NOSE)
 
         if lh is None or rh is None or ls is None or rs is None:
             self._stats['frames_skipped'] += 1
@@ -257,42 +245,44 @@ class SkeletonSolver:
         hip_mid = (lh + rh) / 2.0
         shoulder_mid_raw = (ls + rs) / 2.0
 
-        # Step 2: spine
+        # Step 2: spine (soft constraint — only correct if >30% deviation)
         if 'spine' in self.bone_lengths:
-            spine_dir = _safe_normalize(shoulder_mid_raw - hip_mid)
-            shoulder_mid = hip_mid + spine_dir * self.bone_lengths['spine']
             raw_spine = np.linalg.norm(shoulder_mid_raw - hip_mid)
-            delta = abs(raw_spine - self.bone_lengths['spine'])
-            frame_deltas.append(('spine', raw_spine, self.bone_lengths['spine'], delta))
+            spine_cal = self.bone_lengths['spine']
+            spine_ratio = raw_spine / spine_cal if spine_cal > 1e-6 else 1.0
+            if abs(spine_ratio - 1.0) > 0.30:
+                sign = 1.0 if spine_ratio > 1.0 else -1.0
+                target = spine_cal * (1.0 + 0.30 * sign)
+                spine_dir = _safe_normalize(shoulder_mid_raw - hip_mid)
+                shoulder_mid = hip_mid + spine_dir * target
+                delta = abs(raw_spine - target)
+                frame_deltas.append(('spine', raw_spine, target, delta))
+                if do_log:
+                    print(f"[SOLVER] frame {frame_idx}: spine CORRECTED "
+                          f"raw={raw_spine:.3f}m → capped={target:.3f}m "
+                          f"(ratio={spine_ratio:.2f}, cal={spine_cal:.3f}m)")
+            else:
+                shoulder_mid = shoulder_mid_raw
         else:
             shoulder_mid = shoulder_mid_raw
 
-        # Step 3: shoulder width
-        if 'shoulder_width' in self.bone_lengths:
-            sw = self.bone_lengths['shoulder_width']
-            shoulder_axis = _safe_normalize(ls - rs)
-            corrected[LM.LEFT_SHOULDER] = shoulder_mid + shoulder_axis * (sw / 2)
-            corrected[LM.RIGHT_SHOULDER] = shoulder_mid - shoulder_axis * (sw / 2)
-        else:
-            half_offset_l = ls - shoulder_mid_raw
-            half_offset_r = rs - shoulder_mid_raw
-            corrected[LM.LEFT_SHOULDER] = shoulder_mid + half_offset_l
-            corrected[LM.RIGHT_SHOULDER] = shoulder_mid + half_offset_r
+        # Step 3: shoulders (raw offsets from corrected shoulder_mid, no width enforcement)
+        half_offset_l = ls - shoulder_mid_raw
+        half_offset_r = rs - shoulder_mid_raw
+        corrected[LM.LEFT_SHOULDER] = shoulder_mid + half_offset_l
+        corrected[LM.RIGHT_SHOULDER] = shoulder_mid + half_offset_r
 
-        # Step 3b: hip width
+        # Step 3b: hip width (soft constraint — only correct if >20% deviation)
         if 'hip_width' in self.bone_lengths:
-            hw = self.bone_lengths['hip_width']
-            hip_axis = _safe_normalize(lh - rh)
-            corrected[LM.LEFT_HIP] = hip_mid + hip_axis * (hw / 2)
-            corrected[LM.RIGHT_HIP] = hip_mid - hip_axis * (hw / 2)
-
-        # Step 4: neck/head
-        if nose is not None and 'neck' in self.bone_lengths:
-            neck_dir = _safe_normalize(nose - shoulder_mid)
-            corrected[LM.NOSE] = shoulder_mid + neck_dir * self.bone_lengths['neck']
-            raw_neck = np.linalg.norm(nose - shoulder_mid_raw)
-            delta = abs(raw_neck - self.bone_lengths['neck'])
-            frame_deltas.append(('neck', raw_neck, self.bone_lengths['neck'], delta))
+            hw_cal = self.bone_lengths['hip_width']
+            raw_hw = np.linalg.norm(lh - rh)
+            hw_ratio = raw_hw / hw_cal if hw_cal > 1e-6 else 1.0
+            if abs(hw_ratio - 1.0) > 0.20:
+                sign = 1.0 if hw_ratio > 1.0 else -1.0
+                target_hw = hw_cal * (1.0 + 0.20 * sign)
+                hip_axis = _safe_normalize(lh - rh)
+                corrected[LM.LEFT_HIP] = hip_mid + hip_axis * (target_hw / 2)
+                corrected[LM.RIGHT_HIP] = hip_mid - hip_axis * (target_hw / 2)
 
         # Step 5: arm chains
         for chain_name, root_idx, segments in ARM_CHAINS:
@@ -407,14 +397,11 @@ class SkeletonSolver:
                 bone_keys_ordered.append(key)
                 prev = child_idx
 
-        neck_directions = []
-
         for frame in all_solved_frames:
             lm = frame.get('landmarks_3d', {})
             if not lm:
                 for key in bone_keys_ordered:
                     bone_directions[key].append(None)
-                neck_directions.append(None)
                 continue
 
             for parent_idx, child_idx, bone_name in bone_keys_ordered:
@@ -425,15 +412,6 @@ class SkeletonSolver:
                     bone_directions[key].append(_safe_normalize(c - p))
                 else:
                     bone_directions[key].append(None)
-
-            ls = self._get_point(lm, LM.LEFT_SHOULDER)
-            rs = self._get_point(lm, LM.RIGHT_SHOULDER)
-            nose = self._get_point(lm, LM.NOSE)
-            if ls is not None and rs is not None and nose is not None:
-                sm = (ls + rs) / 2
-                neck_directions.append(_safe_normalize(nose - sm))
-            else:
-                neck_directions.append(None)
 
         def _ema_smooth(dirs):
             smoothed = [None] * len(dirs)
@@ -453,7 +431,6 @@ class SkeletonSolver:
         smoothed_dirs = {}
         for key, dirs in bone_directions.items():
             smoothed_dirs[key] = _ema_smooth(dirs)
-        smoothed_neck = _ema_smooth(neck_directions)
 
         result_frames = []
         for i, frame in enumerate(all_solved_frames):
@@ -482,13 +459,6 @@ class SkeletonSolver:
                             parent_pos = cp
                         break
                     prev = child_idx
-
-            if smoothed_neck[i] is not None and 'neck' in self.bone_lengths:
-                ls = self._get_point(new_lm, LM.LEFT_SHOULDER)
-                rs = self._get_point(new_lm, LM.RIGHT_SHOULDER)
-                if ls is not None and rs is not None:
-                    sm = (ls + rs) / 2
-                    new_lm[str(LM.NOSE)] = (sm + smoothed_neck[i] * self.bone_lengths['neck']).tolist()
 
             new_frame = dict(frame)
             new_frame['landmarks_3d'] = new_lm
