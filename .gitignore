@@ -1,2 +1,4 @@
 __pycache__/
 MelodicCapRTM/takes/
+*_solved.json
+*_noskel.json
