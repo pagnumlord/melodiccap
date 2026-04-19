@@ -118,12 +118,8 @@ def process_take(input_path, no_skeleton=False):
         solver = SkeletonSolver(n_cal_frames=30)
         solved_frames = solver.solve_sequence(coco_frames)
 
-    if fmt == 'mediapipe_named':
-        for i, frame in enumerate(solved_frames):
-            solved_lm = frame['landmarks_3d']
-            original_lm = frames[i]['landmarks_3d']
-            frame['landmarks_3d'] = coco_to_mp_named(solved_lm, original_lm)
-
+    data['format'] = 'melodiccap_rtm_v1'
+    data['keypoint_format'] = 'coco_body_17'
     data['frames'] = solved_frames
     if not no_skeleton:
         data.setdefault('metadata', {})['skeleton_solver_v2'] = True
