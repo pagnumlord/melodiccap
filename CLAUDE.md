@@ -1,7 +1,7 @@
-# MelodicCap - Dual-Camera Markerless Motion Capture
+# MelodicCap - Multi-Camera Markerless Motion Capture
 
 ## Project Overview
-Dual-camera markerless motion capture system using RTMPose for 2D pose detection,
+Multi-camera markerless motion capture system using RTMPose for 2D pose detection,
 stereo triangulation for 3D reconstruction, and a Blender addon to retarget captured
 motion data onto Rigify character rigs. For a short film.
 
@@ -9,11 +9,14 @@ motion data onto Rigify character rigs. For a short film.
 - **User height**: 6'1" (1.856m)
 - **Primary rig**: JaxRigify (1.87284m tall)
 - **Other characters** (pending): Kai, Kiko, Dr White, Hiro, THE SHADOW
-- **Cameras**: Sony ZV-1F + Samsung S25 via DroidCam at ~90° angle, ~2m baseline
+- **Cameras**: Sony ZV-1F (cam A) + Samsung S25 via DroidCam (cam B) + iPad (cam C)
+- **Recommended geometry**: 30-45° angle spread, ~1.5m baseline, all cameras ~2m from performer
+- **3-camera multi-pair mode**: offline_processor picks best pair (AB/AC/BC) per frame
+  by reprojection error. Set CAM_C_INDEX in melodic_capture.py to enable.
 - **Cameras move every session** — old calibrations are useless. Must recalibrate
   stereo cameras at the start of each capture session.
 - **No hardware sync** — DroidCam is NOT hardware-synced with Sony ZV-1F.
-  ~50-100ms frame misalignment corrupts stereo depth.
+  Frame sync via sequential grab()/retrieve() (v4.9) reduces delta to ~20ms.
 
 ## Architecture
 - `MelodicCapRTM/` — Python capture pipeline
@@ -22,11 +25,16 @@ motion data onto Rigify character rigs. For a short film.
   - `pose_detector.py` — RTMPose wrapper (single-person detection)
   - `kalman.py` — Kalman filter for 3D keypoint smoothing
   - `recorder.py` — JSON take recorder
-  - `offline_processor.py` — Offline triangulation
+  - `offline_processor.py` — Offline triangulation (multi-pair support)
+  - `skeleton_solver.py` — Skeleton solver v2: direction-preserving chain fitting
+    with calibrated bone lengths, soft spine/hip constraints, joint angle limits
+  - `apply_solver.py` — Standalone retroactive solver for existing takes
+    (`python apply_solver.py path/to/take.json` → writes `*_solved.json`)
+  - `chain_calibration.py` — Derives AC stereo pair from AB+BC chain
 - `MelodicCapRTM/blender_addon/` — Blender addon
-  - `melodiccap_rtm_addon.py` — Main addon (v4.6): imports JSON takes, retargets to JaxRigify
+  - `melodiccap_rtm_addon.py` — Main addon (v5.4): imports JSON takes, retargets to JaxRigify
 
-## Blender Addon - Current State (v5.2)
+## Blender Addon - Current State (v5.4)
 - Proportional retargeting: measures mocap vs rig proportions from frame 0
 - **Hybrid mode (default)**: Arms use FK rotations, legs use IK positioning
 - Torso: yaw (rest-subtracted + depth-damped) + pitch (rest-subtracted) (v5.0)
@@ -142,6 +150,27 @@ motion data onto Rigify character rigs. For a short film.
   extreme backward lean when seated. Take 2 showed -30.2° pitch (extreme recline),
   now clamped to -20°. Forward lean up to 35° still allowed.
 
+### v5.4 — Neck pitch correction, foot velocity clamp, neck velocity limit
+- **Neck pitch correction**: when torso pitch is clamped during sitting (e.g. raw -32°
+  → clamp -20°), ear_mid still reflects the raw spine tilt. Without correction, the
+  neck rotates 12°+ forward to compensate ("snake neck"). Fix: rotate neck_dir by the
+  same pitch correction amount before computing neck FK. Neck now only rotates for
+  actual head movement, not depth error already handled by the torso clamp.
+- **Foot velocity clamping (FOOT_MAX_SPEED = 6.0 m/s)**: arms had ARM_MAX_SPEED=8 m/s
+  but feet had zero velocity protection. Left foot hit 19.4 m/s from depth spikes
+  (right foot only 3.0 m/s — camera geometry asymmetry). Now holds previous position
+  when foot speed exceeds threshold. Mirrors the arm velocity clamp pattern.
+- **Neck angular velocity limiting (NECK_MAX_ANGULAR_VEL = 8°/frame)**: caps neck
+  rotation change to ~160°/s at 20fps. Prevents violent head-snap from depth spikes.
+  The user's slow head turn was becoming an instant snap in Blender. Applied after
+  NECK_ROT_MAX cap, before confidence slerp.
+
+### v5.3 — Smooth sit_blend ramp
+- **sit_blend ramp (SIT_BLEND_FRAMES = 8)**: replaced binary is_sitting flag with
+  0→1 blend over 8 frames. All seated dampers (hip lateral, arm depth, leg lateral,
+  torso pitch clamp) are multiplied by sit_blend instead of gated by a boolean.
+  Prevents visible pops on sit/stand transitions.
+
 ### v4.9 — Frame sync fix, seated arm depth damping
 - **Frame sync (capture pipeline)**: replaced threaded `.read()` with sequential
   `grab()/retrieve()` pattern in melodic_capture.py. Both cameras now grab frames
@@ -225,6 +254,69 @@ clamp provide the real quality control for arm data.
 - ~~keypoint_format lie~~ → reports actual mode (body_17 vs wholebody_133)
 - ~~Floor calibration hardcoded 0.3~~ → uses config.MIN_KEYPOINT_CONFIDENCE
 
+## Depth Axis — The Fundamental Limit of 2-Camera Stereo
+
+All seated/sitting issues trace to **depth axis noise**. In stereo triangulation,
+the axis perpendicular to the camera baseline has the worst resolution. At 90°
+camera angle with 2.2m baseline, depth errors are 3-5x larger than lateral errors.
+
+Symptoms of depth noise (all confirmed in real takes):
+- Hip Z under-reported during sitting (0.245m vs real 0.4-0.5m)
+- Spine backward tilt exaggerated (stereo sees -32° when real is ~-15°)
+- Left/right foot asymmetric noise (camera geometry favors one side)
+- Arm depth (Y) over-estimated during sitting (elbows appear 16cm forward)
+
+The retargeter has 10+ dampers/clamps for depth noise (YAW_DEPTH_DAMP,
+SEATED_ARM_DEPTH_DAMP, SEATED_HIP_LATERAL_DAMP, SEATED_PITCH_MIN/MAX, etc.).
+Each fixes one symptom but can cause side effects. The real fix is better
+camera geometry: 3 cameras at 30-45° angles with multi-pair triangulation.
+
+## MediaPipe vs RTM Format — How to Tell
+
+Pre-MelodicCapRTM takes (MelodicCapFresh era) used MediaPipe single-camera 3D.
+These **cannot be retargeted** — MediaPipe normalizes to hip-centered space
+(hip always at origin), making the Z axis scale-free.
+
+How to identify monocular takes:
+- `hip_raw: (0.000, -0.001, 0.000)` through all frames — hip never moves
+- Leg length asymmetry >5% at frame 0
+- No `format: "melodiccap_rtm_v1"` in JSON metadata
+- `apply_solver.py` prints a format warning when processing these
+
+RTM stereo takes have:
+- `format: "melodiccap_rtm_v1"` and `keypoint_format: "coco_body_17"` in metadata
+- hip_raw translates between frames (world-space coordinates)
+- Leg asymmetry <3% at frame 0
+
+## Frame 0 A-Pose Guide
+
+Frame 0 is used for calibration (proportion measurement, rest pitch/yaw, hip Z
+baseline, foot Z offset). A bad frame 0 poisons everything downstream.
+
+Required pose:
+- Stand naturally, feet shoulder-width apart
+- Arms straight out at ~45° from body (A-pose), palms forward
+- Face the camera-forward direction (perpendicular to baseline)
+- Hold for 2 full seconds at the start of recording
+
+The addon's `validate_frame0_pose()` checks: spine tilt <15°, arm asymmetry
+<10%, wrists near hip height, hip Z reasonable. Warnings are logged but
+currently don't block retargeting (planned enforcement in future version).
+
+## Troubleshooting
+
+| Symptom | Diagnosis | Fix |
+|---------|-----------|-----|
+| Character stretches vertically | Check `hip_raw` in log — if stuck at (0,0,0), it's monocular input | Use RTM stereo takes only |
+| Arms flap wildly | Check `arm_fk_conf` — should be >0.6 | Recapture with better lighting/angles |
+| Character leans forever | `torso_rest_pitch` captured a lean at frame 0 | Re-record with clean A-pose |
+| Neck stretches like snake | Torso pitch clamped + neck compensating | v5.4 pitch correction fixes this |
+| Sitting too shallow | Depth axis under-reports hip Z drop | Use 3-camera multi-pair mode |
+| Left foot pops but right doesn't | Camera geometry asymmetry | v5.4 foot velocity clamp; also try 3 cameras |
+| Head turns snap violently | No neck angular velocity limit | v5.4 adds 8°/frame cap |
+| "HIP TOO LOW" at frame 0 | Person not standing upright, or monocular data | Clean A-pose, verify stereo format |
+| `offline_processor` says "single pair" | AC/BC pairs failed quality gates (floor offset, RMS, baseline) | Calibrate all 3 pairs with floor propagation |
+
 ## Working Well
 - Frame 0 A-pose calibration and proportion measurement
 - Global/per-chain scale factors
@@ -248,6 +340,11 @@ clamp provide the real quality control for arm data.
 - Head yaw cap ±60° (allows natural head turns) (v5.2)
 - Seated torso pitch clamp -20°/+35° (prevents extreme lean) (v5.2)
 - Dense diagnostic logging near transitions
+- Neck pitch correction (prevents snake neck from torso clamp compensation) (v5.4)
+- Foot velocity clamping at 6 m/s (prevents triangulation spike leg pops) (v5.4)
+- Neck angular velocity limiting at 8°/frame (prevents violent head snaps) (v5.4)
+- Smooth sit_blend ramp over 8 frames (prevents binary sit/stand pops) (v5.3)
+- Skeleton solver v2: direction-preserving chain fitting, soft spine/hip constraints
 
 ## Known Limitations
 - Frame 0 must be a clean standing A-pose
@@ -255,3 +352,5 @@ clamp provide the real quality control for arm data.
 - Single-person detection only (takes first detected person)
 - No finger tracking in body_fast mode (only wholebody detector)
 - FK arm rotation cannot match IK arm POSITION accuracy
+- 2-camera stereo has inherent depth axis noise — 3-camera multi-pair recommended
+- Sitting depth under-reported without multi-pair triangulation

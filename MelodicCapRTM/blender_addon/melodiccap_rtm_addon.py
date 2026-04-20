@@ -1396,7 +1396,12 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     SEATED_PITCH_MIN = math.radians(-20)  # max backward lean
                     if sit_blend > 0:
                         clamped = max(SEATED_PITCH_MIN, min(SEATED_PITCH_MAX, pitch_angle))
+                        # v5.4: Store how much pitch was clamped — neck FK uses this
+                        # to avoid compensating for depth error already handled here
+                        mocap_props['_pitch_correction'] = sit_blend * (clamped - pitch_angle)
                         pitch_angle = pitch_angle + sit_blend * (clamped - pitch_angle)
+                    else:
+                        mocap_props['_pitch_correction'] = 0.0
 
                     # Combine yaw + pitch as quaternion
                     # Order: yaw (Z) then pitch (X) — yaw first so pitch
@@ -1472,6 +1477,17 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     neck_bone = rig.pose.bones.get("neck")
                     if neck_bone and spine_points.get('shoulder_mid'):
                         neck_dir = (armature_inv_33 @ (ear_mid - spine_points['shoulder_mid'])).normalized()
+
+                        # v5.4: Correct neck_dir for torso pitch clamping.
+                        # When torso pitch is clamped (e.g. -32° → -20°), ear_mid
+                        # still reflects the raw spine tilt. Without this, the neck
+                        # rotates forward to compensate for depth error that was
+                        # already clamped at the torso level ("snake neck").
+                        pitch_corr = mocap_props.get('_pitch_correction', 0)
+                        if abs(pitch_corr) > math.radians(1):
+                            corr_mat = Matrix.Rotation(pitch_corr, 3, 'X')
+                            neck_dir = (corr_mat @ neck_dir).normalized()
+
                         neck_bone.rotation_mode = 'QUATERNION'
                         # 'auto' parent mode: now works correctly because
                         # depsgraph was flushed above with current torso+spine
@@ -1481,6 +1497,18 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         neck_cap = NECK_ROT_MAX_STAND - sit_blend * (NECK_ROT_MAX_STAND - NECK_ROT_MAX_SIT)
                         if neck_rot.angle > neck_cap:
                             neck_rot = Quaternion(neck_rot.axis, neck_cap)
+
+                        # v5.4: Neck angular velocity limiting.
+                        # Prevents violent head-snap from depth spikes — caps
+                        # change to 8°/frame (~160°/s at 20fps).
+                        NECK_MAX_ANGULAR_VEL = math.radians(8)
+                        prev_neck_angle = mocap_props.get('_prev_neck_angle', neck_rot.angle)
+                        if neck_rot.angle - prev_neck_angle > NECK_MAX_ANGULAR_VEL:
+                            neck_rot = Quaternion(neck_rot.axis, prev_neck_angle + NECK_MAX_ANGULAR_VEL)
+                        elif prev_neck_angle - neck_rot.angle > NECK_MAX_ANGULAR_VEL:
+                            neck_rot = Quaternion(neck_rot.axis, max(0, prev_neck_angle - NECK_MAX_ANGULAR_VEL))
+                        mocap_props['_prev_neck_angle'] = neck_rot.angle
+
                         if head_confidence < 1.0:
                             neck_rot = Quaternion().slerp(neck_rot, head_confidence)
                         neck_bone.rotation_quaternion = neck_rot
@@ -2057,6 +2085,16 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         # The mocap ankle keypoint is ~5-7cm above ground anatomically.
                         # Without this, unpinned feet visibly float.
                         pos_scaled.z -= foot_z_offset[side]
+
+                        # v5.4: Foot velocity clamping — reject triangulation spikes.
+                        # Arms have ARM_MAX_SPEED=8 m/s; feet need the same protection.
+                        FOOT_MAX_SPEED = 6.0
+                        if prev_foot_raw[side] is not None:
+                            foot_dt = timestamp - prev_timestamp if prev_timestamp > 0 else 0.033
+                            foot_delta = (pos_scaled - prev_foot_raw[side]).length
+                            foot_vel = foot_delta / max(foot_dt, 0.001)
+                            if foot_vel > FOOT_MAX_SPEED and not is_sitting:
+                                pos_scaled = prev_foot_raw[side].copy()
 
                         # Capture pre-processing position for diagnostics
                         raw_z = pos_scaled.z
