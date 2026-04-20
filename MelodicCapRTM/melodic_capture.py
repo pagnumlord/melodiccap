@@ -56,7 +56,7 @@ class Config:
     # A + B are REQUIRED, C is optional. Put most reliable cameras as A/B.
     CAM_A_INDEX = 0  # Samsung S25 DroidCam
     CAM_B_INDEX = 1  # Logitech C615
-    CAM_C_INDEX = 2  # Sony ZV-1F (set to -1 to disable third camera)
+    CAM_C_INDEX = -1  # Sony ZV-1F (set to -1 to disable third camera)
 
     # Resolution
     FRAME_WIDTH = 1280

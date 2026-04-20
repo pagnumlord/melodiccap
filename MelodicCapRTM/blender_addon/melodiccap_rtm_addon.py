@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (5, 1),
+    "version": (5, 5),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -1971,8 +1971,9 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                     f"Capture or retargeting error!")
 
                 for bone_name, landmark_idx in IK_TARGETS.items():
-                    # Sitting: skip foot IK targets (legs use FK)
                     if is_sitting and "foot" in bone_name:
+                        foot_side = "L" if ".L" in bone_name else "R"
+                        prev_foot_raw[foot_side] = None
                         continue
 
                     # Hybrid mode: snap hand_ik to wrist position (visual cleanup)
@@ -2086,21 +2087,20 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         # Without this, unpinned feet visibly float.
                         pos_scaled.z -= foot_z_offset[side]
 
-                        # v5.4: Foot velocity clamping — reject triangulation spikes.
-                        # Arms have ARM_MAX_SPEED=8 m/s; feet need the same protection.
                         FOOT_MAX_SPEED = 6.0
+                        FOOT_Z_FLOOR = -0.15
+                        if pos_scaled.z < FOOT_Z_FLOOR:
+                            pos_scaled.z = FOOT_Z_FLOOR
                         if prev_foot_raw[side] is not None:
                             foot_dt = timestamp - prev_timestamp if prev_timestamp > 0 else 0.033
                             foot_delta = (pos_scaled - prev_foot_raw[side]).length
                             foot_vel = foot_delta / max(foot_dt, 0.001)
-                            if foot_vel > FOOT_MAX_SPEED and not is_sitting:
+                            if foot_vel > FOOT_MAX_SPEED:
                                 pos_scaled = prev_foot_raw[side].copy()
 
-                        # Capture pre-processing position for diagnostics
                         raw_z = pos_scaled.z
                         raw_pos = pos_scaled.copy()
 
-                        # Ground clamp: never below floor
                         if self.ground_clamp and pos_scaled.z < 0:
                             pos_scaled.z = 0
 
