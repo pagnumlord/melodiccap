@@ -34,9 +34,9 @@ motion data onto Rigify character rigs. For a short film.
     (`python apply_solver.py path/to/take.json` → writes `*_solved.json`)
   - `chain_calibration.py` — Derives AC stereo pair from AB+BC chain
 - `MelodicCapRTM/blender_addon/` — Blender addon
-  - `melodiccap_rtm_addon.py` — Main addon (v5.5): imports JSON takes, retargets to JaxRigify
+  - `melodiccap_rtm_addon.py` — Main addon (v5.6): imports JSON takes, retargets to JaxRigify
 
-## Blender Addon - Current State (v5.5)
+## Blender Addon - Current State (v5.6)
 - Proportional retargeting: measures mocap vs rig proportions from frame 0
 - **Hybrid mode (default)**: Arms use FK rotations, legs use IK positioning
 - Torso: yaw (rest-subtracted + depth-damped) + pitch (rest-subtracted) (v5.0)
@@ -152,7 +152,20 @@ motion data onto Rigify character rigs. For a short film.
   extreme backward lean when seated. Take 2 showed -30.2° pitch (extreme recline),
   now clamped to -20°. Forward lean up to 35° still allowed.
 
-### v5.5 — Foot clamp fixes, Camera C disabled
+### v5.6 — Revert v5.5 FOOT_Z_FLOOR regression, fix pinning speed reference
+- **Removed FOOT_Z_FLOOR clamp**: the v5.5 floor-at-15cm-below-ground check created
+  a permanent 0.15m Z gap between `pos_scaled` (ground-clamped to 0) and the stored
+  `prev_foot_raw` (clamped to -0.15). At 21fps that's a phantom ~3.2 m/s — above
+  the pin threshold — so the pin logic concluded the foot was always moving fast.
+  Symptom: left foot pinned 0/293 frames in take_20260420_230051. Feet snappy,
+  never planted. ground_clamp still catches visual penetration; the velocity clamp
+  still catches genuine spikes.
+- **Pinning speed uses raw_pos**: previously `foot_speed = (pos_scaled - prev_foot_raw)`
+  which mixed post-ground-clamp with pre-ground-clamp references. Now uses
+  `(raw_pos - prev_foot_raw)` so small oscillations around z=0 stay consistent.
+  This was the same class of bug as FOOT_Z_FLOOR — just less severe before v5.5.
+
+### v5.5 — Foot clamp fixes, Camera C disabled (REGRESSED — fixed in v5.6)
 - **Foot Z floor clamp (FOOT_Z_FLOOR = -0.15m)**: feet can't be more than 15cm below
   floor. Catches gradual depth drift that was too slow for the velocity clamp — left foot
   Z drifted from -0.01 to -0.61m over 6 frames (speeds 0.17→4.1 m/s, all under 6 m/s
@@ -327,7 +340,8 @@ currently don't block retargeting (planned enforcement in future version).
 | Character leans forever | `torso_rest_pitch` captured a lean at frame 0 | Re-record with clean A-pose |
 | Neck stretches like snake | Torso pitch clamped + neck compensating | v5.4 pitch correction fixes this |
 | Sitting too shallow | Depth axis under-reports hip Z drop | Use 3-camera multi-pair mode |
-| Left foot pops but right doesn't | Camera geometry asymmetry + gradual Z drift | v5.5 Z floor clamp + velocity clamp; move cameras closer together |
+| Left foot pops but right doesn't | Camera geometry asymmetry + gradual Z drift | v5.6 velocity clamp (ground_clamp handles visual); move cameras closer together |
+| Feet snappy, never plant | `foot_speed` reference mismatch (pre- vs post-clamp) | v5.6 fixes — uses raw_pos consistently |
 | Head turns snap violently | No neck angular velocity limit | v5.4 adds 8°/frame cap |
 | "HIP TOO LOW" at frame 0 | Person not standing upright, or monocular data | Clean A-pose, verify stereo format |
 | `offline_processor` says "single pair" | AC/BC pairs failed quality gates (floor offset, RMS, baseline) | Calibrate all 3 pairs with floor propagation |
@@ -356,8 +370,9 @@ currently don't block retargeting (planned enforcement in future version).
 - Seated torso pitch clamp -20°/+35° (prevents extreme lean) (v5.2)
 - Dense diagnostic logging near transitions
 - Neck pitch correction (prevents snake neck from torso clamp compensation) (v5.5)
-- Foot velocity clamping at 6 m/s + Z floor clamp at -0.15m (prevents leg pops) (v5.5)
-- Neck angular velocity limiting at 8°/frame (prevents violent head snaps) (v5.5)
+- Foot velocity clamping at 6 m/s (prevents leg pops from depth spikes) (v5.6)
+- Pinning speed uses raw_pos for consistency with prev_foot_raw reference (v5.6)
+- Neck angular velocity limiting at 8°/frame (prevents violent head snaps) (v5.4)
 - Foot prev_foot_raw cleared during sitting (prevents stale reference spike on stand) (v5.5)
 - Smooth sit_blend ramp over 8 frames (prevents binary sit/stand pops) (v5.3)
 - Skeleton solver v2: direction-preserving chain fitting, soft spine/hip constraints

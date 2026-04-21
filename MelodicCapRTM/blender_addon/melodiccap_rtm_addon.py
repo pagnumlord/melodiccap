@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (5, 5),
+    "version": (5, 6),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -2087,10 +2087,13 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         # Without this, unpinned feet visibly float.
                         pos_scaled.z -= foot_z_offset[side]
 
+                        # v5.6: FOOT_Z_FLOOR removed — it created an artificial Z gap
+                        # between ground-clamped pos_scaled (z=0) and pre-clamp
+                        # prev_foot_raw (z=-0.15), producing ~3.2 m/s phantom velocity
+                        # every frame and preventing the foot from ever pinning.
+                        # ground_clamp already handles the visual, and the velocity
+                        # clamp below catches genuine spikes.
                         FOOT_MAX_SPEED = 6.0
-                        FOOT_Z_FLOOR = -0.15
-                        if pos_scaled.z < FOOT_Z_FLOOR:
-                            pos_scaled.z = FOOT_Z_FLOOR
                         if prev_foot_raw[side] is not None:
                             foot_dt = timestamp - prev_timestamp if prev_timestamp > 0 else 0.033
                             foot_delta = (pos_scaled - prev_foot_raw[side]).length
@@ -2128,7 +2131,11 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                     hip_drift_slide = True
 
                             if prev_foot_raw[side] is not None and dt > 0:
-                                dist = (pos_scaled - prev_foot_raw[side]).length
+                                # v5.6: compare raw_pos (pre-ground-clamp) to prev_foot_raw
+                                # so small mocap Z oscillations near/below 0 don't get
+                                # flattened into a phantom gap by ground_clamp, which
+                                # was preventing pinning from ever latching.
+                                dist = (raw_pos - prev_foot_raw[side]).length
                                 foot_speed = dist / dt
 
                                 want_pin = (foot_speed < self.pin_threshold and near_floor)
