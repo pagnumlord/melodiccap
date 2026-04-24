@@ -1,5 +1,5 @@
 """
-MelodicCap RTM Blender Addon v4.7
+MelodicCap RTM Blender Addon v5.7
 ===================================
 Imports JSON motion capture data and retargets to JaxRigify armature.
 
@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (5, 6),
+    "version": (5, 7),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -474,61 +474,71 @@ def compute_scale_factors(rig_props, mocap_props):
 def validate_frame0_pose(landmarks_3d, mocap_props):
     """
     Validate that frame 0 is a clean standing A-pose.
-    Logs warnings for asymmetry, non-upright spine, or suspicious proportions.
-    Returns a dict of quality metrics.
-    """
-    quality = {'warnings': [], 'ok': True}
+    Returns a dict with 'critical' (hard-block) and 'warnings' (soft-info) lists.
 
-    # Arm symmetry check
+    HARD-BLOCK policy (v5.7): critical failures stop the import rather than
+    being rescued silently. A bad A-pose poisons proportions, rest pitch/yaw,
+    hip Z baseline, and foot Z offset — papering over it downstream is worse
+    than forcing a re-record.
+    """
+    quality = {'critical': [], 'warnings': [], 'ok': True}
+
+    # Arm symmetry: >10% is triangulation asymmetry (HARD BLOCK),
+    # 3-10% is suspect but may be legitimate handedness.
     arm_l = mocap_props.get('arm.L', 0)
     arm_r = mocap_props.get('arm.R', 0)
     if arm_l > 0.01 and arm_r > 0.01:
         arm_asym = abs(arm_l - arm_r) / max(arm_l, arm_r) * 100
         quality['arm_asymmetry_pct'] = arm_asym
-        if arm_asym > 3.0:
+        if arm_asym > 10.0:
+            quality['critical'].append(
+                f"ARM ASYMMETRY {arm_asym:.1f}% (L={arm_l:.3f} R={arm_r:.3f}) — "
+                f"frame 0 triangulation is broken on one side. Re-record with a "
+                f"cleaner A-pose and check camera coverage.")
+        elif arm_asym > 3.0:
             quality['warnings'].append(
-                f"ARM ASYMMETRY: L={arm_l:.4f} R={arm_r:.4f} ({arm_asym:.1f}% diff) — "
-                f"frame 0 pose is not symmetric or triangulation error on one side")
-            quality['ok'] = False
+                f"arm asymmetry {arm_asym:.1f}% (L={arm_l:.3f} R={arm_r:.3f})")
 
-    # Leg symmetry check
+    # Leg symmetry: same treatment
     leg_l = mocap_props.get('leg.L', 0)
     leg_r = mocap_props.get('leg.R', 0)
     if leg_l > 0.01 and leg_r > 0.01:
         leg_asym = abs(leg_l - leg_r) / max(leg_l, leg_r) * 100
         quality['leg_asymmetry_pct'] = leg_asym
-        if leg_asym > 3.0:
+        if leg_asym > 10.0:
+            quality['critical'].append(
+                f"LEG ASYMMETRY {leg_asym:.1f}% (L={leg_l:.3f} R={leg_r:.3f}) — "
+                f"triangulation imbalance across sides.")
+        elif leg_asym > 3.0:
             quality['warnings'].append(
-                f"LEG ASYMMETRY: L={leg_l:.4f} R={leg_r:.4f} ({leg_asym:.1f}% diff)")
-            quality['ok'] = False
+                f"leg asymmetry {leg_asym:.1f}% (L={leg_l:.3f} R={leg_r:.3f})")
 
-    # Spine uprightness: check if hip-to-shoulder vector is mostly vertical
+    # Spine uprightness: >25° is almost certainly not standing (HARD BLOCK)
     hip_mid = compute_midpoint(landmarks_3d, LM.LEFT_HIP, LM.RIGHT_HIP)
     shoulder_mid = compute_midpoint(landmarks_3d, LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER)
     if hip_mid and shoulder_mid:
         spine_vec = shoulder_mid - hip_mid
         if spine_vec.length > 0.01:
             spine_up = spine_vec.normalized()
-            # Angle from vertical (Z axis)
             spine_tilt = math.degrees(math.acos(max(-1, min(1, spine_up.z))))
             quality['spine_tilt_deg'] = spine_tilt
-            if spine_tilt > 15:
-                quality['warnings'].append(
-                    f"SPINE NOT UPRIGHT: {spine_tilt:.1f}° from vertical — "
-                    f"frame 0 may not be a standing pose (sitting?)")
-                quality['ok'] = False
+            if spine_tilt > 25:
+                quality['critical'].append(
+                    f"SPINE TILT {spine_tilt:.1f}° — calibration frame is not a "
+                    f"standing pose. Re-record with a clean A-pose.")
+            elif spine_tilt > 15:
+                quality['warnings'].append(f"spine tilt {spine_tilt:.1f}°")
 
-    # Hip height sanity: typical standing hip is 0.8-1.1m above ground
+    # Hip height: standing hip should be 0.8-1.1m
     hip_pos = mocap_props.get('hip_pos')
     if hip_pos:
         quality['hip_height'] = hip_pos.z
         if hip_pos.z < 0.6:
-            quality['warnings'].append(
-                f"HIP TOO LOW: Z={hip_pos.z:.3f}m — person may be sitting/crouching in frame 0")
-            quality['ok'] = False
+            quality['critical'].append(
+                f"HIP Z={hip_pos.z:.3f}m — person is sitting/crouching in the "
+                f"calibration frame. Re-record with A-pose at the start.")
         elif hip_pos.z > 1.2:
-            quality['warnings'].append(
-                f"HIP UNUSUALLY HIGH: Z={hip_pos.z:.3f}m — check calibration")
+            quality['warnings'].append(f"hip Z={hip_pos.z:.3f}m unusually high")
 
     # Shoulder width sanity
     p_ls = get_landmark(landmarks_3d, LM.LEFT_SHOULDER)
@@ -537,21 +547,128 @@ def validate_frame0_pose(landmarks_3d, mocap_props):
         shoulder_width = (p_ls - p_rs).length
         quality['shoulder_width'] = shoulder_width
         if shoulder_width < 0.2 or shoulder_width > 0.6:
-            quality['warnings'].append(
-                f"SHOULDER WIDTH UNUSUAL: {shoulder_width:.3f}m (expected 0.3-0.5m)")
+            quality['warnings'].append(f"shoulder width {shoulder_width:.3f}m")
 
-    # Wrist height relative to hip: in A-pose, wrists should be near hip height
+    # Wrist height relative to hip — informational only (not blocking since
+    # arm position varies with A-pose style)
     for side, wrist_idx in [("L", LM.LEFT_WRIST), ("R", LM.RIGHT_WRIST)]:
         p_wr = get_landmark(landmarks_3d, wrist_idx)
         if p_wr and hip_pos:
             wrist_hip_dz = p_wr.z - hip_pos.z
             quality[f'wrist_{side}_dz'] = wrist_hip_dz
-            if abs(wrist_hip_dz) > 0.15:
+            if abs(wrist_hip_dz) > 0.25:
                 quality['warnings'].append(
-                    f"WRIST {side} NOT AT HIP HEIGHT: dZ={wrist_hip_dz:+.3f}m — "
-                    f"arms may not be in A-pose")
+                    f"wrist {side} dZ={wrist_hip_dz:+.3f}m (arms far from hip height)")
 
+    quality['ok'] = len(quality['critical']) == 0
     return quality
+
+
+def check_lr_bone_symmetry(frames, bad_frame_fraction_max=0.05,
+                            length_ratio_max=1.15):
+    """
+    Scan triangulated landmarks across the whole take and flag runs where
+    L/R pair lengths diverge. Returns (ok, stats_dict).
+
+    The solver enforces calibrated bone lengths on its output, but the
+    DIAGNOSTIC value of this check is catching takes where the RAW input
+    was already broken on more than `bad_frame_fraction_max` of frames
+    (L/R bias exceeding `length_ratio_max`). A bad majority means either
+    the wrong calibration pair, or a camera is misaligned.
+    """
+    pairs = [
+        ('upper_arm', LM.LEFT_SHOULDER, LM.LEFT_ELBOW,
+                       LM.RIGHT_SHOULDER, LM.RIGHT_ELBOW),
+        ('forearm',   LM.LEFT_ELBOW, LM.LEFT_WRIST,
+                       LM.RIGHT_ELBOW, LM.RIGHT_WRIST),
+        ('thigh',     LM.LEFT_HIP, LM.LEFT_KNEE,
+                       LM.RIGHT_HIP, LM.RIGHT_KNEE),
+        ('shin',      LM.LEFT_KNEE, LM.LEFT_ANKLE,
+                       LM.RIGHT_KNEE, LM.RIGHT_ANKLE),
+    ]
+    stats = {name: {'bad': 0, 'total': 0, 'max_ratio': 1.0} for name, *_ in pairs}
+
+    for f in frames:
+        lm = f.get('landmarks_3d', {})
+        if not lm:
+            continue
+        for name, lp, lc, rp, rc in pairs:
+            p_lp = get_landmark(lm, lp)
+            p_lc = get_landmark(lm, lc)
+            p_rp = get_landmark(lm, rp)
+            p_rc = get_landmark(lm, rc)
+            if not (p_lp and p_lc and p_rp and p_rc):
+                continue
+            ll = (p_lc - p_lp).length
+            lr = (p_rc - p_rp).length
+            if ll < 0.03 or lr < 0.03:
+                continue
+            stats[name]['total'] += 1
+            ratio = max(ll, lr) / min(ll, lr)
+            if ratio > stats[name]['max_ratio']:
+                stats[name]['max_ratio'] = ratio
+            if ratio > length_ratio_max:
+                stats[name]['bad'] += 1
+
+    problems = []
+    for name, s in stats.items():
+        if s['total'] == 0:
+            continue
+        pct_bad = s['bad'] / s['total']
+        s['bad_pct'] = pct_bad * 100
+        if pct_bad > bad_frame_fraction_max:
+            problems.append(
+                f"{name} L/R diverges on {pct_bad*100:.1f}% of frames "
+                f"(max ratio {s['max_ratio']:.2f}x)"
+            )
+
+    return (len(problems) == 0, stats, problems)
+
+
+def detect_monocular_data(frames, sample_count=10):
+    """
+    Detect MediaPipe-single-camera data that can't be retargeted.
+    Returns (is_monocular, reason) tuple.
+
+    MediaPipe monocular outputs hip-centered 3D — hip never translates.
+    RTM stereo has hip_raw varying across frames in world space.
+    """
+    if len(frames) < sample_count:
+        return False, ""
+
+    hip_xs = []
+    hip_ys = []
+    hip_zs = []
+    step = max(1, len(frames) // sample_count)
+    for i in range(0, len(frames), step):
+        if len(hip_xs) >= sample_count:
+            break
+        lm = frames[i].get('landmarks_3d', {})
+        hip_mid = compute_midpoint(lm, LM.LEFT_HIP, LM.RIGHT_HIP)
+        if hip_mid:
+            hip_xs.append(hip_mid.x)
+            hip_ys.append(hip_mid.y)
+            hip_zs.append(hip_mid.z)
+
+    if len(hip_xs) < 3:
+        return False, ""
+
+    # If all hip coordinates are within 1mm of origin, it's hip-centered data.
+    max_magnitude = max(max(abs(x) for x in hip_xs),
+                        max(abs(y) for y in hip_ys),
+                        max(abs(z) for z in hip_zs))
+    if max_magnitude < 0.001:
+        return True, "hip stays at origin (MediaPipe single-camera format)"
+
+    # If hip XYZ variance is essentially zero, same thing even if not at origin.
+    x_range = max(hip_xs) - min(hip_xs)
+    y_range = max(hip_ys) - min(hip_ys)
+    z_range = max(hip_zs) - min(hip_zs)
+    total_range = x_range + y_range + z_range
+    if total_range < 0.003:
+        return True, f"hip total XYZ range {total_range*1000:.1f}mm across sampled frames — not stereo data"
+
+    return False, ""
 
 
 def scale_position(pos, hip_center_mocap, scale_factor):
@@ -986,6 +1103,17 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                 if lm:
                     frames[i]['landmarks_3d'] = _convert_mp_frame(lm)
 
+        # HARD BLOCK v5.7: reject monocular (hip-centered) data upfront.
+        # Retargeting hip-centered data produces a character that stretches in
+        # place — there's no way to recover world-space hip translation.
+        is_mono, mono_reason = detect_monocular_data(frames)
+        if is_mono:
+            msg = (f"Monocular/hip-centered data detected: {mono_reason}. "
+                   f"Only RTM stereo takes can be retargeted.")
+            DiagLog.info(f"[HARD BLOCK] {msg}")
+            self.report({'ERROR'}, msg)
+            return {'CANCELLED'}
+
         # Calibration frame for proportion measurement
         cal_idx = min(self.calibration_frame, len(frames) - 1)
         if cal_idx != 0:
@@ -1014,6 +1142,24 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                 cutoff_body=self.butter_cutoff_body,
                 cutoff_feet=self.butter_cutoff_feet
             )
+
+        # HARD BLOCK v5.7: L/R bone-length symmetry across the whole take.
+        # The solver will enforce calibrated lengths downstream, but a take
+        # where >5% of raw frames show >15% L/R divergence is a sign of
+        # camera misalignment or using the wrong calibration pair, and the
+        # solver can't rescue that.
+        sym_ok, sym_stats, sym_problems = check_lr_bone_symmetry(frames)
+        for bone_name, s in sym_stats.items():
+            if s.get('total', 0):
+                DiagLog.data(f"L/R {bone_name}",
+                    f"max={s['max_ratio']:.2f}x bad={s.get('bad_pct', 0):.1f}%")
+        if not sym_ok:
+            DiagLog.info("[HARD BLOCK] L/R bone lengths diverge systematically:")
+            for p in sym_problems:
+                DiagLog.info(f"    ✗ {p}")
+            msg = "L/R bone asymmetry: " + "; ".join(sym_problems)
+            self.report({'ERROR'}, msg)
+            return {'CANCELLED'}
 
         # =====================
         # PROPORTIONAL SCALING
@@ -1047,24 +1193,33 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
 
         global_scale = scales['global']
 
-        # Validate calibration frame pose quality
+        # Validate calibration frame pose quality (v5.7: HARD BLOCK on critical)
         DiagLog.section(f"CALIBRATION FRAME {cal_idx} POSE QUALITY CHECK")
         pose_quality = validate_frame0_pose(first_landmarks, mocap_props)
-        if pose_quality['ok']:
-            DiagLog.info(f"Frame {cal_idx} pose: OK (clean A-pose)")
-        else:
-            DiagLog.info(f"Frame {cal_idx} pose: PROBLEMS DETECTED")
-            for w in pose_quality['warnings']:
-                DiagLog.info(f"  ⚠ {w}")
         if 'spine_tilt_deg' in pose_quality:
             DiagLog.data("Spine tilt from vertical", f"{pose_quality['spine_tilt_deg']:.1f}°")
         if 'arm_asymmetry_pct' in pose_quality:
             DiagLog.data("Arm length asymmetry", f"{pose_quality['arm_asymmetry_pct']:.1f}%")
+        if 'leg_asymmetry_pct' in pose_quality:
+            DiagLog.data("Leg length asymmetry", f"{pose_quality['leg_asymmetry_pct']:.1f}%")
         if 'shoulder_width' in pose_quality:
             DiagLog.data("Shoulder width", f"{pose_quality['shoulder_width']:.3f}m")
         for side in ['L', 'R']:
             if f'wrist_{side}_dz' in pose_quality:
                 DiagLog.data(f"Wrist {side} vs hip dZ", f"{pose_quality[f'wrist_{side}_dz']:+.3f}m")
+
+        for w in pose_quality['warnings']:
+            DiagLog.info(f"  ⚠ {w}")
+
+        if not pose_quality['ok']:
+            DiagLog.info(f"[HARD BLOCK] Frame {cal_idx} A-pose quality check failed:")
+            for c in pose_quality['critical']:
+                DiagLog.info(f"    ✗ {c}")
+            msg = (f"A-pose check failed ({len(pose_quality['critical'])} critical): "
+                   + "; ".join(pose_quality['critical']))
+            self.report({'ERROR'}, msg)
+            return {'CANCELLED'}
+        DiagLog.info(f"Frame {cal_idx} pose: OK (clean A-pose)")
 
         # Hip height is determined by leg length, not spine length.
         # Use average leg scale for vertical positioning to prevent hunching.
@@ -1127,6 +1282,26 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                 foot_z_offset[side_key] = sum(z_samples) / len(z_samples)
         DiagLog.data("Foot Z offset L", f"{foot_z_offset['L']:.4f}m")
         DiagLog.data("Foot Z offset R", f"{foot_z_offset['R']:.4f}m")
+
+        # HARD BLOCK v5.7: foot Z offset asymmetry.
+        # This was the #1 failure in take_20260420_230051 — L=0.67m vs R=0.19m.
+        # Asymmetric per-side ankle Z baseline bakes triangulation bias into
+        # every frame's pin/unpin decision; L foot pinned 0/293 while R pinned
+        # 250/293 because the two feet oscillated around totally different
+        # nominal Z. No downstream damper can fix this; re-record instead.
+        foot_z_asym = abs(foot_z_offset['L'] - foot_z_offset['R'])
+        DiagLog.data("Foot Z symmetry", f"|L-R|={foot_z_asym*100:.1f}cm")
+        if foot_z_asym > 0.08:
+            msg = (f"FOOT Z ASYMMETRY {foot_z_asym*100:.1f}cm "
+                   f"(L={foot_z_offset['L']:.3f}m vs R={foot_z_offset['R']:.3f}m) — "
+                   f"the two ankles triangulate to very different floor heights "
+                   f"across the first {OFFSET_SAMPLE_FRAMES} frames. This is "
+                   f"camera geometry asymmetry (one camera resolves one foot "
+                   f"better than the other). Move cameras to a more symmetric "
+                   f"position or re-record with performer further from cameras.")
+            DiagLog.info(f"[HARD BLOCK] {msg}")
+            self.report({'ERROR'}, msg)
+            return {'CANCELLED'}
 
         # Arm splay limit (v4.8): high fixed safety net.
         # v4.4's ARM_SPLAY_MAX=0.10 destroyed arm raises. v4.7 tried context-
@@ -1198,14 +1373,30 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
             "upper_arm_fk.L": None, "forearm_fk.L": None,
             "upper_arm_fk.R": None, "forearm_fk.R": None,
         }
+        # v5.7: Track how long each bone has been held so we can release
+        # toward rest pose instead of freezing forever. Frames 263–315 in the
+        # v5.5 take had upper_arm_fk.L stuck at (0.485, 0.246, -0.839) for 50+
+        # frames because the stability boost kept confidence alive while the
+        # direction never actually changed. These counters + timeout break that.
+        frames_since_arm_update = {
+            "upper_arm_fk.L": 0, "forearm_fk.L": 0,
+            "upper_arm_fk.R": 0, "forearm_fk.R": 0,
+        }
         ARM_HOLD_CONF_THRESHOLD = 0.3  # below this, use last-good instead of rest
+        ARM_FREEZE_TIMEOUT_FRAMES = 15  # after this many identical holds, release
+        ARM_FREEZE_RELEASE_FRAMES = 8   # slerp back to rest over this many frames
 
         # v4.7: Track previous arm FK directions for stability-based confidence.
         # When direction is stable frame-to-frame (dot product near 1.0), the FK
         # data is trustworthy even if wrist-shoulder distance is short (armrest).
+        # v5.7: stability boost now only applies when the BASE confidence is
+        # already non-zero. Previously it could rescue genuinely bad data
+        # (ratio < 0.55 → base conf 0) just because the direction was "stable",
+        # which is exactly the feedback loop that caused the 50-frame freeze.
         prev_arm_dir = {"L": None, "R": None}
         ARM_STABILITY_BOOST = 0.5  # max confidence boost from direction stability
         ARM_STABILITY_DOT_THRESHOLD = 0.95  # dot product above this = stable
+        ARM_STABILITY_BASE_CONF_MIN = 0.15  # require this much base conf to boost
 
         # v4.6: Track sit transition frame for dense logging
         sit_transition_frame = None  # frame_idx when sit state last changed
@@ -1591,15 +1782,17 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 arm_fk_conf = max(0.0, (arm_ratio - 0.55) / 0.25)
 
                             # v4.7: Direction stability boost.
-                            # If shoulder→elbow direction is stable, the FK data
-                            # is trustworthy even at short reach (e.g. armrests).
-                            # v5.3: Scale boost by ratio so it can't rescue garbage
-                            # data (ratio 0.5-0.6 = wrist at elbow distance).
+                            # v5.7: Gated on base confidence > ARM_STABILITY_BASE_CONF_MIN.
+                            # Before v5.7, zero-base-conf frames (arm on armrest, ratio
+                            # ≤ 0.55) could still get boosted because the direction
+                            # matched itself trivially — creating a 50+ frame freeze
+                            # since every frame "confirmed" the last one.
                             if p_el_raw is not None:
                                 cur_dir = (p_el_raw - p_sh_raw)
                                 if cur_dir.length > 0.01:
                                     cur_dir = cur_dir.normalized()
-                                    if prev_arm_dir[side] is not None:
+                                    if (prev_arm_dir[side] is not None
+                                            and arm_fk_conf >= ARM_STABILITY_BASE_CONF_MIN):
                                         dot = cur_dir.dot(prev_arm_dir[side])
                                         if dot > ARM_STABILITY_DOT_THRESHOLD:
                                             stab_t = (dot - ARM_STABILITY_DOT_THRESHOLD) / (1.0 - ARM_STABILITY_DOT_THRESHOLD)
@@ -1654,21 +1847,40 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 ua_bone.rotation_mode = 'QUATERNION'
                                 ua_rot = compute_fk_rotation(ua_bone, target_dir, 'auto')
 
-                                # v4.6: Last-good-pose fallback for seated arms.
-                                # Instead of blending to identity (arms at sides),
-                                # hold the last good FK rotation when confidence drops.
+                                # v4.6 / v5.7: Last-good-pose fallback with freeze timeout.
+                                # Instead of blending to identity, we hold the last good
+                                # FK rotation when confidence drops. But if we've been
+                                # holding for >ARM_FREEZE_TIMEOUT_FRAMES, slerp back
+                                # toward rest over ARM_FREEZE_RELEASE_FRAMES so a bad
+                                # low-conf patch can't freeze the arm indefinitely.
+                                ua_freeze_released = False
                                 if arm_fk_conf >= ARM_HOLD_CONF_THRESHOLD:
-                                    # Good confidence — use computed rotation, save as last-good
                                     if arm_fk_conf < 1.0:
-                                        # Partial confidence: blend toward last-good (not identity)
                                         fallback = last_good_arm_rot[ua_name] or Quaternion()
                                         ua_rot = fallback.slerp(ua_rot, arm_fk_conf)
                                     last_good_arm_rot[ua_name] = ua_rot.copy()
+                                    frames_since_arm_update[ua_name] = 0
                                 else:
-                                    # Low confidence — hold last-good pose
+                                    frames_since_arm_update[ua_name] += 1
                                     if last_good_arm_rot[ua_name] is not None:
-                                        ua_rot = last_good_arm_rot[ua_name].copy()
-                                    # else: no last-good yet, use computed (first frames)
+                                        hold_frames = frames_since_arm_update[ua_name]
+                                        if hold_frames > ARM_FREEZE_TIMEOUT_FRAMES:
+                                            # Release: slerp held rotation toward rest
+                                            release_t = min(
+                                                1.0,
+                                                (hold_frames - ARM_FREEZE_TIMEOUT_FRAMES)
+                                                / ARM_FREEZE_RELEASE_FRAMES
+                                            )
+                                            ua_rot = last_good_arm_rot[ua_name].slerp(
+                                                Quaternion(), release_t)
+                                            last_good_arm_rot[ua_name] = ua_rot.copy()
+                                            ua_freeze_released = True
+                                            if do_log or release_t >= 1.0:
+                                                DiagLog.info(
+                                                    f"    ARM_FREEZE_RESET {ua_name} "
+                                                    f"held={hold_frames}f t={release_t:.2f}")
+                                        else:
+                                            ua_rot = last_good_arm_rot[ua_name].copy()
 
                                 ua_bone.rotation_quaternion = ua_rot
                                 ua_bone.keyframe_insert(data_path="rotation_quaternion")
@@ -1684,7 +1896,9 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 ua_expected_matrix = parent_mat @ rest_off @ ua_rot.to_matrix().to_4x4()
 
                                 if do_log:
-                                    hold_str = " HOLD" if arm_fk_conf < ARM_HOLD_CONF_THRESHOLD and last_good_arm_rot[ua_name] is not None else ""
+                                    hold_str = ""
+                                    if arm_fk_conf < ARM_HOLD_CONF_THRESHOLD and last_good_arm_rot[ua_name] is not None:
+                                        hold_str = " RELEASE" if ua_freeze_released else " HOLD"
                                     clamp_str = " CLAMPED" if splay_clamped else ""
                                     ydamp_str = f" raw_y={raw_ua_y:.3f} YDAMP" if sit_blend > 0 else ""
                                     DiagLog.data(f"  arm_fk.{ua_name}",
@@ -1731,21 +1945,42 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 fa_rot = compute_fk_rotation(
                                     fa_bone, target_dir, ua_expected_matrix)
 
-                                # v4.6: Same last-good-pose logic for forearm
+                                # v4.6 / v5.7: Same last-good-pose + freeze timeout for forearm
+                                fa_freeze_released = False
                                 if arm_fk_conf >= ARM_HOLD_CONF_THRESHOLD:
                                     if arm_fk_conf < 1.0:
                                         fallback = last_good_arm_rot[fa_name] or Quaternion()
                                         fa_rot = fallback.slerp(fa_rot, arm_fk_conf)
                                     last_good_arm_rot[fa_name] = fa_rot.copy()
+                                    frames_since_arm_update[fa_name] = 0
                                 else:
+                                    frames_since_arm_update[fa_name] += 1
                                     if last_good_arm_rot[fa_name] is not None:
-                                        fa_rot = last_good_arm_rot[fa_name].copy()
+                                        hold_frames = frames_since_arm_update[fa_name]
+                                        if hold_frames > ARM_FREEZE_TIMEOUT_FRAMES:
+                                            release_t = min(
+                                                1.0,
+                                                (hold_frames - ARM_FREEZE_TIMEOUT_FRAMES)
+                                                / ARM_FREEZE_RELEASE_FRAMES
+                                            )
+                                            fa_rot = last_good_arm_rot[fa_name].slerp(
+                                                Quaternion(), release_t)
+                                            last_good_arm_rot[fa_name] = fa_rot.copy()
+                                            fa_freeze_released = True
+                                            if do_log or release_t >= 1.0:
+                                                DiagLog.info(
+                                                    f"    ARM_FREEZE_RESET {fa_name} "
+                                                    f"held={hold_frames}f t={release_t:.2f}")
+                                        else:
+                                            fa_rot = last_good_arm_rot[fa_name].copy()
 
                                 fa_bone.rotation_quaternion = fa_rot
                                 fa_bone.keyframe_insert(data_path="rotation_quaternion")
 
                                 if do_log:
-                                    hold_str = " HOLD" if arm_fk_conf < ARM_HOLD_CONF_THRESHOLD and last_good_arm_rot[fa_name] is not None else ""
+                                    hold_str = ""
+                                    if arm_fk_conf < ARM_HOLD_CONF_THRESHOLD and last_good_arm_rot[fa_name] is not None:
+                                        hold_str = " RELEASE" if fa_freeze_released else " HOLD"
                                     ydamp_fa_str = f" raw_y={raw_fa_y:.3f} YDAMP" if sit_blend > 0 else ""
                                     DiagLog.data(f"  arm_fk.{fa_name}",
                                         f"dir=({target_dir.x:.3f},{target_dir.y:.3f},{target_dir.z:.3f}){ydamp_fa_str}{hold_str}")

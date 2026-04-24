@@ -71,7 +71,12 @@ JOINT_ANGLE_DEFS = [
     (LM.RIGHT_HIP, LM.RIGHT_KNEE, LM.RIGHT_ANKLE, 'knee_r'),
 ]
 
-DIRECTION_SMOOTH_ALPHA = 0.5
+DIRECTION_SMOOTH_ALPHA = 0.5          # baseline EMA weight
+DIRECTION_SMOOTH_ALPHA_LOWCONF = 0.15  # trust previous heavily when a joint is noisy
+DIRECTION_SMOOTH_ALPHA_JUMP = 0.85     # let large, high-conf direction changes through
+DIRECTION_LOWCONF_THRESHOLD = 0.4      # joint conf below this -> use LOWCONF α
+DIRECTION_GOODCONF_THRESHOLD = 0.5     # joint conf above this -> allow JUMP α
+DIRECTION_JUMP_DOT = 0.7               # cos(45°) — dir change beyond this counts as "jump"
 LOG_INTERVAL = 50
 
 
@@ -127,8 +132,9 @@ def _clamp_angle(parent_pos, joint_pos, child_pos, min_deg, max_deg, bone_length
 
 
 class SkeletonSolver:
-    def __init__(self, n_cal_frames=30):
+    def __init__(self, n_cal_frames=30, direction_smooth_alpha=DIRECTION_SMOOTH_ALPHA):
         self.n_cal_frames = n_cal_frames
+        self.direction_smooth_alpha = float(direction_smooth_alpha)
         self.bone_lengths = {}
         self.calibrated = False
         self._stats = {
@@ -138,6 +144,8 @@ class SkeletonSolver:
             'length_deltas': [],
             'frames_solved': 0,
             'frames_skipped': 0,
+            'smooth_alpha_lowconf_frames': 0,
+            'smooth_alpha_jump_frames': 0,
         }
 
     def _get_point(self, landmarks, idx):
@@ -156,47 +164,132 @@ class SkeletonSolver:
         return all(self._get_point(landmarks, idx) is not None for idx in required)
 
     def calibrate(self, frames):
+        """
+        Collect bone-length samples from clean-pose frames only.
+
+        v5.7: each candidate frame must pass quality gates BEFORE its samples
+        are admitted. Gates reject frames where:
+          - L/R bone pairs differ by >12% (triangulation asymmetry)
+          - Hip Z deviates from running median by >3σ (sitting/crouching
+            contaminating an otherwise-standing calibration window)
+          - Shoulder midpoint above hip midpoint by <0.25m (slouched)
+        If fewer than MIN_GOOD_FRAMES survive, the solve aborts with an error
+        rather than silently calibrating on bad data.
+        """
+        MIN_GOOD_FRAMES = 20
+        MAX_LR_ASYM = 0.12  # 12% between L/R bone lengths
+        MAX_HIP_Z_SIGMA = 3.0
+        MIN_SHOULDER_HIP_DZ = 0.25
+
         samples = {name: [] for _, _, name in BONE_DEFS}
         for vname in VIRTUAL_BONE_NAMES:
             samples[vname] = []
 
-        good_frames = 0
+        # Pass 1: compute per-frame bone lengths for all candidates, also
+        # track hip Z so we can compute running median + sigma.
+        candidates = []
         for frame in frames:
             lm = frame.get('landmarks_3d', {})
             if not lm or not self._all_body_present(lm):
                 continue
 
+            per_frame = {}
             for parent_idx, child_idx, name in BONE_DEFS:
                 p = self._get_point(lm, parent_idx)
                 c = self._get_point(lm, child_idx)
-                if p is not None and c is not None:
-                    length = np.linalg.norm(c - p)
-                    if 0.01 < length < 1.5:
-                        samples[name].append(length)
+                if p is None or c is None:
+                    continue
+                length = float(np.linalg.norm(c - p))
+                if 0.01 < length < 1.5:
+                    per_frame[name] = length
 
             ls = self._get_point(lm, LM.LEFT_SHOULDER)
             rs = self._get_point(lm, LM.RIGHT_SHOULDER)
             lh = self._get_point(lm, LM.LEFT_HIP)
             rh = self._get_point(lm, LM.RIGHT_HIP)
+            if ls is None or rs is None or lh is None or rh is None:
+                continue
 
-            if ls is not None and rs is not None and lh is not None and rh is not None:
-                hip_mid = (lh + rh) / 2
-                shoulder_mid = (ls + rs) / 2
-                spine_len = np.linalg.norm(shoulder_mid - hip_mid)
-                if 0.1 < spine_len < 1.0:
-                    samples['spine'].append(spine_len)
+            hip_mid = (lh + rh) / 2
+            shoulder_mid = (ls + rs) / 2
+            spine_len = float(np.linalg.norm(shoulder_mid - hip_mid))
+            if 0.1 < spine_len < 1.0:
+                per_frame['spine'] = spine_len
+            hw = float(np.linalg.norm(lh - rh))
+            if 0.05 < hw < 0.6:
+                per_frame['hip_width'] = hw
 
-                hw = np.linalg.norm(lh - rh)
-                if 0.05 < hw < 0.6:
-                    samples['hip_width'].append(hw)
+            candidates.append({
+                'bones': per_frame,
+                'hip_z': float(hip_mid[2]),
+                'shoulder_hip_dz': float(shoulder_mid[2] - hip_mid[2]),
+            })
 
-            good_frames += 1
+        # Pass 2: derive hip-Z statistics across all candidates, then gate
+        hip_zs = np.array([c['hip_z'] for c in candidates]) if candidates else np.array([])
+        if len(hip_zs) > 0:
+            hip_z_med = float(np.median(hip_zs))
+            hip_z_sigma = float(np.std(hip_zs))
+        else:
+            hip_z_med, hip_z_sigma = 0.0, 0.0
+
+        good_frames = 0
+        rejected = {'asymmetry': 0, 'hip_z': 0, 'slouch': 0}
+
+        def _lr_pair_ok(pf, l_name, r_name):
+            l = pf.get(l_name)
+            r = pf.get(r_name)
+            if l is None or r is None:
+                return True  # can't check → don't reject
+            if max(l, r) <= 0:
+                return True
+            return abs(l - r) / max(l, r) <= MAX_LR_ASYM
+
+        for cand in candidates:
             if good_frames >= self.n_cal_frames:
                 break
+            pf = cand['bones']
+
+            # Gate: L/R asymmetry
+            pairs_ok = all([
+                _lr_pair_ok(pf, 'upper_arm_l', 'upper_arm_r'),
+                _lr_pair_ok(pf, 'forearm_l', 'forearm_r'),
+                _lr_pair_ok(pf, 'thigh_l', 'thigh_r'),
+                _lr_pair_ok(pf, 'shin_l', 'shin_r'),
+            ])
+            if not pairs_ok:
+                rejected['asymmetry'] += 1
+                continue
+
+            # Gate: hip Z far from median (sitting/crouching contamination)
+            if (hip_z_sigma > 0 and
+                    abs(cand['hip_z'] - hip_z_med) > MAX_HIP_Z_SIGMA * hip_z_sigma):
+                rejected['hip_z'] += 1
+                continue
+
+            # Gate: slouched pose
+            if cand['shoulder_hip_dz'] < MIN_SHOULDER_HIP_DZ:
+                rejected['slouch'] += 1
+                continue
+
+            for name, length in pf.items():
+                samples[name].append(length)
+            good_frames += 1
 
         print(f"\n[SOLVER] ═══════════════════════════════════════════════════")
-        print(f"[SOLVER] Bone length calibration ({good_frames} frames sampled)")
+        print(f"[SOLVER] Bone length calibration ({good_frames} clean frames, "
+              f"{sum(rejected.values())} rejected: "
+              f"asym={rejected['asymmetry']} hipZ={rejected['hip_z']} "
+              f"slouch={rejected['slouch']})")
         print(f"[SOLVER] ───────────────────────────────────────────────────")
+
+        if good_frames < MIN_GOOD_FRAMES:
+            print(f"[SOLVER] ✗ Calibration FAILED — only {good_frames} clean frames "
+                  f"survived (need ≥{MIN_GOOD_FRAMES}). The capture does not "
+                  f"contain enough clean standing frames to calibrate bone lengths.")
+            print(f"[SOLVER] ═══════════════════════════════════════════════════\n")
+            self.calibrated = False
+            return False
 
         min_samples = max(5, good_frames // 3)
         for name in [n for _, _, n in BONE_DEFS] + VIRTUAL_BONE_NAMES:
@@ -376,16 +469,46 @@ class SkeletonSolver:
         return result
 
     def _temporal_smooth_directions(self, all_solved_frames):
-        """EMA on bone direction vectors, then reconstruct positions.
+        """Confidence-weighted EMA on bone direction vectors.
 
-        Smooths joint angles without corrupting bone lengths.
+        v5.7: α varies per-frame-per-bone based on joint confidence:
+          - Either endpoint conf < DIRECTION_LOWCONF_THRESHOLD → α = LOWCONF
+            (trust previous heavily; don't let a bad frame propagate).
+          - Both endpoints conf ≥ DIRECTION_GOODCONF_THRESHOLD AND
+            current direction jumps sharply from previous (dot < JUMP_DOT)
+            → α = JUMP (let legitimate sit/stand transitions through).
+          - Otherwise → baseline α (from __init__).
+
+        Fixes the pre-v5.7 symptom where a fixed α=0.5 would blend one bad
+        low-confidence frame into several subsequent frames, producing the
+        "arm freeze at armrest" pattern.
         """
         n = len(all_solved_frames)
         if n < 3:
             return all_solved_frames
 
         all_chains = ARM_CHAINS + LEG_CHAINS
-        alpha = DIRECTION_SMOOTH_ALPHA
+        baseline_alpha = self.direction_smooth_alpha
+
+        # Per-frame confidence lookup (per keypoint)
+        confidences = []
+        for frame in all_solved_frames:
+            conf_dict = frame.get('confidence') or {}
+            if conf_dict:
+                parsed = {}
+                for k, v in conf_dict.items():
+                    try:
+                        parsed[int(k)] = float(v)
+                    except (TypeError, ValueError):
+                        continue
+                confidences.append(parsed)
+            else:
+                confidences.append(None)
+
+        def _joint_conf(i, idx):
+            if confidences[i] is None:
+                return 1.0  # no confidence info → don't downweight
+            return confidences[i].get(int(idx), 1.0)
 
         bone_directions = {}
         bone_keys_ordered = []
@@ -413,7 +536,7 @@ class SkeletonSolver:
                 else:
                     bone_directions[key].append(None)
 
-        def _ema_smooth(dirs):
+        def _ema_smooth(dirs, parent_idx, child_idx):
             smoothed = [None] * len(dirs)
             running = None
             for i, d in enumerate(dirs):
@@ -422,15 +545,35 @@ class SkeletonSolver:
                     continue
                 if running is None:
                     running = d.copy()
+                    smoothed[i] = running.copy()
+                    continue
+
+                # Confidence of parent and child on this frame
+                parent_conf = _joint_conf(i, parent_idx)
+                child_conf = _joint_conf(i, child_idx)
+                min_conf = min(parent_conf, child_conf)
+
+                if min_conf < DIRECTION_LOWCONF_THRESHOLD:
+                    a = DIRECTION_SMOOTH_ALPHA_LOWCONF
+                    self._stats['smooth_alpha_lowconf_frames'] += 1
                 else:
-                    running = alpha * d + (1 - alpha) * running
-                    running = _safe_normalize(running)
+                    dot = float(np.dot(d, running))
+                    if (min_conf >= DIRECTION_GOODCONF_THRESHOLD
+                            and dot < DIRECTION_JUMP_DOT):
+                        a = DIRECTION_SMOOTH_ALPHA_JUMP
+                        self._stats['smooth_alpha_jump_frames'] += 1
+                    else:
+                        a = baseline_alpha
+
+                running = a * d + (1 - a) * running
+                running = _safe_normalize(running)
                 smoothed[i] = running.copy()
             return smoothed
 
         smoothed_dirs = {}
         for key, dirs in bone_directions.items():
-            smoothed_dirs[key] = _ema_smooth(dirs)
+            parent_idx, child_idx, _ = key
+            smoothed_dirs[key] = _ema_smooth(dirs, parent_idx, child_idx)
 
         result_frames = []
         for i, frame in enumerate(all_solved_frames):
@@ -495,7 +638,10 @@ class SkeletonSolver:
             new_frame['landmarks_3d'] = new_lm
             solved.append(new_frame)
 
-        print(f"\n[SOLVER] Applying temporal direction smoothing (α={DIRECTION_SMOOTH_ALPHA})...")
+        print(f"\n[SOLVER] Applying temporal direction smoothing "
+              f"(α baseline={self.direction_smooth_alpha}, "
+              f"low-conf={DIRECTION_SMOOTH_ALPHA_LOWCONF}, "
+              f"jump={DIRECTION_SMOOTH_ALPHA_JUMP})...")
         smoothed = self._temporal_smooth_directions(solved)
 
         self._print_summary(len(frames))
@@ -518,6 +664,11 @@ class SkeletonSolver:
             mean_delta = np.mean(s['length_deltas'])
             print(f"[SOLVER]   Max bone correction: {s['max_length_delta']:.4f}m")
             print(f"[SOLVER]   Mean worst-per-frame: {mean_delta:.4f}m")
+        lc = s.get('smooth_alpha_lowconf_frames', 0)
+        jm = s.get('smooth_alpha_jump_frames', 0)
+        if lc or jm:
+            print(f"[SOLVER]   Low-conf smoothing: {lc} bone-frames")
+            print(f"[SOLVER]   Jump-mode smoothing: {jm} bone-frames")
         print(f"[SOLVER] ═══════════════════════════════════════════════════\n")
 
     def get_metadata(self):
@@ -528,4 +679,7 @@ class SkeletonSolver:
             'max_length_correction_m': round(self._stats['max_length_delta'], 4),
             'frames_solved': self._stats['frames_solved'],
             'frames_skipped': self._stats['frames_skipped'],
+            'direction_smooth_alpha': self.direction_smooth_alpha,
+            'smooth_alpha_lowconf_frames': self._stats.get('smooth_alpha_lowconf_frames', 0),
+            'smooth_alpha_jump_frames': self._stats.get('smooth_alpha_jump_frames', 0),
         }

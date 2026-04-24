@@ -36,7 +36,7 @@ motion data onto Rigify character rigs. For a short film.
 - `MelodicCapRTM/blender_addon/` — Blender addon
   - `melodiccap_rtm_addon.py` — Main addon (v5.6): imports JSON takes, retargets to JaxRigify
 
-## Blender Addon - Current State (v5.6)
+## Blender Addon - Current State (v5.7)
 - Proportional retargeting: measures mocap vs rig proportions from frame 0
 - **Hybrid mode (default)**: Arms use FK rotations, legs use IK positioning
 - Torso: yaw (rest-subtracted + depth-damped) + pitch (rest-subtracted) (v5.0)
@@ -151,6 +151,38 @@ motion data onto Rigify character rigs. For a short film.
 - **Seated torso pitch clamp (SEATED_PITCH_MIN=-20°, SEATED_PITCH_MAX=+35°)**: prevents
   extreme backward lean when seated. Take 2 showed -30.2° pitch (extreme recline),
   now clamped to -20°. Forward lean up to 35° still allowed.
+
+### v5.7 — Hard A-pose block, arm freeze timeout, confidence-weighted solver
+- **HARD BLOCK on bad takes** (addon `validate_frame0_pose` +
+  `check_lr_bone_symmetry`): monocular data, A-pose spine tilt >25°,
+  hip Z <0.6m, arm/leg asymmetry >10%, foot-Z offset asymmetry >8cm, or
+  L/R bone length divergence >15% on >5% of frames all return
+  `{'CANCELLED'}` with a clear error. The foot-Z asymmetry gate in
+  particular catches the 48cm L/R catastrophe from take_20260420_230051
+  that would have pinned L foot 0/293 frames if silently rescued.
+- **Arm freeze timeout** (addon): the v4.7 direction-stability boost could
+  rescue a zero-base-conf frame (wrist ratio ≤0.55 = arm on armrest) just
+  because the direction matched itself, and the hold-pose fallback then
+  kept that rotation for 50+ frames. Fixed two ways:
+  (1) stability boost now requires base conf ≥ 0.15 before firing,
+  (2) `last_good_arm_rot` has a 15-frame held-timeout that slerps back to
+  rest over 8 frames, logged as `ARM_FREEZE_RESET`.
+- **Confidence-weighted solver smoothing** (skeleton_solver):
+  `DIRECTION_SMOOTH_ALPHA` is now a baseline; per-frame, per-bone α is
+  `LOWCONF=0.15` when either endpoint has conf <0.4 (trust previous,
+  don't let a bad frame propagate), `JUMP=0.85` when both endpoints
+  ≥0.5 and direction changes sharply (dot <0.7 — legitimate sit/stand
+  transition should flow through), else baseline. Exposed as
+  `offline_processor.py --direction-smooth-alpha`.
+- **Quality-gated bone calibration** (skeleton_solver): calibration
+  samples now pass three gates — L/R pair asymmetry ≤12%, hip Z within
+  ±3σ of running median, shoulder-hip dZ ≥0.25m. Fewer than 20 surviving
+  frames → solve aborts with an error (previously silently calibrated
+  on bad data).
+- **Per-keypoint confidence in offline_processor output**: multi-pair and
+  single-pair paths now emit `confidence[idx] = min(2D_conf_a, 2D_conf_b)`
+  per triangulated keypoint so the solver (and future addon passes) can
+  weight by it.
 
 ### v5.6 — Revert v5.5 FOOT_Z_FLOOR regression, fix pinning speed reference
 - **Removed FOOT_Z_FLOOR clamp**: the v5.5 floor-at-15cm-below-ground check created

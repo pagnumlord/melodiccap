@@ -186,7 +186,8 @@ def process_take(raw_path, calibration_path, smooth=True,
                  kalman_process=1e-4, kalman_measure=1e-2,
                  pair_rms_max=PAIR_RMS_MAX_DEFAULT,
                  min_baseline=MIN_BASELINE_DEFAULT, force_pair=None,
-                 use_skeleton_solver=True):
+                 use_skeleton_solver=True,
+                 direction_smooth_alpha=0.5):
     """
     Process a single raw detection file into triangulated 3D output.
 
@@ -299,7 +300,8 @@ def process_take(raw_path, calibration_path, smooth=True,
         return _process_single_pair(raw_path, raw_data, frames, primary_cal,
                                     smooth, min_conf, skip_face_hands,
                                     kalman_process, kalman_measure,
-                                    use_skeleton_solver=use_skeleton_solver)
+                                    use_skeleton_solver=use_skeleton_solver,
+                                    direction_smooth_alpha=direction_smooth_alpha)
 
     # Multi-pair mode: per-frame pair selection.
     # For each frame, score all pairs by mean reprojection error, then route
@@ -370,6 +372,17 @@ def process_take(raw_path, calibration_path, smooth=True,
         if points_3d:
             out_frame["landmarks_3d"] = {str(k): v for k, v in points_3d.items()}
             triangulated_count += 1
+            # v5.7: store per-keypoint confidence (min of winning pair's 2D conf)
+            # so the solver can use it for confidence-weighted smoothing.
+            if best_pair_keys:
+                conf_dict = {}
+                d1 = dets.get(best_pair_keys[0], {})
+                d2 = dets.get(best_pair_keys[1], {})
+                for k in points_3d:
+                    c1 = d1.get(k, (0, 0, 0))[2] if k in d1 else 0.0
+                    c2 = d2.get(k, (0, 0, 0))[2] if k in d2 else 0.0
+                    conf_dict[str(k)] = round(min(c1, c2), 3)
+                out_frame['confidence'] = conf_dict
 
         # Preserve raw 2D
         for key in ['raw_2d_a', 'raw_2d_b', 'raw_2d_c']:
@@ -393,7 +406,10 @@ def process_take(raw_path, calibration_path, smooth=True,
     # Skeleton solver: enforce fixed bone lengths + joint angle limits
     solver_meta = None
     if use_skeleton_solver:
-        solver = SkeletonSolver(n_cal_frames=30)
+        solver = SkeletonSolver(
+            n_cal_frames=30,
+            direction_smooth_alpha=direction_smooth_alpha,
+        )
         output_frames = solver.solve_sequence(output_frames)
         solver_meta = solver.get_metadata()
 
@@ -408,7 +424,8 @@ def process_take(raw_path, calibration_path, smooth=True,
 def _process_single_pair(raw_path, raw_data, frames, calibration,
                          smooth, min_conf, skip_face_hands,
                          kalman_process, kalman_measure,
-                         use_skeleton_solver=True):
+                         use_skeleton_solver=True,
+                         direction_smooth_alpha=0.5):
     """Original single-pair processing pipeline."""
     output_frames = []
     triangulated_count = 0
@@ -426,6 +443,13 @@ def _process_single_pair(raw_path, raw_data, frames, calibration,
         if points_3d:
             out_frame["landmarks_3d"] = {str(k): v for k, v in points_3d.items()}
             triangulated_count += 1
+            # v5.7: per-keypoint confidence = min(conf_a, conf_b)
+            conf_dict = {}
+            for k in points_3d:
+                c_a = det_a.get(k, (0, 0, 0))[2] if k in det_a else 0.0
+                c_b = det_b.get(k, (0, 0, 0))[2] if k in det_b else 0.0
+                conf_dict[str(k)] = round(min(c_a, c_b), 3)
+            out_frame['confidence'] = conf_dict
 
         # Preserve raw 2D
         for key in ['raw_2d_a', 'raw_2d_b', 'raw_2d_c']:
@@ -440,7 +464,10 @@ def _process_single_pair(raw_path, raw_data, frames, calibration,
     # Skeleton solver: enforce fixed bone lengths + joint angle limits
     solver_meta = None
     if use_skeleton_solver:
-        solver = SkeletonSolver(n_cal_frames=30)
+        solver = SkeletonSolver(
+            n_cal_frames=30,
+            direction_smooth_alpha=direction_smooth_alpha,
+        )
         output_frames = solver.solve_sequence(output_frames)
         solver_meta = solver.get_metadata()
 
@@ -523,6 +550,10 @@ def main():
                         help='Min stereo baseline in meters (default: 0.8)')
     parser.add_argument('--no-skeleton', action='store_true',
                         help='Disable skeleton solver (bone length + angle limit enforcement)')
+    parser.add_argument('--direction-smooth-alpha', type=float, default=0.5,
+                        help='Baseline EMA α for solver direction smoothing (default: 0.5). '
+                             'Lower values trust previous frame more. Per-frame α is '
+                             'modulated by joint confidence; this sets the baseline.')
 
     args = parser.parse_args()
 
@@ -547,6 +578,7 @@ def main():
             min_baseline=args.min_baseline,
             force_pair=args.pair,
             use_skeleton_solver=not args.no_skeleton,
+            direction_smooth_alpha=args.direction_smooth_alpha,
         )
         if result:
             processed += 1
