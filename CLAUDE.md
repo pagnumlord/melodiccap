@@ -34,9 +34,9 @@ motion data onto Rigify character rigs. For a short film.
     (`python apply_solver.py path/to/take.json` → writes `*_solved.json`)
   - `chain_calibration.py` — Derives AC stereo pair from AB+BC chain
 - `MelodicCapRTM/blender_addon/` — Blender addon
-  - `melodiccap_rtm_addon.py` — Main addon (v5.6): imports JSON takes, retargets to JaxRigify
+  - `melodiccap_rtm_addon.py` — Main addon (v5.8): imports JSON takes, retargets to JaxRigify
 
-## Blender Addon - Current State (v5.7)
+## Blender Addon - Current State (v5.8)
 - Proportional retargeting: measures mocap vs rig proportions from frame 0
 - **Hybrid mode (default)**: Arms use FK rotations, legs use IK positioning
 - Torso: yaw (rest-subtracted + depth-damped) + pitch (rest-subtracted) (v5.0)
@@ -55,6 +55,7 @@ motion data onto Rigify character rigs. For a short film.
 - Seated torso pitch clamp: -20° to +35° to prevent extreme lean (v5.2)
 - Seated leg lateral damping: 0.25x on X component to correct camera bias (v4.8)
 - Seated arm depth damping: 0.30x on Y component of upper arm AND forearm FK (v5.0)
+  — bypassed when arm is extended forward (ratio>0.70, raw_y>0.20) so guitar/reach poses survive (v5.8)
 - Yaw depth damping: 0.35x on Y component before yaw atan2 (v5.0)
 - Yaw rest subtraction: frame 0 yaw bias removed (mirrors pitch pattern) (v5.0)
 - Arm velocity clamp: rejects >8 m/s hand IK spikes
@@ -151,6 +152,29 @@ motion data onto Rigify character rigs. For a short film.
 - **Seated torso pitch clamp (SEATED_PITCH_MIN=-20°, SEATED_PITCH_MAX=+35°)**: prevents
   extreme backward lean when seated. Take 2 showed -30.2° pitch (extreme recline),
   now clamped to -20°. Forward lean up to 35° still allowed.
+
+### v5.8 — Forward-reach bypass, A-pose-hold warning, head-turn diagnostic
+- **Seated arm depth-damp bypass when reaching forward** (addon, upper arm
+  ~line 1837 and forearm ~line 1937): the v4.9 `SEATED_ARM_DEPTH_DAMP=0.30`
+  was tuned for "arms on armrests" where Y>0 is depth noise. But poses like
+  "sitting with guitar" put hands forward at center — Y is real reach, not
+  noise. Damping it to 30% pulled elbows back into the body and collapsed
+  hands into the lap. Fix: detect `arm_extended_forward` when
+  `arm_ratio > 0.70 AND raw_y > 0.20` and skip both the upper-arm Y damp
+  and the forearm seated-rest blend. Logged as `BYPASS (extended forward)`.
+- **A-pose-hold quality warning** (addon, after foot_z_offset block ~line 1285):
+  `foot_z_offset[side]` averages the first 20 frames. If the performer
+  walked during frames 5-20, swing-phase ankle Z biases the offset and feet
+  float through the take. New scan tracks max hip-XY velocity over the
+  same 20-frame window; if it exceeds 5cm/frame (~1m/s, clearly walking),
+  logs a `[WARNING] A-pose calibration window contained motion`. Soft
+  warning, not a hard block — A-poses can have legitimate small wobble.
+- **Head-turn velocity diagnostic** (addon, neck angular-velocity clamp
+  ~line 1727 + import-complete summary): `NECK_MAX_ANGULAR_VEL=8°/frame`
+  catches depth-noise spikes but also smears intentional fast head turns.
+  Now counts clamp fires in `mocap_props['_neck_clamp_fires']` and reports
+  at end-of-import: `HEAD_TURN_LIMITED: N/total frames (X.X%)`. >5% logs
+  a `[WARNING]` recommending a slower head turn or a higher cap.
 
 ### v5.7 — Hard A-pose block, arm freeze timeout, confidence-weighted solver
 - **HARD BLOCK on bad takes** (addon `validate_frame0_pose` +

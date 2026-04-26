@@ -1,5 +1,5 @@
 """
-MelodicCap RTM Blender Addon v5.7
+MelodicCap RTM Blender Addon v5.8
 ===================================
 Imports JSON motion capture data and retargets to JaxRigify armature.
 
@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (5, 7),
+    "version": (5, 8),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -1283,6 +1283,36 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         DiagLog.data("Foot Z offset L", f"{foot_z_offset['L']:.4f}m")
         DiagLog.data("Foot Z offset R", f"{foot_z_offset['R']:.4f}m")
 
+        # v5.8: A-pose hold quality — if the performer was already walking
+        # during the foot_z_offset sample window, the averaged ankle Z bakes
+        # in swing-phase ankle height (foot in air) and feet float for the
+        # whole take. This is a soft warning, not a hard block — there's
+        # legitimate small wobble in any A-pose.
+        max_hip_xy_vel = 0.0
+        prev_hip = None
+        for i in range(OFFSET_SAMPLE_FRAMES):
+            lm = frames[i].get('landmarks_3d', {})
+            hip_c = compute_midpoint(lm, LM.LEFT_HIP, LM.RIGHT_HIP)
+            if hip_c is not None:
+                if prev_hip is not None:
+                    dx = hip_c.x - prev_hip.x
+                    dy = hip_c.y - prev_hip.y
+                    vel = (dx * dx + dy * dy) ** 0.5
+                    if vel > max_hip_xy_vel:
+                        max_hip_xy_vel = vel
+                prev_hip = hip_c
+        DiagLog.data("A-pose hip max XY vel",
+                     f"{max_hip_xy_vel*100:.1f}cm/frame "
+                     f"(over first {OFFSET_SAMPLE_FRAMES} frames)")
+        if max_hip_xy_vel > 0.05:
+            DiagLog.info(
+                f"[WARNING] A-pose calibration window contained motion: "
+                f"max hip XY velocity {max_hip_xy_vel*100:.1f}cm/frame "
+                f"(threshold 5cm/frame). Foot Z offsets may be biased by "
+                f"swing-phase ankle height, causing feet to float during "
+                f"the take. Hold A-pose still for the first ~2 seconds "
+                f"of next recording.")
+
         # HARD BLOCK v5.7: foot Z offset asymmetry.
         # This was the #1 failure in take_20260420_230051 — L=0.67m vs R=0.19m.
         # Asymmetric per-side ankle Z baseline bakes triangulation bias into
@@ -1692,12 +1722,18 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         # v5.4: Neck angular velocity limiting.
                         # Prevents violent head-snap from depth spikes — caps
                         # change to 8°/frame (~160°/s at 20fps).
+                        # v5.8: count fires for end-of-import diagnostic.
+                        # If the clamp limited >5% of frames, the user's head
+                        # turn was probably faster than the clamp allows and
+                        # got smeared.
                         NECK_MAX_ANGULAR_VEL = math.radians(8)
                         prev_neck_angle = mocap_props.get('_prev_neck_angle', neck_rot.angle)
                         if neck_rot.angle - prev_neck_angle > NECK_MAX_ANGULAR_VEL:
                             neck_rot = Quaternion(neck_rot.axis, prev_neck_angle + NECK_MAX_ANGULAR_VEL)
+                            mocap_props['_neck_clamp_fires'] = mocap_props.get('_neck_clamp_fires', 0) + 1
                         elif prev_neck_angle - neck_rot.angle > NECK_MAX_ANGULAR_VEL:
                             neck_rot = Quaternion(neck_rot.axis, max(0, prev_neck_angle - NECK_MAX_ANGULAR_VEL))
+                            mocap_props['_neck_clamp_fires'] = mocap_props.get('_neck_clamp_fires', 0) + 1
                         mocap_props['_prev_neck_angle'] = neck_rot.angle
 
                         if head_confidence < 1.0:
@@ -1811,6 +1847,11 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         ua_mapping = V2R_MAPPING.get(ua_name)
                         ua_expected_matrix = None
                         ua_damped_dir = None
+                        # v5.8: shared with forearm — bypass seated depth damping
+                        # when the arm is genuinely extended forward (e.g. holding
+                        # a guitar in front of the body). Set inside the upper-arm
+                        # block once raw_y is known.
+                        arm_extended_forward = False
                         if ua_bone and ua_mapping:
                             p_start = get_landmark(landmarks_3d, ua_mapping[0])
                             p_end = get_landmark(landmarks_3d, ua_mapping[1])
@@ -1832,14 +1873,25 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 # v4.9: Seated arm depth damping — reduce depth axis noise
                                 # in Y component when sitting (arms should hang down, not
                                 # project forward/backward from triangulation error)
+                                # v5.8: bypass when arm is reaching forward — long arm
+                                # (ratio > 0.70) with strong positive Y is real reach,
+                                # not depth noise. Damping it collapses guitar-hold pose.
                                 raw_ua_y = target_dir.y
-                                if sit_blend > 0:
+                                arm_extended_forward = (
+                                    arm_ratio > 0.70
+                                    and raw_ua_y > 0.20
+                                )
+                                if sit_blend > 0 and not arm_extended_forward:
                                     damp = 1.0 - sit_blend * (1.0 - SEATED_ARM_DEPTH_DAMP)
                                     target_dir.y *= damp
                                     target_dir = target_dir.normalized()
                                     # v5.1: Log upper arm depth damping
                                     if do_log:
                                         DiagLog.data(f"    {ua_name} ua_damp", f"raw_y={raw_ua_y:.3f} damp={damp:.2f} near_trans={near_transition}")
+                                elif sit_blend > 0 and arm_extended_forward:
+                                    if do_log:
+                                        DiagLog.data(f"    {ua_name} ua_damp",
+                                            f"raw_y={raw_ua_y:.3f} BYPASS (extended forward, ratio={arm_ratio:.2f})")
 
                                 # Save upper arm's final direction for forearm rest context
                                 ua_damped_dir = target_dir.copy()
@@ -1923,8 +1975,12 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 # noise-dominated. Instead of trying to salvage bad data
                                 # (Y=0 amplifies X noise via normalization), blend toward
                                 # a neutral rest direction based on data quality (arm_ratio).
+                                # v5.8: bypass the rest blend when the arm is reaching
+                                # forward (set in upper-arm block). Mirrors the upper-arm
+                                # bypass — guitar hold has hands forward at center, not
+                                # depth noise.
                                 raw_fa_y = target_dir.y
-                                if sit_blend > 0:
+                                if sit_blend > 0 and not arm_extended_forward:
                                     FOREARM_INHERIT_LATERAL = 0.5
                                     fa_rest_x = ua_damped_dir.x * FOREARM_INHERIT_LATERAL if ua_damped_dir else 0.0
                                     FOREARM_REST_DIR = Vector((fa_rest_x, 0, -1)).normalized()
@@ -1940,6 +1996,10 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                     target_dir = target_dir.lerp(seated_dir, sit_blend).normalized()
                                     if do_log:
                                         DiagLog.data(f"    {fa_name} forearm", f"ratio={arm_ratio:.3f} raw_y={raw_fa_y:.3f} rest=({FOREARM_REST_DIR.x:.2f},{FOREARM_REST_DIR.y:.2f},{FOREARM_REST_DIR.z:.2f}) dir=({target_dir.x:.2f},{target_dir.y:.2f},{target_dir.z:.2f})")
+                                elif sit_blend > 0 and arm_extended_forward:
+                                    if do_log:
+                                        DiagLog.data(f"    {fa_name} forearm",
+                                            f"ratio={arm_ratio:.3f} raw_y={raw_fa_y:.3f} BYPASS (extended forward)")
 
                                 fa_bone.rotation_mode = 'QUATERNION'
                                 fa_rot = compute_fk_rotation(
@@ -2708,6 +2768,28 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         DiagLog.section("IMPORT COMPLETE")
         DiagLog.data("Total frames processed", len(frames))
         DiagLog.data("Blender frame range", f"0 - {int(frames[-1].get('timestamp', 0) * fps)}")
+
+        # v5.8: head-turn velocity diagnostic.
+        # NECK_MAX_ANGULAR_VEL = 8°/frame catches depth-noise spikes but also
+        # smears intentional fast head turns. Surface the count so the user
+        # can decide whether to slow head turns in the next take.
+        neck_fires = mocap_props.get('_neck_clamp_fires', 0)
+        neck_fires_pct = (neck_fires / max(1, len(frames))) * 100.0
+        if neck_fires == 0:
+            DiagLog.data("HEAD_TURN_LIMITED", "0 frames")
+        elif neck_fires_pct > 5.0:
+            DiagLog.info(
+                f"[WARNING] HEAD_TURN_LIMITED: neck angular velocity clamp "
+                f"fired on {neck_fires}/{len(frames)} frames "
+                f"({neck_fires_pct:.1f}%). >5% suggests the head turn was "
+                f"faster than the 8°/frame clamp; slow head turns in the "
+                f"next take or raise NECK_MAX_ANGULAR_VEL.")
+        else:
+            DiagLog.info(
+                f"[INFO] HEAD_TURN_LIMITED: neck angular velocity clamp "
+                f"fired on {neck_fires}/{len(frames)} frames "
+                f"({neck_fires_pct:.1f}%). Within expected range for "
+                f"noise-only fires.")
 
         self.report({'INFO'},
                     f"Imported {len(frames)} frames from {os.path.basename(self.filepath)} "
