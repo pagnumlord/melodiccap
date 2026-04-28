@@ -108,7 +108,13 @@ class Config:
     # Body mode gives 2-3x better FPS. Switch to wholebody only if you
     # need finger data and have the GPU headroom.
     POSE_MODE = 'body'
-    POSE_QUALITY = 'fast'       # 'fast' (lightweight, best FPS), 'balanced', or 'accurate'
+    POSE_QUALITY = 'balanced'   # 'fast' (lightweight, best FPS), 'balanced', or 'accurate'
+                                # v5.9: changed 'fast'→'balanced'. RTMPose-Lite (fast)
+                                # has a known bias where occluded/edge-of-frame ankle
+                                # keypoints get pulled toward the hip in 2D, producing
+                                # ~85cm Z asymmetry in the triangulated 3D position.
+                                # Balanced (RTMPose-m) detects ankles correctly. ~10-15ms
+                                # slower per frame; still fits in our ~50ms budget.
     POSE_DEVICE = 'cuda'        # 'cuda' or 'cpu'
     MIN_KEYPOINT_CONFIDENCE = 0.3
 
