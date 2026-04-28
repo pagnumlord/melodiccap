@@ -1,5 +1,5 @@
 """
-Diagnostic: dump first N frames of left/right hip & ankle Z values
+Diagnostic: dump first N frames of left/right hip & ankle 3D positions
 to identify the systematic foot-Z asymmetry bug.
 
 Usage:
@@ -26,41 +26,63 @@ def main():
     print(f"Total frames: {len(frames)}")
     print(f"Dumping first {min(n, len(frames))} frames\n")
 
-    print(f"{'frm':>4} {'hip_l_z':>8} {'hip_r_z':>8} "
-          f"{'ank_l_z':>8} {'ank_r_z':>8} {'L_diff':>8} {'R_diff':>8}")
-    print("-" * 60)
+    # Header: full XYZ for left hip vs left ankle, plus identity check
+    print(f"{'frm':>4}  {'hip_l (xyz)':>26}  {'ankle_l (xyz)':>26}  "
+          f"{'identical?':>11}  {'dist':>6}")
+    print("-" * 90)
+
+    identical_count = 0
+    near_count = 0  # within 1mm
 
     for i, f in enumerate(frames[:n]):
         lm = f.get("landmarks_3d", {})
-        hl = lm.get("11", [0, 0, None])[2]
-        hr = lm.get("12", [0, 0, None])[2]
-        al = lm.get("15", [0, 0, None])[2]
-        ar = lm.get("16", [0, 0, None])[2]
+        hl = lm.get("11")
+        al = lm.get("15")
 
-        if any(v is None for v in (hl, hr, al, ar)):
+        if hl is None or al is None:
             print(f"f{i:3d}: missing keypoint(s)")
             continue
 
-        # Diff = hip_z - ankle_z (should be ~0.85m for an adult standing)
-        l_diff = hl - al
-        r_diff = hr - ar
+        # Distance between left hip and left ankle (should be ~0.85m for a
+        # standing adult — not zero!)
+        dx = hl[0] - al[0]
+        dy = hl[1] - al[1]
+        dz = hl[2] - al[2]
+        dist = (dx*dx + dy*dy + dz*dz) ** 0.5
 
-        print(f"f{i:3d}: {hl:+8.3f} {hr:+8.3f} {al:+8.3f} {ar:+8.3f} "
-              f"{l_diff:+8.3f} {r_diff:+8.3f}")
+        identical = (hl == al)
+        near = dist < 0.001
 
-    # Summary
-    al_vals = [f["landmarks_3d"].get("15", [0, 0, 0])[2]
-               for f in frames if "15" in f.get("landmarks_3d", {})]
-    ar_vals = [f["landmarks_3d"].get("16", [0, 0, 0])[2]
-               for f in frames if "16" in f.get("landmarks_3d", {})]
+        if identical:
+            identical_count += 1
+            tag = "EXACT"
+        elif near:
+            near_count += 1
+            tag = "<1mm"
+        elif dist < 0.05:
+            tag = "<5cm"
+        else:
+            tag = ""
 
-    if al_vals and ar_vals:
-        print(f"\nFull-take left ankle Z:  min={min(al_vals):+.3f} "
-              f"max={max(al_vals):+.3f} mean={sum(al_vals)/len(al_vals):+.3f} "
-              f"frames_present={len(al_vals)}/{len(frames)}")
-        print(f"Full-take right ankle Z: min={min(ar_vals):+.3f} "
-              f"max={max(ar_vals):+.3f} mean={sum(ar_vals)/len(ar_vals):+.3f} "
-              f"frames_present={len(ar_vals)}/{len(frames)}")
+        print(f"f{i:3d}: "
+              f"({hl[0]:+.3f},{hl[1]:+.3f},{hl[2]:+.3f})  "
+              f"({al[0]:+.3f},{al[1]:+.3f},{al[2]:+.3f})  "
+              f"{tag:>11}  {dist:.4f}")
+
+    print(f"\nFrames where hip_l == ankle_l (exact): {identical_count}/{min(n, len(frames))}")
+    print(f"Frames where hip_l ~= ankle_l (<1mm):   {near_count}/{min(n, len(frames))}")
+
+    # Full-take stats on left ankle Z
+    al_z = [f["landmarks_3d"].get("15", [0, 0, 0])[2]
+            for f in frames if "15" in f.get("landmarks_3d", {})]
+    ar_z = [f["landmarks_3d"].get("16", [0, 0, 0])[2]
+            for f in frames if "16" in f.get("landmarks_3d", {})]
+
+    if al_z and ar_z:
+        print(f"\nFull-take left ankle Z:  min={min(al_z):+.3f} "
+              f"max={max(al_z):+.3f} mean={sum(al_z)/len(al_z):+.3f}")
+        print(f"Full-take right ankle Z: min={min(ar_z):+.3f} "
+              f"max={max(ar_z):+.3f} mean={sum(ar_z)/len(ar_z):+.3f}")
 
 
 if __name__ == "__main__":
