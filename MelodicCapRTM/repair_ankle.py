@@ -1,14 +1,17 @@
 """
-Repair takes where the LEFT ANKLE was triangulated near the LEFT HIP
-(rtmlib 'fast' / RTMPose-Lite lower-body keypoint bias).
+Repair takes where one ankle was triangulated near its hip due to
+occlusion in one camera. The bug is bidirectional — sometimes left,
+sometimes right, depending on which foot is occluded from camera A's
+view in any given frame.
 
-For each frame, if left_ankle is anatomically impossible (within 30cm
-of left_hip in Z), replace it with a mirror of right_ankle across the
-hip midline. Same for left_knee if also broken.
+For each frame, if EITHER ankle is anatomically impossible (within 30cm
+of its same-side hip in Z), and the OTHER side has a plausible ankle,
+mirror the good ankle across the hip midline to repair the bad one.
+Same for knees if also broken.
 
-Imperfect (loses real left-vs-right walking asymmetry) but gets the
-take past v5.7's foot-Z asymmetry hard block so the rest can be cleaned
-up with keyframes in Blender.
+Imperfect (loses real left-vs-right walking asymmetry on repaired
+frames) but gets the take past v5.7's foot-Z asymmetry hard block so
+the rest can be cleaned up with keyframes in Blender.
 
 Usage:
     python repair_ankle.py takes/take_NAME.json
@@ -16,7 +19,6 @@ Usage:
 """
 import json
 import sys
-import copy
 
 
 def is_broken(hip, ankle, threshold=0.30):
@@ -27,12 +29,12 @@ def is_broken(hip, ankle, threshold=0.30):
     return abs(hip[2] - ankle[2]) < threshold
 
 
-def mirror_across_hips(left_hip, right_hip, right_pt):
-    """Mirror a right-side point across the hip midline.
+def mirror_across_hips(left_hip, right_hip, src_pt):
+    """Mirror src point across the hip midline.
     Preserves Y (forward/back) and Z (height); flips X around mid-X."""
     mid_x = (left_hip[0] + right_hip[0]) / 2.0
-    mirror_x = 2 * mid_x - right_pt[0]
-    return [mirror_x, right_pt[1], right_pt[2]]
+    mirror_x = 2 * mid_x - src_pt[0]
+    return [mirror_x, src_pt[1], src_pt[2]]
 
 
 def repair_take(in_path, out_path):
@@ -41,9 +43,9 @@ def repair_take(in_path, out_path):
 
     frames = take["frames"]
     n_total = len(frames)
-    n_ankle_repaired = 0
-    n_knee_repaired = 0
-    n_skipped = 0
+
+    counts = {"L_ankle": 0, "R_ankle": 0, "L_knee": 0, "R_knee": 0,
+              "skipped": 0, "both_bad": 0}
 
     for frame in frames:
         lm = frame.get("landmarks_3d", {})
@@ -55,32 +57,53 @@ def repair_take(in_path, out_path):
         al = lm.get("15")  # left_ankle
         ar = lm.get("16")  # right_ankle
 
-        # Need both hips and the right side to mirror from
-        if hl is None or hr is None or ar is None:
-            n_skipped += 1
+        if hl is None or hr is None:
+            counts["skipped"] += 1
             continue
 
-        # Repair left ankle if broken
-        if is_broken(hl, al):
+        # Repair ankles bidirectionally
+        l_bad = is_broken(hl, al)
+        r_bad = is_broken(hr, ar)
+        if l_bad and r_bad:
+            counts["both_bad"] += 1  # can't repair, no good reference
+        elif l_bad and ar is not None:
             lm["15"] = mirror_across_hips(hl, hr, ar)
-            n_ankle_repaired += 1
+            counts["L_ankle"] += 1
+        elif r_bad and al is not None:
+            lm["16"] = mirror_across_hips(hl, hr, al)
+            counts["R_ankle"] += 1
 
-        # Repair left knee if broken (and we have right knee to mirror)
-        if kr is not None and is_broken(hl, kl, threshold=0.20):
+        # Repair knees bidirectionally (looser threshold — knees CAN be
+        # near hip in some sit poses, so 0.20m not 0.30m)
+        l_knee_bad = is_broken(hl, kl, threshold=0.20)
+        r_knee_bad = is_broken(hr, kr, threshold=0.20)
+        if l_knee_bad and not r_knee_bad and kr is not None:
             lm["13"] = mirror_across_hips(hl, hr, kr)
-            n_knee_repaired += 1
+            counts["L_knee"] += 1
+        elif r_knee_bad and not l_knee_bad and kl is not None:
+            lm["14"] = mirror_across_hips(hl, hr, kl)
+            counts["R_knee"] += 1
 
     with open(out_path, "w") as f:
         json.dump(take, f, indent=2)
 
     print(f"\n[REPAIR] {in_path}")
-    print(f"  Total frames:           {n_total}")
-    print(f"  Left ankle repaired:    {n_ankle_repaired}/{n_total} "
-          f"({100*n_ankle_repaired/max(1,n_total):.1f}%)")
-    print(f"  Left knee repaired:     {n_knee_repaired}/{n_total} "
-          f"({100*n_knee_repaired/max(1,n_total):.1f}%)")
-    print(f"  Skipped (missing data): {n_skipped}")
-    print(f"  Output:                 {out_path}")
+    print(f"  Total frames:        {n_total}")
+    print(f"  L ankle repaired:    {counts['L_ankle']:>4}  "
+          f"({100*counts['L_ankle']/max(1,n_total):.1f}%)")
+    print(f"  R ankle repaired:    {counts['R_ankle']:>4}  "
+          f"({100*counts['R_ankle']/max(1,n_total):.1f}%)")
+    print(f"  L knee repaired:     {counts['L_knee']:>4}  "
+          f"({100*counts['L_knee']/max(1,n_total):.1f}%)")
+    print(f"  R knee repaired:     {counts['R_knee']:>4}  "
+          f"({100*counts['R_knee']/max(1,n_total):.1f}%)")
+    if counts["both_bad"]:
+        print(f"  BOTH ankles bad:     {counts['both_bad']:>4}  "
+              f"(unrepairable — both sides occluded)")
+    if counts["skipped"]:
+        print(f"  Skipped:             {counts['skipped']:>4}  "
+              f"(missing hip data)")
+    print(f"  Output:              {out_path}")
 
 
 def main():
