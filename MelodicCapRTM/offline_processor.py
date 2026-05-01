@@ -521,6 +521,26 @@ def _write_output(raw_path, raw_data, output_frames, frames,
     print(f"  [DONE] {out_path} ({mode_str})")
     print(f"         {triangulated_count}/{len(frames)} frames triangulated ({success_pct:.0f}%)")
 
+    # v5.10: report per-keypoint fallback counts so we can see if the
+    # velocity-rejection chain was firing on specific joints (the
+    # "stuck at hip / shoulder" bug).
+    fb = getattr(calibration, '_fallback_total', None) if not multi_pair else None
+    if fb:
+        landmark_names = {
+            5: "L_shoulder", 6: "R_shoulder",
+            7: "L_elbow", 8: "R_elbow",
+            9: "L_wrist", 10: "R_wrist",
+            11: "L_hip", 12: "R_hip",
+            13: "L_knee", 14: "R_knee",
+            15: "L_ankle", 16: "R_ankle",
+        }
+        bad = [(idx, n) for idx, n in fb.items() if n > 5]
+        bad.sort(key=lambda x: -x[1])
+        if bad:
+            print(f"         Fallback fires (>5 frames): "
+                  + ", ".join(f"{landmark_names.get(i, str(i))}={n}"
+                              for i, n in bad[:6]))
+
     return str(out_path)
 
 

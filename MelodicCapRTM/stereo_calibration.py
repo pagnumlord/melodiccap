@@ -154,6 +154,14 @@ class StereoCalibration:
         # Previous frame 3D points for velocity-based outlier rejection
         self._prev_points = {}
 
+        # v5.10: per-keypoint fallback streak counter. When velocity rejection
+        # would fall back to _prev_points[idx] for too many consecutive frames,
+        # we release _prev_points[idx] entirely so the next valid detection
+        # can re-seed. Without this, one bad frame poisons the slot for the
+        # rest of the take (the "stuck at hip" / "stuck at shoulder" bug).
+        self._fallback_streak = {}
+        self._fallback_total = {}  # diagnostic: total fallbacks per idx
+
         # Calibration image size (for runtime validation)
         self._cal_image_size = None
 
@@ -788,8 +796,16 @@ class StereoCalibration:
         else:
             centroid = np.array([0.0, 0.0, 1.0])
 
+        # v5.10: max consecutive frames a keypoint can fall back before we
+        # release _prev_points[idx] and re-seed from fresh data. Tuned for
+        # 13-30fps capture: 8 frames is ~0.3-0.6s, long enough to ride out
+        # genuine triangulation glitches, short enough to recover from
+        # state poisoning ("stuck at hip" / "stuck at shoulder" bug).
+        MAX_FALLBACK_STREAK = 8
+
         for idx, pt_3d in raw_points.items():
             pt = np.array(pt_3d)
+            fell_back_this_frame = False
 
             # Reject points too far from body centroid
             dist = np.linalg.norm(pt - centroid)
@@ -798,6 +814,7 @@ class StereoCalibration:
                 if idx in self._prev_points:
                     pt_3d = self._prev_points[idx]
                     pt = np.array(pt_3d)  # update pt so velocity check below uses the fallback
+                    fell_back_this_frame = True
                 else:
                     continue  # Skip entirely if no history
 
@@ -810,6 +827,28 @@ class StereoCalibration:
                 if velocity > max_vel:
                     # Use previous value instead of teleporting
                     pt_3d = self._prev_points[idx]
+                    fell_back_this_frame = True
+
+            # v5.10: stickiness-release. If we've been falling back too many
+            # frames in a row, release _prev_points[idx] entirely so the next
+            # frame's fresh measurement can re-seed (instead of getting
+            # rejected by velocity check vs. the poisoned prev).
+            if fell_back_this_frame:
+                self._fallback_streak[idx] = self._fallback_streak.get(idx, 0) + 1
+                self._fallback_total[idx] = self._fallback_total.get(idx, 0) + 1
+                if self._fallback_streak[idx] > MAX_FALLBACK_STREAK:
+                    # Release: drop the cached prev, accept the raw new
+                    # measurement, reset streak counter.
+                    pt_3d = list(raw_points[idx])
+                    pt = np.array(pt_3d)
+                    if idx in self._prev_points:
+                        del self._prev_points[idx]
+                    if idx in self.filters:
+                        for kf in self.filters[idx]:
+                            kf.reset()
+                    self._fallback_streak[idx] = 0
+            else:
+                self._fallback_streak[idx] = 0
 
             # Apply Kalman smoothing
             # Feet get higher measurement noise (trust prediction more, reject jitter)
@@ -1125,6 +1164,8 @@ class StereoCalibration:
             for f in self.filters[idx]:
                 f.reset()
         self._prev_points = {}
+        self._fallback_streak = {}
+        self._fallback_total = {}
         self._bone_lengths = {}
         self._bone_samples = {}
         self._bone_cal_frames = 0
