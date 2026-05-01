@@ -30,10 +30,20 @@ ANKLE_L, ANKLE_R = 15, 16
 
 
 def get_2d(detections, idx):
-    """detections is a dict of {idx_str: [x, y, conf]} from one camera."""
+    """detections is either:
+       - dict {idx_str: [x, y, conf]} from one camera
+       - list of [x, y] or [x, y, conf] indexed by idx
+    """
     if detections is None:
         return None
-    val = detections.get(str(idx)) or detections.get(idx)
+    if isinstance(detections, dict):
+        val = detections.get(str(idx)) or detections.get(idx)
+    elif isinstance(detections, list):
+        if idx >= len(detections):
+            return None
+        val = detections[idx]
+    else:
+        return None
     if val is None:
         return None
     return (float(val[0]), float(val[1]))
@@ -97,11 +107,11 @@ def main():
     # Try common keys for per-camera 2D detections
     sample = frames[0]
     cam_keys = []
-    for k in ("detections_a", "landmarks_2d_a", "kpts_a", "detections_2d_a"):
+    for k in ("raw_2d_a", "detections_a", "landmarks_2d_a", "kpts_a", "detections_2d_a"):
         if k in sample:
             cam_keys.append(k)
             break
-    for k in ("detections_b", "landmarks_2d_b", "kpts_b", "detections_2d_b"):
+    for k in ("raw_2d_b", "detections_b", "landmarks_2d_b", "kpts_b", "detections_2d_b"):
         if k in sample:
             cam_keys.append(k)
             break
