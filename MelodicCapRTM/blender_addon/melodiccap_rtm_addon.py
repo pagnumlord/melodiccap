@@ -1,6 +1,6 @@
 """
-MelodicCap RTM Blender Addon v5.8
-===================================
+MelodicCap RTM Blender Addon v5.11
+====================================
 Imports JSON motion capture data and retargets to JaxRigify armature.
 
 Supports two JSON formats:
@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (5, 8),
+    "version": (5, 11),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -682,7 +682,21 @@ def scale_position(pos, hip_center_mocap, scale_factor):
 # =============================================================================
 
 def smooth_frames(frames, window=5):
-    """Apply centered moving average to landmark positions."""
+    """Apply centered moving average to landmark positions.
+
+    v5.11: per-key count fix. Pre-v5.11 the divisor was the number of
+    frames in the window that had ANY landmarks_3d data — but the
+    SUM for a specific key was over only the frames where THAT key
+    was present. When triangulate_pose drops a keypoint for low
+    confidence (e.g. wrist briefly occluded), that key would be
+    missing in some frames and the resulting average would divide
+    by too large a count, pulling the keypoint toward origin in
+    proportion to how often it was missing. Result: a wrist dropped
+    on 1 of 3 frames inflated the forearm length by ~33%, easily
+    producing the 7.81x L/R ratio observed in the addon's L/R bone
+    symmetry check despite solver output being clean. Fix is
+    per-key count tracking.
+    """
     if window < 2 or len(frames) < window:
         return frames
 
@@ -694,22 +708,26 @@ def smooth_frames(frames, window=5):
         end = min(len(frames), i + half + 1)
 
         avg_landmarks = {}
-        count = 0
+        key_counts = {}
         for j in range(start, end):
             lm = frames[j].get('landmarks_3d', {})
             if not lm:
                 continue
-            count += 1
             for key, coords in lm.items():
                 if key not in avg_landmarks:
                     avg_landmarks[key] = [0.0, 0.0, 0.0]
+                    key_counts[key] = 0
                 avg_landmarks[key][0] += coords[0]
                 avg_landmarks[key][1] += coords[1]
                 avg_landmarks[key][2] += coords[2]
+                key_counts[key] += 1
 
-        if count > 0:
-            for key in avg_landmarks:
-                avg_landmarks[key] = [c / count for c in avg_landmarks[key]]
+        for key in list(avg_landmarks.keys()):
+            c = key_counts[key]
+            if c > 0:
+                avg_landmarks[key] = [v / c for v in avg_landmarks[key]]
+            else:
+                del avg_landmarks[key]
 
         new_frame = dict(frames[i])
         new_frame['landmarks_3d'] = avg_landmarks

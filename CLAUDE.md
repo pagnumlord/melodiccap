@@ -34,9 +34,12 @@ motion data onto Rigify character rigs. For a short film.
     (`python apply_solver.py path/to/take.json` → writes `*_solved.json`)
   - `chain_calibration.py` — Derives AC stereo pair from AB+BC chain
 - `MelodicCapRTM/blender_addon/` — Blender addon
-  - `melodiccap_rtm_addon.py` — Main addon (v5.8): imports JSON takes, retargets to JaxRigify
+  - `melodiccap_rtm_addon.py` — Main addon (v5.11): imports JSON takes, retargets to JaxRigify
+  - `trace_forearm.py` — Forensic diagnostic for forearm L/R length per
+    pipeline stage; copies addon's smooth_frames + butterworth_filter so
+    it runs without Blender
 
-## Blender Addon - Current State (v5.8)
+## Blender Addon - Current State (v5.11)
 - Proportional retargeting: measures mocap vs rig proportions from frame 0
 - **Hybrid mode (default)**: Arms use FK rotations, legs use IK positioning
 - Torso: yaw (rest-subtracted + depth-damped) + pitch (rest-subtracted) (v5.0)
@@ -152,6 +155,47 @@ motion data onto Rigify character rigs. For a short film.
 - **Seated torso pitch clamp (SEATED_PITCH_MIN=-20°, SEATED_PITCH_MAX=+35°)**: prevents
   extreme backward lean when seated. Take 2 showed -30.2° pitch (extreme recline),
   now clamped to -20°. Forward lean up to 35° still allowed.
+
+### v5.11 — Forensic audit found smooth_frames divide-by-count bug
+The single root cause of three days of "L/R bone divergence" hard
+blocks. Symptom: addon reported forearm L/R up to 7.81x bad on 24%
+of frames, despite clean 2D detections (verified per-camera) and
+clean solver output (forearm_l=0.243m vs forearm_r=0.255m, 5%
+asymmetry).
+
+The bug, in `smooth_frames` (`melodiccap_rtm_addon.py:684-718`):
+the moving-average divisor `count` was incremented per FRAME (any
+frame with non-empty `landmarks_3d`), but each landmark's sum was
+over only the frames where THAT specific key was present. When
+`triangulate_pose` dropped a keypoint for low confidence (e.g.
+wrist briefly occluded during arm motion), the wrist's average
+divided by too large a divisor and pulled the wrist toward origin
+proportional to how often it was missing. Result: a wrist dropped
+on 1 of 3 frames inflated the forearm length by ~33%; the
+Butterworth filter compounded this. The bug was triggered by RTM's
+intermittent low-confidence wrist drops on arm raises and reaches —
+exactly what every test sequence had.
+
+Fix: per-key count tracking. The `count` is replaced by a
+`key_counts` dict so each landmark's sum is divided by the number
+of frames where THAT key was actually present.
+
+Why this was hard to see: the SOLVER enforces calibrated bone
+lengths in its output JSON, and `check_lr_bone_symmetry` is run on
+the addon's POST-smoothed coordinates, so the post-solver JSON
+looked fine on inspection but the addon's view was corrupted.
+
+Verification: `trace_forearm.py` reports forearm L/R length at
+each pipeline stage (post-solver from JSON / post-smooth_frames /
+post-Butterworth) for both buggy and fixed `smooth_frames`. On a
+broken take, stage 1 ratio stays ≤1.05x while stage 2 spikes
+≫2x; with the fix, all stages stay ≤1.10x.
+
+Implications: every take recorded in the past three days is
+already usable — the JSON files have correct solver output. No
+re-recording, no re-processing. Just reinstall the addon and
+re-import. Camera placement, calibration, detector quality, and
+recording technique were never the problem.
 
 ### v5.8 — Forward-reach bypass, A-pose-hold warning, head-turn diagnostic
 - **Seated arm depth-damp bypass when reaching forward** (addon, upper arm
@@ -401,6 +445,7 @@ currently don't block retargeting (planned enforcement in future version).
 | Head turns snap violently | No neck angular velocity limit | v5.4 adds 8°/frame cap |
 | "HIP TOO LOW" at frame 0 | Person not standing upright, or monocular data | Clean A-pose, verify stereo format |
 | `offline_processor` says "single pair" | AC/BC pairs failed quality gates (floor offset, RMS, baseline) | Calibrate all 3 pairs with floor propagation |
+| `[HARD BLOCK] L/R bone lengths diverge` (forearm/shin >2x ratio) | Pre-v5.11 `smooth_frames` divide-by-count bug; intermittent low-confidence keypoints get pulled toward origin | v5.11 per-key count fix. Verify with `trace_forearm.py` |
 
 ## Working Well
 - Frame 0 A-pose calibration and proportion measurement
