@@ -474,13 +474,14 @@ def _process_single_pair(raw_path, raw_data, frames, calibration,
     return _write_output(raw_path, raw_data, output_frames, frames,
                          triangulated_count, smooth, min_conf,
                          skip_face_hands, kalman_process, kalman_measure,
-                         solver_meta=solver_meta)
+                         solver_meta=solver_meta, calibration=calibration)
 
 
 def _write_output(raw_path, raw_data, output_frames, frames,
                   triangulated_count, smooth, min_conf,
                   skip_face_hands, kalman_process, kalman_measure,
-                  multi_pair=False, pair_labels=None, solver_meta=None):
+                  multi_pair=False, pair_labels=None, solver_meta=None,
+                  calibration=None):
     """Write output JSON file."""
     duration = raw_data.get('duration', 0)
     fps = len(output_frames) / duration if duration > 0 else 0

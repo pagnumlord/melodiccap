@@ -1034,6 +1034,15 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     "Legs stay on IK for foot pinning",
         default=True
     )
+    permissive_import: bpy.props.BoolProperty(
+        name="Permissive (skip L/R asymmetry block)",
+        description="Bypass the L/R bone-length divergence hard block. "
+                    "Use when 2-camera stereo produces intermittent depth-collapse "
+                    "on one limb (e.g. forearm during reach) but the rest of the "
+                    "take is usable. Logs as a warning instead. You'll likely "
+                    "need to keyframe-clean the bad bone in Blender",
+        default=False
+    )
 
     def execute(self, context):
         rig = context.active_object
@@ -1154,12 +1163,23 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                 DiagLog.data(f"L/R {bone_name}",
                     f"max={s['max_ratio']:.2f}x bad={s.get('bad_pct', 0):.1f}%")
         if not sym_ok:
-            DiagLog.info("[HARD BLOCK] L/R bone lengths diverge systematically:")
-            for p in sym_problems:
-                DiagLog.info(f"    ✗ {p}")
-            msg = "L/R bone asymmetry: " + "; ".join(sym_problems)
-            self.report({'ERROR'}, msg)
-            return {'CANCELLED'}
+            if getattr(self, 'permissive_import', False):
+                DiagLog.info("[WARNING] L/R bone lengths diverge "
+                             "(permissive_import enabled — proceeding anyway):")
+                for p in sym_problems:
+                    DiagLog.info(f"    ! {p}")
+                DiagLog.info("    Visually inspect; keyframe-clean the bad "
+                             "bone in pose mode if motion is wrong.")
+            else:
+                DiagLog.info("[HARD BLOCK] L/R bone lengths diverge "
+                             "systematically:")
+                for p in sym_problems:
+                    DiagLog.info(f"    ✗ {p}")
+                DiagLog.info("    Re-run import with 'Permissive' option "
+                             "checked to bypass this block.")
+                msg = "L/R bone asymmetry: " + "; ".join(sym_problems)
+                self.report({'ERROR'}, msg)
+                return {'CANCELLED'}
 
         # =====================
         # PROPORTIONAL SCALING
