@@ -282,6 +282,25 @@ def show_per_frame(per_frame, n=20, label="frames"):
             print(f"  {i:>4}  {fl:>7.3f}  {fr:>7.3f}  {r_str:>6}")
 
 
+def dump_xyz(frames_a, label_a, frames_b, label_b, n=10):
+    """Dump elbow_l/wrist_l XYZ side-by-side for two stages of frames."""
+    print(f"\n  RAW vs {label_b} — left elbow / left wrist XYZ for first {n} frames:")
+    print(f"  {'frm':>3}  {'elbow_l ('+label_a+')':>25}  {'elbow_l ('+label_b+')':>25}  "
+          f"{'wrist_l ('+label_a+')':>25}  {'wrist_l ('+label_b+')':>25}")
+    for i in range(min(n, len(frames_a))):
+        la = frames_a[i].get('landmarks_3d', {})
+        lb = frames_b[i].get('landmarks_3d', {})
+        ea = la.get(str(LEFT_ELBOW))
+        eb = lb.get(str(LEFT_ELBOW))
+        wa = la.get(str(LEFT_WRIST))
+        wb = lb.get(str(LEFT_WRIST))
+        ea_str = f"({ea[0]:+.3f},{ea[1]:+.3f},{ea[2]:+.3f})" if ea else "MISSING"
+        eb_str = f"({eb[0]:+.3f},{eb[1]:+.3f},{eb[2]:+.3f})" if eb else "MISSING"
+        wa_str = f"({wa[0]:+.3f},{wa[1]:+.3f},{wa[2]:+.3f})" if wa else "MISSING"
+        wb_str = f"({wb[0]:+.3f},{wb[1]:+.3f},{wb[2]:+.3f})" if wb else "MISSING"
+        print(f"  {i:>3}  {ea_str:>25}  {eb_str:>25}  {wa_str:>25}  {wb_str:>25}")
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python trace_forearm.py <take.json> [num_show]")
@@ -343,14 +362,27 @@ def main():
     )
     show_per_frame(pf3f, n_show)
 
+    # XYZ dump: side-by-side raw vs buggy-smoothed for the first frames.
+    # This is what made it clear the bug isn't divide-by-count — when the
+    # raw and smoothed ELBOW positions are different (and similarly for
+    # WRIST), the smoothed forearm length collapses because the per-frame
+    # solver-enforced direction varies across the smoothing window. v5.12
+    # bypasses addon smoothing on solver-output JSONs to fix this.
+    print("\n" + "=" * 60)
+    print("XYZ EVIDENCE — RAW vs SMOOTHED positions (left elbow + wrist):")
+    dump_xyz(frames, "raw", frames_smoothed, "smoothed", n=10)
+
     print("\n" + "=" * 60)
     print("INTERPRETATION:")
-    print("- If STAGE 1 ratio is small (<1.10x) but STAGE 2 jumps,")
-    print("  the buggy smooth_frames is corrupting forearm length.")
-    print("- If STAGE 2 [FIXED] keeps the ratio small (<1.10x),")
-    print("  the per-key counting fix solves the problem.")
+    print("- v5.12 bypasses addon smoothing entirely when solver_meta is")
+    print("  present in the JSON (the solver already temporally smoothed).")
+    print("- STAGE 1 ratio is what the v5.12 addon will see (clean).")
+    print("- STAGE 2 / 3 show the OLD behavior (buggy: position-averaging")
+    print("  compresses bone lengths when forearm direction varies).")
+    print("- STAGE 2 [FIXED] is v5.11's per-key count fix, which is a")
+    print("  no-op when no keys are missing (does not solve THIS bug).")
     print("- Re-process & re-import are NOT needed; existing JSONs are fine.")
-    print("  The fix lives in the addon's smooth_frames function.")
+    print("  Reinstall v5.12 addon and re-import.")
 
 
 if __name__ == '__main__':
