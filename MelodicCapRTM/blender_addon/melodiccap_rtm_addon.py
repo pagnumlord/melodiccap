@@ -1,5 +1,5 @@
 """
-MelodicCap RTM Blender Addon v5.11
+MelodicCap RTM Blender Addon v5.12
 ====================================
 Imports JSON motion capture data and retargets to JaxRigify armature.
 
@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (5, 11),
+    "version": (5, 12),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -1155,14 +1155,31 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         # =====================
         # TEMPORAL SMOOTHING
         # =====================
-        if self.smooth_window > 1:
+        # v5.12: detect solver-output JSONs. The skeleton solver does its
+        # own temporal direction smoothing in _temporal_smooth_directions
+        # and rebuilds the chain with calibrated bone lengths. Running
+        # the addon's position-space smoothing on top compresses the
+        # bone lengths whenever frame-to-frame forearm direction varies
+        # (the "L=0.085 ≈ 0.242/3" pattern documented in
+        # trace_forearm.py output). For solver-output, skip both the
+        # 3-frame moving average and the Butterworth filter.
+        solver_smoothed = bool(
+            data.get('processing_settings', {}).get('skeleton_solver')
+        )
+        if solver_smoothed:
+            DiagLog.info(
+                "[INFO] Solver-smoothed take detected; skipping addon's "
+                "moving-average and Butterworth filters (would compress "
+                "bone lengths via position-averaging — see v5.12)."
+            )
+        elif self.smooth_window > 1:
             DiagLog.info(f"Applying {self.smooth_window}-frame moving average...")
             frames = smooth_frames(frames, self.smooth_window)
 
         # =====================
         # BUTTERWORTH FILTER
         # =====================
-        if self.butterworth:
+        if not solver_smoothed and self.butterworth:
             DiagLog.info(f"Applying Butterworth filter (body={self.butter_cutoff_body}Hz, feet={self.butter_cutoff_feet}Hz)...")
             frames = butterworth_filter_landmarks(
                 frames, fps,

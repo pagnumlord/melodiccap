@@ -34,12 +34,12 @@ motion data onto Rigify character rigs. For a short film.
     (`python apply_solver.py path/to/take.json` → writes `*_solved.json`)
   - `chain_calibration.py` — Derives AC stereo pair from AB+BC chain
 - `MelodicCapRTM/blender_addon/` — Blender addon
-  - `melodiccap_rtm_addon.py` — Main addon (v5.11): imports JSON takes, retargets to JaxRigify
+  - `melodiccap_rtm_addon.py` — Main addon (v5.12): imports JSON takes, retargets to JaxRigify
   - `trace_forearm.py` — Forensic diagnostic for forearm L/R length per
     pipeline stage; copies addon's smooth_frames + butterworth_filter so
     it runs without Blender
 
-## Blender Addon - Current State (v5.11)
+## Blender Addon - Current State (v5.12)
 - Proportional retargeting: measures mocap vs rig proportions from frame 0
 - **Hybrid mode (default)**: Arms use FK rotations, legs use IK positioning
 - Torso: yaw (rest-subtracted + depth-damped) + pitch (rest-subtracted) (v5.0)
@@ -155,6 +155,36 @@ motion data onto Rigify character rigs. For a short film.
 - **Seated torso pitch clamp (SEATED_PITCH_MIN=-20°, SEATED_PITCH_MAX=+35°)**: prevents
   extreme backward lean when seated. Take 2 showed -30.2° pitch (extreme recline),
   now clamped to -20°. Forward lean up to 35° still allowed.
+
+### v5.12 — Bypass addon smoothing on solver-output JSONs (the actual fix)
+v5.11's per-key count fix turned out to be a no-op for solver-output
+data because no keys are missing post-solver. `trace_forearm.py`
+showed the addon's `smooth_frames` produces identical buggy output
+with both buggy and fixed versions. The real bug is that
+position-space averaging on solver output **compresses bone lengths**
+when frame-to-frame forearm direction varies — the addon averages
+positions, but the solver enforces lengths *per frame* with
+independently-computed directions, so even small direction noise
+causes the averaged forearm to shrink. The trace numbers expose this
+exactly: `0.085 ≈ 0.242 / 3` is the smoothed length when 1 of 3
+frames in the window has the forearm pointing in a different
+direction (cosine-of-half-angle effect).
+
+The fix: detect `processing_settings.skeleton_solver` in the JSON
+and skip the addon's `smooth_frames` + `butterworth_filter_landmarks`
+when solver-output is detected. The solver already does temporal
+direction smoothing in `_temporal_smooth_directions`, so the addon's
+extra smoothing is redundant AND actively harmful.
+
+Logged at import as `[INFO] Solver-smoothed take detected; skipping
+addon's moving-average and Butterworth filters`. Legacy
+MediaPipe-formatted JSONs (no solver_meta) still get the original
+smoothing path, where `smooth_frames` is appropriate for raw
+single-camera 3D data.
+
+Implications: every take recorded in the past three days is usable
+as-is. The JSONs have correct solver output. Just reinstall v5.12
+and re-import — no re-recording, no re-processing.
 
 ### v5.11 — Forensic audit found smooth_frames divide-by-count bug
 The single root cause of three days of "L/R bone divergence" hard
@@ -445,7 +475,7 @@ currently don't block retargeting (planned enforcement in future version).
 | Head turns snap violently | No neck angular velocity limit | v5.4 adds 8°/frame cap |
 | "HIP TOO LOW" at frame 0 | Person not standing upright, or monocular data | Clean A-pose, verify stereo format |
 | `offline_processor` says "single pair" | AC/BC pairs failed quality gates (floor offset, RMS, baseline) | Calibrate all 3 pairs with floor propagation |
-| `[HARD BLOCK] L/R bone lengths diverge` (forearm/shin >2x ratio) | Pre-v5.11 `smooth_frames` divide-by-count bug; intermittent low-confidence keypoints get pulled toward origin | v5.11 per-key count fix. Verify with `trace_forearm.py` |
+| `[HARD BLOCK] L/R bone lengths diverge` (forearm/shin >2x ratio) on solver-output | Position-averaging in addon's `smooth_frames` compresses bone lengths when forearm direction varies frame-to-frame; the addon was double-smoothing on top of the solver | v5.12 bypasses addon smoothing when solver_meta is present. Verify with `trace_forearm.py` |
 
 ## Working Well
 - Frame 0 A-pose calibration and proportion measurement
