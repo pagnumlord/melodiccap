@@ -18,9 +18,13 @@ from kalman import SimpleKalman
 
 # Reasonable limits for a human body in a room
 OUTLIER_MAX_DISTANCE = 3.0      # meters from body centroid
-OUTLIER_MAX_VELOCITY = 0.3      # meters per frame (~6.3 m/s at 21fps — fast arm swing)
-# Tighter limits for feet — they move slower than hands and jitter is most visible
-OUTLIER_MAX_VELOCITY_FEET = 0.15 # meters per frame (~3.15 m/s at 21fps — fast step)
+# v5.13: thresholds in m/s (framerate-independent). Per-frame threshold is
+# computed at runtime as MAX / fps. Previously was a fixed m/frame value tuned
+# for 21fps; at 8fps (body_accurate detector) the implicit threshold dropped
+# to ~2.4 m/s — well within range of legitimate fast motion (reach, sit-down,
+# turn) — causing 9-frame freezes mid-motion (the "walking contortion").
+OUTLIER_MAX_VELOCITY_MPS = 12.0       # m/s — generous human extreme (very fast punch/throw)
+OUTLIER_MAX_VELOCITY_FEET_MPS = 6.0   # m/s — feet rarely exceed this
 FOOT_INDICES = {15, 16, 17, 18, 19, 20, 21, 22}  # ankles + foot keypoints
 BONE_PAIRS_FOR_SCALE = [
     # (parent_idx, child_idx, expected_length_meters, tolerance_ratio)
@@ -153,6 +157,11 @@ class StereoCalibration:
 
         # Previous frame 3D points for velocity-based outlier rejection
         self._prev_points = {}
+
+        # v5.13: capture fps for framerate-aware velocity gating. Set by
+        # offline_processor before processing a take. Default 21 = the
+        # original calibration target (the m/s thresholds were tuned for it).
+        self._capture_fps = 21.0
 
         # v5.10: per-keypoint fallback streak counter. When velocity rejection
         # would fall back to _prev_points[idx] for too many consecutive frames,
@@ -820,10 +829,13 @@ class StereoCalibration:
 
             # Reject impossible frame-to-frame velocity
             # Feet get a tighter threshold — they're noisier and jitter is most visible
+            # v5.13: convert m/s threshold to per-frame using actual capture fps.
             if idx in self._prev_points:
                 prev = np.array(self._prev_points[idx])
                 velocity = np.linalg.norm(pt - prev)
-                max_vel = OUTLIER_MAX_VELOCITY_FEET if idx in FOOT_INDICES else OUTLIER_MAX_VELOCITY
+                fps = max(self._capture_fps, 1.0)
+                max_vel_mps = OUTLIER_MAX_VELOCITY_FEET_MPS if idx in FOOT_INDICES else OUTLIER_MAX_VELOCITY_MPS
+                max_vel = max_vel_mps / fps
                 if velocity > max_vel:
                     # Use previous value instead of teleporting
                     pt_3d = self._prev_points[idx]

@@ -122,8 +122,13 @@ def _clamp_angle(parent_pos, joint_pos, child_pos, min_deg, max_deg, bone_length
     axis = axis / axis_norm
 
     parent_dir = _safe_normalize(v_parent)
-    c = np.cos(np.pi - target_rad)
-    s = np.sin(np.pi - target_rad)
+    # Rotate parent_dir by target_rad around axis (Rodrigues). The result is
+    # the child direction at angle target_rad from the parent direction.
+    # Previous code rotated by (pi - target_rad) instead, which clamped to
+    # the *complement* angle (e.g. 178° clamped to 5° instead of 175°),
+    # collapsing wrists onto shoulders whenever elbow noise pushed past 175°.
+    c = np.cos(target_rad)
+    s = np.sin(target_rad)
     new_child_dir = parent_dir * c + np.cross(axis, parent_dir) * s + axis * np.dot(axis, parent_dir) * (1 - c)
     new_child_dir = _safe_normalize(new_child_dir)
 

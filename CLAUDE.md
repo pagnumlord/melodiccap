@@ -156,6 +156,61 @@ motion data onto Rigify character rigs. For a short film.
   extreme backward lean when seated. Take 2 showed -30.2° pitch (extreme recline),
   now clamped to -20°. Forward lean up to 35° still allowed.
 
+### v5.13 — Capture-pipeline root causes: clamp_angle math + framerate-aware velocity gate
+
+Two distinct upstream bugs that produced the visible Blender symptoms
+("L wrist stuck on shoulder", "walking contortion", "arm raise not as
+high as v3"). Both are in the capture/processing pipeline, not the
+addon. The addon has been faithfully rendering broken solver output for
+weeks.
+
+**Bug A — `_clamp_angle` math inverted** (`skeleton_solver.py:124-128`).
+The Rodrigues rotation used `np.pi - target_rad` where it should have
+used `target_rad`. When elbow angle exceeded the 175° max ROM (e.g.
+178° on a near-straight arm with triangulation noise), the clamp
+produced 5° (fully bent, hand on shoulder) instead of 175° (slightly
+bent, hand still extended). This collapsed the wrist onto the shoulder
+on any frame where elbow angle nudged past 175°.
+
+Take 204607 (static A-pose, 80 frames): 32 frames had L_WRIST on
+L_SHOULDER pre-fix (frames 0-14, 60-79). Post-fix: 0 frames. Verified
+end-to-end: triangulation produced wrist at hip Z=0.85m for ALL 80
+frames; the clamp was the single point of failure. Same bug also
+explained "arm raise not as high as v3" — a near-straight raised arm
+would similarly get clamped to "fully bent" and collapse.
+
+R arm rarely tripped because its noise pattern kept elbow angle just
+under 175°; L arm tripped because cam B's view of the user's left side
+gave elbow angle ~178° from the same noise.
+
+**Bug B — `OUTLIER_MAX_VELOCITY` was in m/frame** (`stereo_calibration.py:21`).
+0.3 m/frame at 21fps = 6.3 m/s (the original tuning). At 8fps (the
+body_accurate detector), the SAME constant became 2.4 m/s — well
+within range of legitimate fast motion (reach for guitar, sit-down,
+turn). Triangulated 3D positions exceeding the threshold got replaced
+by held `_prev_points`, freezing the keypoint for up to 9 frames (the
+v5.10 sticky-release window). The visible result: shoulder/nose freeze
+in 3D while hips kept moving → "walking contortion" with a
+~30° spurious spine pitch swing per freeze.
+
+Fix: thresholds now in m/s (`OUTLIER_MAX_VELOCITY_MPS = 12.0`,
+`OUTLIER_MAX_VELOCITY_FEET_MPS = 6.0`), divided at runtime by an
+`_capture_fps` set on the `StereoCalibration` instance by
+`offline_processor` from `frame_count / duration`. Default 21.0 keeps
+the existing tuning for `melodic_capture` (real-time path).
+
+Verification on take 204628_raw (186 frames at 7.91 fps):
+- Pre-fix: 9-frame freezes on L_SHOULDER (70-78), nose (79-87),
+  R_SHOULDER (65-73). Spine pitch jumped from -3° to -32° in one
+  frame at frame 75. 24 L_ankle fallbacks.
+- Post-fix: zero frozen-3-frames-in-a-row keypoints across all 186
+  frames. Spine pitch ramps smoothly -3° → -29° over frames 65-79
+  (the actual bend-to-grab motion), recovers to -5° by frame 99.
+
+Implications for existing takes: re-run `offline_processor.py` on
+`*_raw.json` files. Solver output is regenerated correctly. No
+recapture needed.
+
 ### v5.12 — Bypass addon smoothing on solver-output JSONs (the actual fix)
 v5.11's per-key count fix turned out to be a no-op for solver-output
 data because no keys are missing post-solver. `trace_forearm.py`

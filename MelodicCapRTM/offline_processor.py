@@ -292,11 +292,16 @@ def process_take(raw_path, calibration_path, smooth=True,
     if has_cam_c:
         print(f"  Camera C data: present")
 
+    # v5.13: capture fps drives the framerate-aware velocity threshold.
+    duration = raw_data.get('duration', 0)
+    capture_fps = (len(frames) / duration) if duration > 0 else 21.0
+
     # For single-pair mode, use the existing triangulate_pose pipeline
     # (includes Kalman, outlier rejection, bone constraints)
     if not multi_pair:
         _, primary_cal, _, _ = cal_pairs[0]
         primary_cal.reset_filters()
+        primary_cal._capture_fps = capture_fps
         return _process_single_pair(raw_path, raw_data, frames, primary_cal,
                                     smooth, min_conf, skip_face_hands,
                                     kalman_process, kalman_measure,
@@ -313,6 +318,7 @@ def process_take(raw_path, calibration_path, smooth=True,
     # Reset filters on all calibrations
     for _, cal, _, _ in cal_pairs:
         cal.reset_filters()
+        cal._capture_fps = capture_fps
 
     output_frames = []
     triangulated_count = 0
