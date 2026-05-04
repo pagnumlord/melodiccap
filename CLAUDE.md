@@ -156,6 +156,61 @@ motion data onto Rigify character rigs. For a short film.
   extreme backward lean when seated. Take 2 showed -30.2° pitch (extreme recline),
   now clamped to -20°. Forward lean up to 35° still allowed.
 
+### v5.15 — Anatomical anchoring (shoulder_width + tightened hip_width)
+
+The visual problems on take 204628 (hands inside body during sit, torso
+"flying around" during turns) survived v5.14 because the upstream 3D data
+itself was anatomically wrong, not just the addon's gates. A diagnostic on
+the v5.13-fresh re-process showed shoulder width collapsing 44% during the
+forward bend (calibration mean 0.349m → 0.195m at frame 79) — pure depth-
+axis triangulation noise. The cameras are at a 90° baseline; when both
+shoulders move toward the cameras during a forward bend, multi-view
+correspondence weakens and the apparent inter-shoulder distance collapses.
+
+`skeleton_solver.py` was already calibrating `hip_width` and `spine` as
+virtual bones, but Step 3 (line 367-371 pre-fix) kept the raw L/R shoulder
+offsets without any width enforcement, and Step 3b's `hip_width` threshold
+of 20% allowed the diagnostic range 0.16-0.24m through (cal mean 0.199m).
+
+Three changes to `skeleton_solver.py`:
+
+1. **Add `shoulder_width` to `VIRTUAL_BONE_NAMES`** so it's calibrated
+   exactly the way `hip_width` and `spine` already were (median of clean
+   standing frames, gated by L/R asymmetry + hip-Z + slouch checks).
+2. **Per-frame shoulder width enforcement**: when raw L↔R distance
+   deviates >10% from calibration, project both shoulders symmetrically
+   around the spine-corrected `shoulder_mid` along the raw L→R axis.
+   ±10% allows real shoulder-girdle flex (shrugs, scapula rotation in
+   arm raises) but kills camera-driven collapse beyond that.
+3. **Tighten `hip_width` threshold from 20% → 10%** to match. Old 20%
+   was too loose given the diagnostic data.
+
+Verification on take 204628 (the walk + sit + grab-guitar take):
+
+| Metric | Pre-v5.15 | Post-v5.15 |
+|---|---|---|
+| Shoulder width range | 0.195 → 0.366m (span 0.171m) | 0.312 → 0.366m (span 0.054m) |
+| Worst shoulder violation | -44% from cal | -10% (at clamp) |
+| Hip width range | 0.161 → 0.239m | 0.180 → 0.220m |
+| Frames solved | 186/186 | 186/186 |
+| Angle clamps total | 63 | 64 |
+
+The 26 frames that hit the shoulder-width clamp (14% of the take) are
+exactly the ones that would have been -25% to -44% under v5.13 — pulled
+back to the anatomical -10% bound. The other 86% pass through unchanged.
+
+Implications: the existing addon retargeter consumes shoulder positions
+directly (rig_shoulder_L/R, FK arm parent matrix, torso yaw/pitch). With
+shoulders no longer collapsing to half their anatomical width during
+bends, the parent transform for arm FK should now be stable across
+torso turns — the original "torso flying around" symptom. This needs to
+be verified by re-importing the v5.15 take into Blender.
+
+Out of scope: the IK_FK property convention check on JaxRigify (Track B
+follow-up — possible cause of "hands at sides during sit" if the v5.15
+shoulder fix doesn't surface them). Test plan: a turn-only isolation take
+that exercises only torso yaw without depth collapse.
+
 ### v5.14 — Stop rejecting natural bent-arm poses as "low confidence"
 
 After v5.13 fixed the upstream wrist-on-shoulder source, the addon's old

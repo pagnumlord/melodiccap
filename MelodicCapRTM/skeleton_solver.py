@@ -33,7 +33,7 @@ BONE_DEFS = [
     (LM.RIGHT_KNEE, LM.RIGHT_ANKLE, 'shin_r'),
 ]
 
-VIRTUAL_BONE_NAMES = ['spine', 'hip_width']
+VIRTUAL_BONE_NAMES = ['spine', 'hip_width', 'shoulder_width']
 
 ARM_CHAINS = [
     ('left_arm', LM.LEFT_SHOULDER, [
@@ -223,6 +223,9 @@ class SkeletonSolver:
             hw = float(np.linalg.norm(lh - rh))
             if 0.05 < hw < 0.6:
                 per_frame['hip_width'] = hw
+            sw = float(np.linalg.norm(ls - rs))
+            if 0.10 < sw < 0.7:
+                per_frame['shoulder_width'] = sw
 
             candidates.append({
                 'bones': per_frame,
@@ -364,23 +367,64 @@ class SkeletonSolver:
         else:
             shoulder_mid = shoulder_mid_raw
 
-        # Step 3: shoulders (raw offsets from corrected shoulder_mid, no width enforcement)
+        # Step 3: shoulders — anchor to calibrated shoulder_width (v5.15).
+        #
+        # Diagnostic on take 204628 showed shoulder width collapsing 44%
+        # during forward bends (0.349m → 0.195m), pure depth-axis triangulation
+        # noise — anatomy is fixed, the cameras just lose correspondence as
+        # both shoulders move toward them. Previously this step kept the raw
+        # half-offsets and let the collapse propagate to every downstream
+        # consumer (torso yaw/pitch, FK arms, retargeting). Now: when the
+        # raw L↔R distance deviates >10% from calibration, project both
+        # shoulders symmetrically onto the calibrated separation along the
+        # raw L→R axis. ±10% allows real shoulder-girdle flex (shrugs,
+        # scapula rotation in arm raises) but kills the >20% camera-driven
+        # collapse.
         half_offset_l = ls - shoulder_mid_raw
         half_offset_r = rs - shoulder_mid_raw
-        corrected[LM.LEFT_SHOULDER] = shoulder_mid + half_offset_l
-        corrected[LM.RIGHT_SHOULDER] = shoulder_mid + half_offset_r
+        if 'shoulder_width' in self.bone_lengths:
+            sw_cal = self.bone_lengths['shoulder_width']
+            raw_sw = float(np.linalg.norm(ls - rs))
+            sw_ratio = raw_sw / sw_cal if sw_cal > 1e-6 else 1.0
+            if abs(sw_ratio - 1.0) > 0.10 and raw_sw > 1e-6:
+                sign = 1.0 if sw_ratio > 1.0 else -1.0
+                target_sw = sw_cal * (1.0 + 0.10 * sign)
+                shoulder_axis = _safe_normalize(ls - rs)
+                # Project around the corrected shoulder_mid so the spine
+                # constraint (Step 2) still anchors them vertically.
+                corrected[LM.LEFT_SHOULDER] = shoulder_mid + shoulder_axis * (target_sw / 2)
+                corrected[LM.RIGHT_SHOULDER] = shoulder_mid - shoulder_axis * (target_sw / 2)
+                frame_deltas.append(('shoulder_width', raw_sw, target_sw, abs(raw_sw - target_sw)))
+                if do_log:
+                    print(f"[SOLVER] frame {frame_idx}: shoulder_width CORRECTED "
+                          f"raw={raw_sw:.3f}m → capped={target_sw:.3f}m "
+                          f"(ratio={sw_ratio:.2f}, cal={sw_cal:.3f}m)")
+            else:
+                corrected[LM.LEFT_SHOULDER] = shoulder_mid + half_offset_l
+                corrected[LM.RIGHT_SHOULDER] = shoulder_mid + half_offset_r
+        else:
+            corrected[LM.LEFT_SHOULDER] = shoulder_mid + half_offset_l
+            corrected[LM.RIGHT_SHOULDER] = shoulder_mid + half_offset_r
 
-        # Step 3b: hip width (soft constraint — only correct if >20% deviation)
+        # Step 3b: hip width — same anatomical anchoring as shoulders.
+        # v5.15: tightened threshold 20% → 10%. Old 20% let the diagnostic
+        # range 0.16-0.24m through (calibration mean 0.199m), so 9% of frames
+        # had >10% hip-width error post-solver.
         if 'hip_width' in self.bone_lengths:
             hw_cal = self.bone_lengths['hip_width']
-            raw_hw = np.linalg.norm(lh - rh)
+            raw_hw = float(np.linalg.norm(lh - rh))
             hw_ratio = raw_hw / hw_cal if hw_cal > 1e-6 else 1.0
-            if abs(hw_ratio - 1.0) > 0.20:
+            if abs(hw_ratio - 1.0) > 0.10 and raw_hw > 1e-6:
                 sign = 1.0 if hw_ratio > 1.0 else -1.0
-                target_hw = hw_cal * (1.0 + 0.20 * sign)
+                target_hw = hw_cal * (1.0 + 0.10 * sign)
                 hip_axis = _safe_normalize(lh - rh)
                 corrected[LM.LEFT_HIP] = hip_mid + hip_axis * (target_hw / 2)
                 corrected[LM.RIGHT_HIP] = hip_mid - hip_axis * (target_hw / 2)
+                frame_deltas.append(('hip_width', raw_hw, target_hw, abs(raw_hw - target_hw)))
+                if do_log:
+                    print(f"[SOLVER] frame {frame_idx}: hip_width CORRECTED "
+                          f"raw={raw_hw:.3f}m → capped={target_hw:.3f}m "
+                          f"(ratio={hw_ratio:.2f}, cal={hw_cal:.3f}m)")
 
         # Step 5: arm chains
         for chain_name, root_idx, segments in ARM_CHAINS:
