@@ -156,6 +156,48 @@ motion data onto Rigify character rigs. For a short film.
   extreme backward lean when seated. Take 2 showed -30.2° pitch (extreme recline),
   now clamped to -20°. Forward lean up to 35° still allowed.
 
+### v5.14 — Stop rejecting natural bent-arm poses as "low confidence"
+
+After v5.13 fixed the upstream wrist-on-shoulder source, the addon's old
+arm-confidence gates (sized for the v4.7-era pathology) started rejecting
+valid bent-arm geometry as if it were broken triangulation. Symptom: hands
+collapse "inside the body" during sitting, holding-guitar, or any reach
+where the elbow bends past ~70°. The cascade was: low arm_ratio → conf=0
+→ hold last-good FK rotation → ARM_FREEZE_TIMEOUT after 15 frames → slerp
+to rest pose.
+
+The geometric ratio (straight-line shoulder-to-wrist distance / fully-
+extended arm length) is a poor signal for "data is bad". A natural elbow
+bend at 90° gives ratio ≈ 0.71. At 60° (holding something close to body),
+ratio ≈ 0.50. The old 0.55 threshold flagged every one of those as an
+error.
+
+Five constant changes in `melodiccap_rtm_addon.py`, all serving the same
+goal: only flag a frame as "low confidence" when wrist is *actually* near
+shoulder (ratio < 0.20), not when the elbow is just bent.
+
+| Constant | Old | New | Where |
+|---|---|---|---|
+| `ARM_MIN_RATIO` (IK clamp) | 0.55 | 0.15 | line ~1458 |
+| `arm_fk_conf` band | (0.55, 0.80) | (0.10, 0.20) | line ~1883 |
+| `FA_RATIO_GOOD`, `FA_RATIO_BAD` (forearm rest blend) | 0.70, 0.55 | 0.20, 0.10 | line ~2060 |
+| `arm_extended_forward` bypass | `ratio>0.70 AND raw_y>0.20` | `raw_y>0.20` | line ~1947 |
+| Warning threshold | `ratio<0.8` | `ratio<0.20` | line ~2336 |
+
+Verification on take 204628 (the walk + sit + grab-guitar take):
+- Pre-v5.14: arm_fk_conf dropped to 0.00 from frame ~120 onward; arms
+  HELD then ARM_FREEZE_RESET fired every frame for the rest of the take;
+  visible result was hands snapping to rest pose during sitting.
+- Post-v5.14: arm_fk_conf stays at 1.0 across the whole take; zero
+  ARM_FREEZE_RESET events; hands stay where mocap captured them.
+
+Out of scope (deferred to a follow-up audit): torso pitch math, head
+pitch (currently yaw-only), the 11 depth-noise dampers, `compute_spine_fk_chain`
+(opt-in, previously regressed), and the architectural question of whether
+to swap the custom retargeter for a Rokoko-Studio-Live-style bone-mapping
+layer with custom-entry support for Rigify's 4-spine chain. That audit is
+in `/root/.claude/plans/we-need-the-torso-luminous-adleman.md`, Track B.
+
 ### v5.13 — Capture-pipeline root causes: clamp_angle math + framerate-aware velocity gate
 
 Two distinct upstream bugs that produced the visible Blender symptoms

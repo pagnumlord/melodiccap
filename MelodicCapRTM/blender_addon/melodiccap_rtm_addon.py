@@ -1449,7 +1449,13 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         # Arm velocity clamp: track previous hand IK positions to reject spikes
         prev_hand_pos = {"L": None, "R": None}
         ARM_MAX_SPEED = 8.0  # m/s — fast arm swing is ~6 m/s, reject above this
-        ARM_MIN_RATIO = 0.55  # minimum arm reach ratio — prevents extreme chicken-wing
+        # v5.14: Lowered from 0.55 → 0.15. The 0.55 threshold dates from
+        # the wrist-on-shoulder bug era (v4.7) and treated any normal bent-arm
+        # pose (elbow ~70-90° = ratio 0.50-0.70 — guitar hold, hand on hip,
+        # eating) as a triangulation error. With v5.13 fixing the actual
+        # source of wrist-on-shoulder, this only needs to catch the genuine
+        # degenerate case.
+        ARM_MIN_RATIO = 0.15  # minimum arm reach ratio — safety net only
 
         # v4.6: Last-good arm FK pose — when arm_fk_conf drops below threshold,
         # hold the last good rotation instead of blending to identity (which puts
@@ -1869,8 +1875,13 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         if p_sh_raw is not None and p_wr_raw is not None and rig_arm_len > 0:
                             raw_dist = (p_wr_raw - p_sh_raw).length
                             arm_ratio = raw_dist / rig_arm_len
-                            if arm_ratio < 0.8:
-                                arm_fk_conf = max(0.0, (arm_ratio - 0.55) / 0.25)
+                            # v5.14: Threshold lowered from (0.55, 0.80) to (0.10, 0.20).
+                            # Old thresholds treated any natural bent-elbow pose as low
+                            # confidence; with v5.13 fixing the wrist-on-shoulder solver
+                            # bug, we only need to catch the genuine degenerate case
+                            # (wrist literally at shoulder, ratio < 0.10).
+                            if arm_ratio < 0.20:
+                                arm_fk_conf = max(0.0, (arm_ratio - 0.10) / 0.10)
 
                             # v4.7: Direction stability boost.
                             # v5.7: Gated on base confidence > ARM_STABILITY_BASE_CONF_MIN.
@@ -1932,10 +1943,13 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 # (ratio > 0.70) with strong positive Y is real reach,
                                 # not depth noise. Damping it collapses guitar-hold pose.
                                 raw_ua_y = target_dir.y
-                                arm_extended_forward = (
-                                    arm_ratio > 0.70
-                                    and raw_ua_y > 0.20
-                                )
+                                # v5.14: bypass depth damping whenever arm is reaching
+                                # forward (raw_y > 0.20), regardless of how bent the
+                                # elbow is. Previously required arm_ratio > 0.70 too,
+                                # which excluded normal bent-arm reach poses (guitar
+                                # hold has elbows ~80° = ratio ~0.55) and damped them
+                                # back into the body.
+                                arm_extended_forward = (raw_ua_y > 0.20)
                                 if sit_blend > 0 and not arm_extended_forward:
                                     damp = 1.0 - sit_blend * (1.0 - SEATED_ARM_DEPTH_DAMP)
                                     target_dir.y *= damp
@@ -2039,8 +2053,12 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                     FOREARM_INHERIT_LATERAL = 0.5
                                     fa_rest_x = ua_damped_dir.x * FOREARM_INHERIT_LATERAL if ua_damped_dir else 0.0
                                     FOREARM_REST_DIR = Vector((fa_rest_x, 0, -1)).normalized()
-                                    FA_RATIO_GOOD = 0.70
-                                    FA_RATIO_BAD = 0.55
+                                    # v5.14: Same threshold relaxation as arm_fk_conf.
+                                    # Previously (0.55, 0.70) replaced legitimate bent-arm
+                                    # forearms with rest direction during sitting,
+                                    # collapsing held-object poses into "hands in lap".
+                                    FA_RATIO_GOOD = 0.20
+                                    FA_RATIO_BAD = 0.10
                                     if arm_ratio < FA_RATIO_BAD:
                                         seated_dir = FOREARM_REST_DIR.copy()
                                     elif arm_ratio < FA_RATIO_GOOD:
@@ -2315,9 +2333,14 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                                 DiagLog.data(f"  arm.{side_label}_elbow",
                                     f"({p_el.x:.3f},{p_el.y:.3f},{p_el.z:.3f})")
                             # Warn on bad ratios
-                            if arm_len > 0 and ratio < 0.8:
-                                DiagLog.info(f"  !! ARM {side_label} RATIO {ratio:.3f} < 0.8 — "
-                                    f"wrist target too close to shoulder. "
+                            # v5.14: threshold lowered from 0.8 → 0.20. The 0.8 cutoff
+                            # was based on the old assumption that ratio<0.8 meant a
+                            # capture/retargeting error; now ratio 0.4-0.7 is normal
+                            # bent-elbow geometry (guitar hold, hands on hips). Only
+                            # warn when ratio is genuinely degenerate.
+                            if arm_len > 0 and ratio < 0.20:
+                                DiagLog.info(f"  !! ARM {side_label} RATIO {ratio:.3f} < 0.20 — "
+                                    f"wrist target very close to shoulder. "
                                     f"Capture or retargeting error!")
 
                 for bone_name, landmark_idx in IK_TARGETS.items():
