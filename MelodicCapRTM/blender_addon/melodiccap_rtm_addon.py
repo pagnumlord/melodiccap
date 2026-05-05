@@ -1082,6 +1082,21 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
             self.report({'ERROR'}, "No frames in JSON file")
             return {'CANCELLED'}
 
+        # v5.15: hard-fail on raw (untriangulated) takes. Raw files have only
+        # per-camera 2D detections (raw_2d_a / raw_2d_b) and no landmarks_3d,
+        # so every downstream calibration step (hip_pos, proportions, frame-0
+        # pose check) would crash mid-import. Tell the user to run
+        # offline_processor first instead of letting it KeyError.
+        if data.get('format') == 'melodiccap_raw_v1':
+            self.report(
+                {'ERROR'},
+                "This is a RAW take (no 3D triangulation yet). "
+                "Run: python offline_processor.py "
+                f"{os.path.basename(self.filepath)} "
+                "to produce the triangulated JSON, then import that file."
+            )
+            return {'CANCELLED'}
+
         # Detect format
         is_rtm = _is_rtm_format(data)
         format_name = data.get('format', 'mediapipe_legacy')
