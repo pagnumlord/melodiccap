@@ -156,6 +156,50 @@ motion data onto Rigify character rigs. For a short film.
   extreme backward lean when seated. Take 2 showed -30.2° pitch (extreme recline),
   now clamped to -20°. Forward lean up to 35° still allowed.
 
+### v5.17 — Torso turn under-rotation fix + Blender FPS match
+
+User #1 complaint after every motion-capture iteration: "every single take
+I've ever recorded where I turn my body a lot, the torso moves very oddly."
+Root cause finally located in v5.17's diagnostic.
+
+**The bug**: `YAW_DEPTH_DAMP = 0.35` from v5.0 was applied unconditionally
+to `body_right.y` before `atan2`. For a real 70° body turn at frame 49 of
+take 213321, body_right ≈ (-0.342, -0.940). Without damping,
+atan2(0.940, -0.342) = 110° → rest-subtracted = -70° (correct). With y *=
+0.35: y becomes -0.329, normalized to (-0.720, -0.693), atan2(0.693,
+-0.720) = 136° → rest-subtracted = -44°. **The damp halved the measured
+turn angle**. The capture log confirmed it: torso_yaw read -36.2° at
+exactly the frame where the user's actual shoulder yaw rotated 72°.
+
+The damp was sized for v5.0's noise level. v5.15's anatomical anchoring
+(shoulder/hip width clamps) reduced shoulder triangulation noise to ±10%
+of calibration, so the static damp is now over-correction.
+
+**Fix** (`melodiccap_rtm_addon.py`, the yaw computation block):
+context-aware damping. Compute `yz_ratio = |body_right.y| / |body_right.x|`,
+which approximates how far the body has turned from rest. At rest
+(yz_ratio = 0): damp = `YAW_DEPTH_DAMP` (0.35, full damping for noise
+reduction). At yz_ratio ≥ 0.4 (≈22° turn): damp = 1.0 (no damping, full
+turn passes through). Linear interpolation between. The threshold catches
+small noise (<10° spurious yaw at sit-down) while letting real turns
+through unattenuated.
+
+**Plus**: Blender scene FPS now auto-set at import. The addon imports
+keyframes at `frame_num = int(timestamp * fps)` — 8fps mocap ⇒ 8 Blender
+frames per second of source. But Blender's default scene FPS is 24, so
+playback runs at 24/8 = 3× speed. User noticed: "feels a little quicker
+than my take." Now `scene.render.fps` is set to `round(source_fps)` and
+`scene.render.fps_base` to `fps_int / source_fps` for fractional precision.
+
+Verification: re-process the four test takes and re-import. Expected
+behavior change:
+- Turn-only 213321: rig should now sweep through ~72° of yaw (matches the
+  user's actual turn) instead of the v5.16 ~36° under-rotation.
+- All takes: real-time playback duration in Blender (a 9.2-second mocap
+  reads as 9.2 seconds of timeline at fps=8 setting).
+
+Out of scope: the Track B SMPL+motion-prior pivot (still deferred).
+
 ### v5.16 — More rules: anatomical ROM + spine rate limit + tighter neck
 
 The user's complaint after v5.15: "neck bends too much in the movement, and

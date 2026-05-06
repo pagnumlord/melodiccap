@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (5, 16),
+    "version": (5, 17),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -1102,12 +1102,27 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         format_name = data.get('format', 'mediapipe_legacy')
         fps = data.get('fps', 30)
 
+        # v5.17: set Blender scene FPS to match source. Without this, an
+        # 8fps mocap take plays back at the scene's default 24fps, which
+        # makes the motion appear 3x faster than the actual capture
+        # (user noticed: "feels a little quicker than my take").
+        # frame_set() spaces keyframes at 1 frame per source frame
+        # (frame_num = int(timestamp * fps)), so matching the scene fps
+        # reproduces real-time duration. Round to nearest int (Blender
+        # render.fps is an integer; combined with fps_base for fractional).
+        fps_int = max(1, int(round(fps)))
+        scene = context.scene
+        if scene.render.fps != fps_int:
+            scene.render.fps = fps_int
+            scene.render.fps_base = fps_int / fps if fps > 0 else 1.0
+
         DiagLog.section("IMPORT START")
         DiagLog.data("File", os.path.basename(self.filepath))
         DiagLog.data("Format", format_name)
         DiagLog.data("Detector", data.get('detector', 'unknown'))
         DiagLog.data("Frames", len(frames))
-        DiagLog.data("FPS", fps)
+        DiagLog.data("FPS (source)", fps)
+        DiagLog.data("FPS (scene set)", f"{fps_int} (base={scene.render.fps_base:.4f}) — playback now matches real time")
         DiagLog.data("IK mode", self.use_ik)
         DiagLog.data("FK mode", self.use_fk)
         DiagLog.data("Smoothing", self.smooth_window)
@@ -1667,7 +1682,31 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     yaw_angle = 0.0
                     raw_yaw = 0.0
                     if body_right.length > 0.01:
-                        body_right.y *= YAW_DEPTH_DAMP
+                        # v5.17: context-aware Y damping. The static
+                        # YAW_DEPTH_DAMP = 0.35 from v5.0 was halving real
+                        # body turns (a 70° turn captured at frame 49 of the
+                        # turn-only take measured as -36° on the rig — exactly
+                        # half, the math is below). The damp was sized for the
+                        # pre-v5.15 era where shoulder triangulation noise was
+                        # large; v5.15's anatomical anchoring reduced that
+                        # noise to ±10% of calibration so we can relax.
+                        #
+                        # Math: at a 70° turn, body_right ≈ (-0.342, -0.940).
+                        # atan2(0.940, -0.342) = 110° (real turn, 180-110=70°).
+                        # With y *= 0.35: y becomes -0.329, normalized to
+                        # (-0.720, -0.693), atan2(0.693, -0.720) = 136°
+                        # → measured 44° turn. The damping fights real motion.
+                        #
+                        # Fix: scale damp linearly from YAW_DEPTH_DAMP_BASE
+                        # at rest to 1.0 (no damp) when the body has
+                        # significantly turned (|y/x| > 0.4, ~22° from rest).
+                        # The threshold catches small noise (<10° spurious
+                        # yaw at sit-down) while letting full-magnitude
+                        # turns through unattenuated.
+                        yz_ratio = abs(body_right.y) / max(abs(body_right.x), 0.01)
+                        ratio_t = min(1.0, yz_ratio / 0.4)
+                        damp = YAW_DEPTH_DAMP + ratio_t * (1.0 - YAW_DEPTH_DAMP)
+                        body_right.y *= damp
                         body_right = body_right.normalized()
                         raw_yaw = math.atan2(-body_right.y, body_right.x)
                         # Subtract rest yaw (frame 0 bias) — mirrors torso_rest_pitch pattern
