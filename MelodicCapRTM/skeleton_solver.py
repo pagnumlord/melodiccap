@@ -71,12 +71,47 @@ JOINT_ANGLE_DEFS = [
     (LM.RIGHT_HIP, LM.RIGHT_KNEE, LM.RIGHT_ANKLE, 'knee_r'),
 ]
 
+# v5.16: Shoulder and hip ROM constraints. The parent reference is a virtual
+# midpoint (hip_mid for shoulders, shoulder_mid for hips) which can't fit the
+# JOINT_ANGLE_DEFS triple-of-landmarks pattern, so they're applied separately
+# in solve_frame Step 7b.
+#
+# Bounds: humerus-to-spine angle in [25°, 178°] for shoulder. 25° lower bound
+# means the upper arm cannot be within 25° of "parallel to spine" (which would
+# physically be the arm pointing straight down past the hip in standing pose,
+# anatomically fine, OR the arm passing through the rib cage when the body is
+# rotated, anatomically impossible). 178° upper bound prevents math degenerate
+# cases with the angle clamp's axis computation. Real anatomical max for arm
+# overhead is 0° to spine, but at 0° the cross product axis is undefined; 178°
+# (in our convention angle = 180° - actual_anatomical_angle) gives a tiny
+# margin.
+#
+# Hip: thigh-to-spine angle in [15°, 178°]. 15° prevents the leg from
+# crossing the body centerline upward (hip flexion past 165° physically
+# impossible). 178° same degenerate-case margin.
+SHOULDER_HIP_ROM = {
+    'shoulder_l': (25, 178),
+    'shoulder_r': (25, 178),
+    'hip_l':      (15, 178),
+    'hip_r':      (15, 178),
+}
+
 DIRECTION_SMOOTH_ALPHA = 0.5          # baseline EMA weight
 DIRECTION_SMOOTH_ALPHA_LOWCONF = 0.15  # trust previous heavily when a joint is noisy
 DIRECTION_SMOOTH_ALPHA_JUMP = 0.85     # let large, high-conf direction changes through
 DIRECTION_LOWCONF_THRESHOLD = 0.4      # joint conf below this -> use LOWCONF α
 DIRECTION_GOODCONF_THRESHOLD = 0.5     # joint conf above this -> allow JUMP α
 DIRECTION_JUMP_DOT = 0.7               # cos(45°) — dir change beyond this counts as "jump"
+# v5.16: very-low-confidence band. The detector's per-keypoint confidence
+# (min(cam_a, cam_b) per triangulated keypoint, in JSON since v4.7) gives us
+# a real signal for "this frame's geometry is mostly noise". Average of the
+# bone's two endpoints below VERY_LOWCONF_THRESHOLD = use α = 0.08 — almost
+# entirely trust the previous frame, drop the current one. This is the gate
+# the existing min-based check was missing: a single low-conf endpoint hits
+# 0.15 (LOWCONF) but a bone where BOTH endpoints are weak should be even
+# more cautious.
+DIRECTION_VERY_LOWCONF_THRESHOLD = 0.35
+DIRECTION_SMOOTH_ALPHA_VERY_LOWCONF = 0.08
 LOG_INTERVAL = 50
 
 
@@ -151,7 +186,11 @@ class SkeletonSolver:
             'frames_skipped': 0,
             'smooth_alpha_lowconf_frames': 0,
             'smooth_alpha_jump_frames': 0,
+            'spine_rate_clamps': 0,
         }
+        # v5.16: spine direction from previous frame, used by Step 2b's pitch
+        # rate limit. None on first frame (no comparison possible).
+        self._prev_spine_dir = None
 
     def _get_point(self, landmarks, idx):
         key = str(idx)
@@ -346,6 +385,49 @@ class SkeletonSolver:
         hip_mid = (lh + rh) / 2.0
         shoulder_mid_raw = (ls + rs) / 2.0
 
+        # Step 1b: spine pitch RATE limit (v5.16). If the spine direction
+        # changed by more than SPINE_PITCH_MAX_RATE_DEG per frame, rotate
+        # the current direction toward the previous one to absorb the
+        # excess change. This kills the per-frame discontinuity at
+        # sit-down transitions (the user described as "rough sit motion")
+        # and also damps depth-axis noise that drives spurious 8-15° pitch
+        # spikes during normal motion.
+        #
+        # Cap chosen to match the addon's NECK_MAX_ANGULAR_VEL after the
+        # v5.16 tightening (5°/frame at 8fps = 40°/sec). Spine flexes
+        # slower than the neck — 8°/frame is generous and still cuts the
+        # depth-spike contribution to the pitch trajectory.
+        SPINE_PITCH_MAX_RATE_DEG = 8.0
+        cur_spine_v = shoulder_mid_raw - hip_mid
+        spine_len_raw = float(np.linalg.norm(cur_spine_v))
+        if self._prev_spine_dir is not None and spine_len_raw > 1e-6:
+            cur_spine_dir = cur_spine_v / spine_len_raw
+            cos_a = float(np.clip(np.dot(cur_spine_dir, self._prev_spine_dir), -1.0, 1.0))
+            angle_deg = float(np.degrees(np.arccos(cos_a)))
+            if angle_deg > SPINE_PITCH_MAX_RATE_DEG:
+                excess_rad = float(np.radians(angle_deg - SPINE_PITCH_MAX_RATE_DEG))
+                # Rodrigues rotation around (cur × prev) toward prev
+                axis = np.cross(cur_spine_dir, self._prev_spine_dir)
+                axis_n = float(np.linalg.norm(axis))
+                if axis_n > 1e-8:
+                    axis = axis / axis_n
+                    cos_t = float(np.cos(excess_rad))
+                    sin_t = float(np.sin(excess_rad))
+                    new_dir = (cur_spine_dir * cos_t
+                               + np.cross(axis, cur_spine_dir) * sin_t
+                               + axis * np.dot(axis, cur_spine_dir) * (1.0 - cos_t))
+                    new_dir = _safe_normalize(new_dir)
+                    shoulder_mid_raw = hip_mid + new_dir * spine_len_raw
+                    self._stats['spine_rate_clamps'] += 1
+                    if do_log:
+                        print(f"[SOLVER] frame {frame_idx}: spine_rate clamped "
+                              f"{angle_deg:.1f}° → {SPINE_PITCH_MAX_RATE_DEG:.1f}° "
+                              f"per frame")
+            # Store the (possibly-clamped) direction for next frame
+            self._prev_spine_dir = _safe_normalize(shoulder_mid_raw - hip_mid)
+        else:
+            self._prev_spine_dir = _safe_normalize(cur_spine_v) if spine_len_raw > 1e-6 else None
+
         # Step 2: spine (soft constraint — only correct if >30% deviation)
         if 'spine' in self.bone_lengths:
             raw_spine = np.linalg.norm(shoulder_mid_raw - hip_mid)
@@ -497,6 +579,42 @@ class SkeletonSolver:
                 if do_log:
                     print(f"[SOLVER] frame {frame_idx}: {joint_name} clamped {raw_angle:.1f}° → {clamped_angle:.1f}°")
 
+        # Step 7b: shoulder and hip ROM (v5.16). The "parent" for these is a
+        # virtual spine midpoint, not a single landmark, so this is separate
+        # from the JOINT_ANGLE_DEFS loop above.
+        #
+        # For shoulders, the parent reference is hip_mid (so the angle measures
+        # how far the upper arm deviates from the spine direction).
+        # For hips, the parent reference is shoulder_mid (same idea, opposite
+        # end of the spine).
+        sh_hip_constraints = [
+            ('shoulder_l', hip_mid, LM.LEFT_SHOULDER, LM.LEFT_ELBOW, 'upper_arm_l'),
+            ('shoulder_r', hip_mid, LM.RIGHT_SHOULDER, LM.RIGHT_ELBOW, 'upper_arm_r'),
+            ('hip_l', shoulder_mid, LM.LEFT_HIP, LM.LEFT_KNEE, 'thigh_l'),
+            ('hip_r', shoulder_mid, LM.RIGHT_HIP, LM.RIGHT_KNEE, 'thigh_r'),
+        ]
+        for joint_name, parent_pos, joint_idx, child_idx, bone_name in sh_hip_constraints:
+            if joint_name not in SHOULDER_HIP_ROM:
+                continue
+            j = corrected.get(joint_idx)
+            c = corrected.get(child_idx)
+            if parent_pos is None or j is None or c is None:
+                continue
+            min_deg, max_deg = SHOULDER_HIP_ROM[joint_name]
+            bone_len = self.bone_lengths.get(bone_name, np.linalg.norm(c - j))
+            new_child, raw_angle, was_clamped = _clamp_angle(
+                parent_pos, j, c, min_deg, max_deg, bone_len)
+            if was_clamped:
+                corrected[child_idx] = new_child
+                self._stats['angle_clamps'] += 1
+                if joint_name not in self._stats['angle_clamp_details']:
+                    self._stats['angle_clamp_details'][joint_name] = 0
+                self._stats['angle_clamp_details'][joint_name] += 1
+                if do_log:
+                    clamped_angle = np.clip(raw_angle, min_deg, max_deg)
+                    print(f"[SOLVER] frame {frame_idx}: {joint_name} clamped "
+                          f"{raw_angle:.1f}° → {clamped_angle:.1f}°")
+
         # Track length correction stats
         if frame_deltas:
             max_delta = max(d[3] for d in frame_deltas)
@@ -601,8 +719,14 @@ class SkeletonSolver:
                 parent_conf = _joint_conf(i, parent_idx)
                 child_conf = _joint_conf(i, child_idx)
                 min_conf = min(parent_conf, child_conf)
+                avg_conf = (parent_conf + child_conf) / 2.0
 
-                if min_conf < DIRECTION_LOWCONF_THRESHOLD:
+                # v5.16: VERY_LOWCONF tier — both endpoints weak on average.
+                # Use heaviest smoothing so the bad frame barely propagates.
+                if avg_conf < DIRECTION_VERY_LOWCONF_THRESHOLD:
+                    a = DIRECTION_SMOOTH_ALPHA_VERY_LOWCONF
+                    self._stats['smooth_alpha_lowconf_frames'] += 1
+                elif min_conf < DIRECTION_LOWCONF_THRESHOLD:
                     a = DIRECTION_SMOOTH_ALPHA_LOWCONF
                     self._stats['smooth_alpha_lowconf_frames'] += 1
                 else:

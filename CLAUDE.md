@@ -156,6 +156,97 @@ motion data onto Rigify character rigs. For a short film.
   extreme backward lean when seated. Take 2 showed -30.2° pitch (extreme recline),
   now clamped to -20°. Forward lean up to 35° still allowed.
 
+### v5.16 — More rules: anatomical ROM + spine rate limit + tighter neck
+
+The user's complaint after v5.15: "neck bends too much in the movement, and
+the arm does go inside Jax's body. The actual take. In the last photo
+you'll see the take where im sitting, getting into the sitting motion was
+very rough, and the elbows are pointed in. We don't need to fix these
+small issues, we need to fix the overall capture or code or something to
+make it better match our take and be realistic human motion." Per the
+outsider perspective: "not enough rules restricting it to realistic
+movement." The user picked Track A (tighten the existing pipeline) over
+Track B (architectural pivot to SMPL+motion-prior).
+
+Six changes, all serving the same goal: hard rules that prevent
+geometrically valid but anatomically sloppy poses from reaching the rig.
+
+**Solver (`skeleton_solver.py`):**
+
+1. **Shoulder + hip ROM** (Step 7b, NEW): humerus-to-spine angle clamped
+   to [25°, 178°], thigh-to-spine angle clamped to [15°, 178°]. The 25°
+   shoulder floor is the direct fix for "arm inside Jax's body" — it
+   prevents the upper arm from being within 25° of the spine direction,
+   which on the rig's idealized chest mesh meant the arm bone was passing
+   through the ribs. On take 213321 (turn-only) this clamp engaged
+   16/74 frames (21.6%), all on the left shoulder (the side the user
+   turned toward). On 213428 (full take) it engaged 28/150 frames
+   (18.7%). Right shoulder/hip rarely tripped — asymmetry from the
+   user's actual pose, not from the constraint.
+
+2. **Spine pitch rate limit** (Step 1b, NEW): the angular change between
+   consecutive spine vectors is capped at 8°/frame (≈64°/sec at 8fps).
+   When exceeded, the current spine direction is rotated back toward the
+   previous via Rodrigues rotation around the cross-product axis. Source
+   data on the four test takes had max step 4-6°/frame so the rate
+   limit didn't engage in v5.16's verification — it's a preventive
+   constraint for the next take with the typical depth-axis spike during
+   fast sit-down.
+
+3. **Detector confidence-gated VERY_LOWCONF tier** in
+   `_temporal_smooth_directions`: when the AVERAGE per-keypoint
+   confidence (parent + child / 2) of a bone's endpoints is below 0.35,
+   use α = 0.08 instead of the existing 0.15 LOWCONF tier. Both
+   endpoints weak should propagate even less than one weak endpoint.
+
+**Addon (`melodiccap_rtm_addon.py`):**
+
+4. **Neck rotation cap** tightened from `NECK_ROT_MAX_STAND = 50°` to
+   **35°** (and SIT cap 25°→20°). Logged data on the four takes had
+   neck_rot peaking 20-43° while the user described the magnitude as
+   "too much." 35° matches the realistic anatomical range; the reduced
+   cap will trim the spurious 5-8° the user was seeing as wobble.
+
+5. **Neck angular velocity cap** tightened from `NECK_MAX_ANGULAR_VEL =
+   8°/frame` to **5°/frame** (=40°/sec at 8fps). Smoother frame-to-frame
+   change kills the wobble contribution from depth-axis ear-keypoint
+   noise.
+
+6. **Sit blend frames** extended from `SIT_BLEND_FRAMES = 8` to **16**.
+   At 8fps that's 2 seconds of crossfade. The hip drops -16cm in the
+   8-frame v5.3 window, forcing both seated dampers AND the leg IK→FK
+   posture switch to ease in over the same frames where the hip is
+   falling — visible as the "rough sit motion" the user flagged. 16
+   frames separates the leg posture switch from the hip drop in time.
+
+7. **Arm splay clamp** rewritten from broken to angle-correct. Old
+   code: clamp `target_dir.x` to `ARM_SPLAY_LIMIT = 0.80`, then
+   `.normalized()` — but normalizing a (0.80, y, z) vector with small
+   y/z restores X to ~0.93, so the clamp logged "CLAMPED" but the X
+   barely changed (verified against take 213341 T-pose log frames 45-72
+   where dir.x stayed ≥0.85 after the supposed clamp). New: when |X|
+   exceeds the limit, scale Y/Z proportionally to absorb the X
+   reduction so the vector stays unit length without inflating X back.
+   Pure ±X (perfect T-pose) passes through unchanged because there's
+   no Y/Z to absorb.
+
+Verification on the four v5.15 test takes:
+
+| Metric | 213321 | 213341 | 213401 | 213428 |
+|---|---|---|---|---|
+| Frames solved | 74/74 | 91/91 | 151/151 | 150/150 |
+| Total angle clamps | 49 (was 33) | 264 | 111 (was 107) | 100 (was 69) |
+| `shoulder_l` clamps | 16 (NEW) | 0 | 0 | 28 (NEW) |
+| `hip_l` clamps | 0 | 0 | 4 (NEW) | 3 (NEW) |
+| Shoulder width violations | 0/74 | 0/91 | 4/151 | 4/150 |
+| Spine pitch range | unchanged | unchanged | unchanged | unchanged |
+| Max spine pitch step | 5.2°/f | 3.8°/f | 5.6°/f | 4.1°/f |
+
+Existing v5.15 stability holds; v5.16 adds anatomical ROM corrections
+on the frames that needed them. Out of scope (Track B follow-up): SMPL
+fitting via EasyMocap to replace the custom solver, evaluation deferred
+until v5.16 ships and the user has visual data on the rig.
+
 ### v5.15 — Anatomical anchoring (shoulder_width + tightened hip_width)
 
 The visual problems on take 204628 (hands inside body during sit, torso

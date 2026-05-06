@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (5, 15),
+    "version": (5, 16),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -1534,7 +1534,14 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
             # v5.3: Smooth sit_blend ramp instead of binary is_sitting.
             # All seated damping uses sit_blend (0→1 over SIT_BLEND_FRAMES)
             # so behaviors crossfade instead of snapping on/off.
-            SIT_BLEND_FRAMES = 8
+            # v5.16: extended 8→16 frames. At 8fps that's 2 seconds of
+            # crossfade. Take 213401 had a -16cm hip-Z drop in the 8-frame
+            # window (v5.3's setting), which forced both the seated dampers
+            # AND the leg IK→FK posture switch to ease in over the same
+            # ramp where the hips were also falling — visible as the "rough
+            # sit motion" the user flagged. 16 frames gives the leg posture
+            # switch enough room to settle separately from the hip drop.
+            SIT_BLEND_FRAMES = 16
             prev_blend = mocap_props.get('_sit_blend', 0.0)
 
             # v4.6: Hip path velocity (XY displacement per frame)
@@ -1789,8 +1796,18 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         # 'auto' parent mode: now works correctly because
                         # depsgraph was flushed above with current torso+spine
                         neck_rot = compute_fk_rotation(neck_bone, neck_dir, 'auto')
-                        NECK_ROT_MAX_STAND = math.radians(50)
-                        NECK_ROT_MAX_SIT = math.radians(25)
+                        # v5.16: tightened neck rotation cap from 50°→35°.
+                        # The 50° cap was anatomically loose — typical human neck
+                        # rotation maxes out around 30-40° (atlanto-occipital +
+                        # atlanto-axial combined). On the turn-only and full-bend
+                        # takes, neck_rot frequently sat in the 20-43° band when
+                        # the actual neck wasn't moving that much — depth-axis
+                        # noise on ear/shoulder keypoints driving the FK direction
+                        # past anatomical reality. 35° matches the realistic
+                        # range; the tighter cap will trim the spurious +5-8°
+                        # the user was seeing as "neck bends too much".
+                        NECK_ROT_MAX_STAND = math.radians(35)
+                        NECK_ROT_MAX_SIT = math.radians(20)
                         neck_cap = NECK_ROT_MAX_STAND - sit_blend * (NECK_ROT_MAX_STAND - NECK_ROT_MAX_SIT)
                         if neck_rot.angle > neck_cap:
                             neck_rot = Quaternion(neck_rot.axis, neck_cap)
@@ -1802,7 +1819,13 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                         # If the clamp limited >5% of frames, the user's head
                         # turn was probably faster than the clamp allows and
                         # got smeared.
-                        NECK_MAX_ANGULAR_VEL = math.radians(8)
+                        # v5.16: tightened 8°→5°/frame. At 8fps, 5°/frame is
+                        # 40°/sec — still allows real head turns, but kills the
+                        # frame-to-frame wobble from depth-axis ear-keypoint
+                        # noise. The user described the neck as "bending too
+                        # much in the movement" — that's mostly wobble, not
+                        # magnitude. Smoother per-frame change is the fix.
+                        NECK_MAX_ANGULAR_VEL = math.radians(5)
                         prev_neck_angle = mocap_props.get('_prev_neck_angle', neck_rot.angle)
                         if neck_rot.angle - prev_neck_angle > NECK_MAX_ANGULAR_VEL:
                             neck_rot = Quaternion(neck_rot.axis, prev_neck_angle + NECK_MAX_ANGULAR_VEL)
@@ -1939,17 +1962,37 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                             if p_start is not None and p_end is not None:
                                 target_dir = (armature_inv_33 @ (p_end - p_start)).normalized()
 
-                                # v4.8: Fixed high splay limit (safety net only).
-                                # Apply clamp: L arm outward is +X, R arm is -X
+                                # v4.8 splay limit, v5.16 fixed math.
+                                # Old: clamp target_dir.x to ARM_SPLAY_LIMIT and
+                                # then renormalize. The renormalization restored
+                                # X to ~1.0 because the clamped vector had small
+                                # magnitude (~0.86), so dividing by 0.86 inflated
+                                # X back. Net effect: a no-op for vectors with
+                                # any small Y/Z component. Verified against the
+                                # T-pose log frames 45-72 where dir.x stayed
+                                # ≥0.85 even after the clamp logged "CLAMPED".
+                                #
+                                # New: when |X| exceeds the limit, scale Y/Z
+                                # proportionally to absorb the X reduction so
+                                # the vector stays unit length WITHOUT
+                                # inflating X back. Pure ±X (perfect T-pose)
+                                # passes through unchanged because there's no
+                                # Y/Z to absorb the clamp.
                                 splay_clamped = False
-                                if side == "L" and target_dir.x > ARM_SPLAY_LIMIT:
-                                    target_dir.x = ARM_SPLAY_LIMIT
-                                    target_dir = target_dir.normalized()
-                                    splay_clamped = True
-                                elif side == "R" and target_dir.x < -ARM_SPLAY_LIMIT:
-                                    target_dir.x = -ARM_SPLAY_LIMIT
-                                    target_dir = target_dir.normalized()
-                                    splay_clamped = True
+                                abs_x_limit = ARM_SPLAY_LIMIT
+                                if (side == "L" and target_dir.x > abs_x_limit) or \
+                                   (side == "R" and target_dir.x < -abs_x_limit):
+                                    yz_orig_sq = target_dir.y * target_dir.y + target_dir.z * target_dir.z
+                                    if yz_orig_sq > 1e-6:
+                                        new_yz_sq = max(0.0, 1.0 - abs_x_limit * abs_x_limit)
+                                        scale = math.sqrt(new_yz_sq / yz_orig_sq)
+                                        sign_x = 1.0 if target_dir.x > 0 else -1.0
+                                        target_dir = Vector((
+                                            sign_x * abs_x_limit,
+                                            target_dir.y * scale,
+                                            target_dir.z * scale,
+                                        ))
+                                        splay_clamped = True
 
                                 # v4.9: Seated arm depth damping — reduce depth axis noise
                                 # in Y component when sitting (arms should hang down, not
