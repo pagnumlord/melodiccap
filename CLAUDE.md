@@ -156,6 +156,34 @@ motion data onto Rigify character rigs. For a short film.
   extreme backward lean when seated. Take 2 showed -30.2° pitch (extreme recline),
   now clamped to -20°. Forward lean up to 35° still allowed.
 
+### v5.18 — User-toggleable X mirror for rig orientation mismatch
+
+User observed across multiple takes: "I always look to my left, but Jax's
+animation is looking to his right. I lean toward camera-right (my left),
+Jax leans toward camera-left and his right side."
+
+The mocap world's +X axis is camera A's right (right-of-screen in playback).
+The rig's armature-local +X axis depends on which way the rig was built —
+JaxRigify and other Rigify variants differ. When they don't match, the
+rig appears mirrored: every left becomes right and vice versa.
+
+Quick fix without restructuring the addon's coordinate handling: a user-
+toggleable `mirror_x` import setting that negates the X coordinate of
+every 3D keypoint at load time, BEFORE any downstream processing. Default
+OFF for backwards compatibility (existing rigs that were correctly
+oriented stay correct). User toggles ON when they see the mirror.
+
+Implementation lives in `melodiccap_rtm_addon.py`, applied in `execute()`
+right after `frames` is loaded, before format detection. Modifies the
+landmarks_3d arrays in-memory so every downstream consumer (proportions,
+torso yaw/pitch, FK bone direction, IK target positions, foot pinning)
+sees the corrected values consistently.
+
+Out of scope for v5.18: auto-detection of the rig's facing direction
+(would require inspecting bone matrices), or full coordinate-frame
+calibration (would need rest-pose alignment logic). Manual toggle is the
+minimum viable check for the user's tonight session.
+
 ### v5.17 — Torso turn under-rotation fix + Blender FPS match
 
 User #1 complaint after every motion-capture iteration: "every single take

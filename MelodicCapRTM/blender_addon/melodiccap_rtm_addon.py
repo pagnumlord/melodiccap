@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (5, 17),
+    "version": (5, 18),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -1061,6 +1061,18 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                     "need to keyframe-clean the bad bone in Blender",
         default=False
     )
+    mirror_x: bpy.props.BoolProperty(
+        name="Mirror X (fix rig facing wrong direction)",
+        description="Negate the X component of all 3D mocap keypoints at "
+                    "import. Try this if your rig appears mirrored: you turn "
+                    "your body left, rig turns right; you lean to your left, "
+                    "rig leans to its right. Cause: the mocap world's X axis "
+                    "(camera-A's right) doesn't match the rig's armature-local "
+                    "X axis convention. Toggling this re-aligns the orientation. "
+                    "Default OFF for backwards compatibility — toggle ON if you "
+                    "see the mirror effect, OFF if motion direction is correct",
+        default=False
+    )
 
     def execute(self, context):
         rig = context.active_object
@@ -1096,6 +1108,26 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
                 "to produce the triangulated JSON, then import that file."
             )
             return {'CANCELLED'}
+
+        # v5.18: optional X mirror. User-toggleable. Negates X of every
+        # 3D keypoint in every frame BEFORE any downstream processing
+        # (proportions, IK targets, FK directions, torso/spine math). The
+        # 2-camera stereo reconstruction's world frame has +X = camera A's
+        # right, but the rig's armature-local +X may be on the opposite
+        # side depending on which way the rig faces in armature space.
+        # Symptom of mismatch: rig mirrors the user (turn left, rig turns
+        # right; lean left, rig leans right; left arm raises, rig raises
+        # right arm). Default OFF — only enable if symptoms are visible.
+        # CRITICAL: apply BEFORE any landmark processing. Modifies the
+        # in-memory data so EVERY downstream consumer sees the mirrored
+        # values consistently.
+        if self.mirror_x:
+            for fr in frames:
+                lm = fr.get('landmarks_3d')
+                if lm:
+                    for k, v in lm.items():
+                        if isinstance(v, (list, tuple)) and len(v) >= 3:
+                            lm[k] = [-v[0], v[1], v[2]] + list(v[3:])
 
         # Detect format
         is_rtm = _is_rtm_format(data)
