@@ -156,6 +156,29 @@ motion data onto Rigify character rigs. For a short film.
   extreme backward lean when seated. Take 2 showed -30.2° pitch (extreme recline),
   now clamped to -20°. Forward lean up to 35° still allowed.
 
+### v5.19 — Mirror also swaps LEFT/RIGHT keypoint labels
+
+User tested v5.18's `mirror_x` toggle: "It is mirrored correctly and he
+leans camera-right like I did in my take" (✓ orientation fixed) "BUT the
+legs were switched, always crossed. Arms as well up until the sit pose."
+
+v5.18 only negated X coordinates. The LEFT_HIP keypoint was still
+labeled LEFT and got fed to the rig's LEFT leg bone — only its world
+position was on the opposite side. Result: rig's left leg ended up
+where the user's right leg actually was. Anatomical L/R labels
+disagreed with world positions.
+
+v5.19 fix: when `mirror_x` is ON, also swap the COCO body-17 LEFT/RIGHT
+index pairs (eye, ear, shoulder, elbow, wrist, hip, knee, ankle).
+Together with the X negation, this is a proper reflection across the
+YZ plane — every body-side label follows the corresponding world
+position consistently. Per-keypoint confidence values are swapped too.
+
+Verification path: re-import a take that mirrored cross-legged with
+v5.18+mirror_x ON. With v5.19+mirror_x ON, expect: orientation matches
+the user (lean direction, body turn direction) AND limbs go to the
+correct sides (no crossing).
+
 ### v5.18 — User-toggleable X mirror for rig orientation mismatch
 
 User observed across multiple takes: "I always look to my left, but Jax's

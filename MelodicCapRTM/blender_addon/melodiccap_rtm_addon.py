@@ -22,7 +22,7 @@ Bone names verified against JaxRigify:
 bl_info = {
     "name": "MelodicCap RTM Importer",
     "author": "Karsten Allen",
-    "version": (5, 18),
+    "version": (5, 19),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > MelodicCap",
     "description": "Import MelodicCap RTM/Fresh JSON motion capture to JaxRigify",
@@ -1117,17 +1117,56 @@ class MELODICCAP_OT_import_json(bpy.types.Operator, ImportHelper):
         # side depending on which way the rig faces in armature space.
         # Symptom of mismatch: rig mirrors the user (turn left, rig turns
         # right; lean left, rig leans right; left arm raises, rig raises
-        # right arm). Default OFF — only enable if symptoms are visible.
+        # right arm).
+        #
+        # v5.19: ALSO swap LEFT_*/RIGHT_* keypoint indices. v5.18 only
+        # negated X coordinates, which fixed the world-space orientation
+        # (rig now leans the correct direction) BUT the LEFT_HIP keypoint
+        # was still labeled LEFT and got fed to the rig's LEFT leg bone —
+        # only its world position was on the opposite side. Result: the
+        # rig's left leg ended up where the user's right leg actually was.
+        # User observed: "legs were switched, always crossed. arms as
+        # well." Fix: swap the L/R index pairs so the body-side labels
+        # follow the world positions consistently. Together, the X negate
+        # + L/R swap is a proper reflection across the YZ plane —
+        # everything matches.
+        # Default OFF — only enable if you see the rig mirrored.
         # CRITICAL: apply BEFORE any landmark processing. Modifies the
-        # in-memory data so EVERY downstream consumer sees the mirrored
+        # in-memory data so EVERY downstream consumer sees the corrected
         # values consistently.
         if self.mirror_x:
+            # COCO body-17 left/right index pairs
+            LR_SWAPS = [
+                (1, 2),    # LEFT_EYE / RIGHT_EYE
+                (3, 4),    # LEFT_EAR / RIGHT_EAR
+                (5, 6),    # LEFT_SHOULDER / RIGHT_SHOULDER
+                (7, 8),    # LEFT_ELBOW / RIGHT_ELBOW
+                (9, 10),   # LEFT_WRIST / RIGHT_WRIST
+                (11, 12),  # LEFT_HIP / RIGHT_HIP
+                (13, 14),  # LEFT_KNEE / RIGHT_KNEE
+                (15, 16),  # LEFT_ANKLE / RIGHT_ANKLE
+            ]
             for fr in frames:
                 lm = fr.get('landmarks_3d')
                 if lm:
+                    # 1) Negate X of every keypoint
                     for k, v in lm.items():
                         if isinstance(v, (list, tuple)) and len(v) >= 3:
                             lm[k] = [-v[0], v[1], v[2]] + list(v[3:])
+                    # 2) Swap LEFT/RIGHT pairs (mirror across body centerline)
+                    for l_idx, r_idx in LR_SWAPS:
+                        lk = str(l_idx)
+                        rk = str(r_idx)
+                        if lk in lm and rk in lm:
+                            lm[lk], lm[rk] = lm[rk], lm[lk]
+                # Mirror per-keypoint confidence too if present
+                conf = fr.get('confidence')
+                if conf:
+                    for l_idx, r_idx in LR_SWAPS:
+                        lk = str(l_idx)
+                        rk = str(r_idx)
+                        if lk in conf and rk in conf:
+                            conf[lk], conf[rk] = conf[rk], conf[lk]
 
         # Detect format
         is_rtm = _is_rtm_format(data)
