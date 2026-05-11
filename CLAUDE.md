@@ -1,24 +1,84 @@
-# MelodicCap - Multi-Camera Markerless Motion Capture
+# MelodicCap - Markerless Motion Capture for Solo Filmmakers
 
-## Project Overview
-Multi-camera markerless motion capture system using RTMPose for 2D pose detection,
-stereo triangulation for 3D reconstruction, and a Blender addon to retarget captured
-motion data onto Rigify character rigs. For a short film.
+## Project Goal
+A motion capture pipeline that a single person can run **in a small room** to animate
+characters for a **short film**, not a one-off music video. Originally built around
+2-camera RTMPose + stereo triangulation + a custom Blender retargeter; that path
+shipped the music video (v5.19, May 2026) but proved too fragile for repeated takes
+across multiple characters. Current direction: pivot toward learned-prior monocular
+mocap (SMPL-output models like WHAM/GVHMR) and a thinner retargeting layer that
+generalizes across characters.
 
-## Key Facts
+## Status — May 2026
+
+- **Music video: SHIPPED** using v5.19 + manual hand-keyframing of the rough
+  passages. The custom pipeline was usable as a base layer; hand-keyframing
+  filled the gaps (forward walking direction, full-take torso turn, arm clipping
+  during the guitar grab).
+- **Short film: pivoting** the pipeline. The v3-v5 history below stays as reference
+  but the pipeline going forward is being re-scoped, not iterated on.
+- **Repo**: private. Will be made public for outside collaborators ("new eyes")
+  before further architectural work.
+
+## Pipeline Direction (forward-looking)
+
+Two tracks under evaluation. Whichever wins is the one the short film is built on.
+
+### Track 1 — Monocular SMPL mocap (preferred default)
+
+One phone, one shot, no calibration:
+
+1. **Capture**: 1080p phone video, decent lighting, full body in frame.
+2. **Pose**: WHAM (2024) or GVHMR (2024) → per-frame SMPL pose + global
+   trajectory. Both run on a single GPU, are open-source, BSD/MIT licensed,
+   and embed motion priors so the output is anatomically valid by construction.
+3. **Retarget**: SMPL → JaxRigify (and other characters) via a small mapping
+   layer. Existing options: SMPL Blender addon, Rokoko Studio Live (free,
+   retargets to Rigify), Auto-Rig Pro (paid, robust). One-time write of a
+   SMPL→Rigify mapping covers all characters that share the SMPL skeleton.
+4. **Polish**: same Blender + hand-keyframing workflow that worked for the
+   music video.
+
+Why this is the default: no calibration per session, no stereo geometry
+constraints, anatomical priors eliminate the clipping/depth-collapse class of
+bugs the v3-v5 stereo pipeline accumulated patches for.
+
+Tradeoff: monocular root translation drifts on long takes — keyframe the
+character's overall walk path, let mocap drive everything from the hips up.
+
+### Track 2 — 3-camera stereo with SMPL fitting (specialty shots)
+
+Keep the current calibration + RTMPose stack as the front-end. Replace the
+custom solver with EasyMocap (multi-view SMPL fitting). Use only for shots
+where root translation accuracy matters (precise reach-and-touch, contact
+between characters). Higher setup cost, lower iteration speed, higher
+spatial accuracy.
+
+### Decision criterion
+
+Pick Track 1 unless a specific shot's blocking requires Track 2. Don't iterate
+the v5.x custom solver any further.
+
+## Character scope (short film)
+
+- Jax (JaxRigify, primary, 1.87m) — currently working
+- Kai, Kiko, Dr White, Hiro, THE SHADOW — pending; need per-character
+  proportion config + bone-name aliasing for non-Rigify variants
+
+A character config JSON per character (height, arm length, leg length, bone
+name overrides) is the cleanest way to support all six without code changes.
+
+## Key Facts (legacy stereo pipeline, kept for v5.x context)
 - **User height**: 6'1" (1.856m)
 - **Primary rig**: JaxRigify (1.87284m tall)
-- **Other characters** (pending): Kai, Kiko, Dr White, Hiro, THE SHADOW
-- **Cameras**: Samsung S25 via DroidCam (cam A) + Logitech C615 (cam B)
+- **Cameras (legacy)**: Samsung S25 via DroidCam (cam A) + Logitech C615 (cam B)
 - **Previous 3rd camera (iPad via Camo)**: disabled — wifi-only, watermark, crashes.
-  Need USB-connected Android phone or dedicated camera for viable 3rd camera.
-- **Recommended geometry**: 30-45° angle spread, ~1.5m baseline, cameras ~2m from performer
-- **3-camera multi-pair mode**: offline_processor picks best pair (AB/AC/BC) per frame
-  by reprojection error. Set CAM_C_INDEX in melodic_capture.py to enable (currently -1).
-- **Cameras move every session** — old calibrations are useless. Must recalibrate
-  stereo cameras at the start of each capture session.
-- **No hardware sync** — DroidCam is NOT hardware-synced with Sony ZV-1F.
-  Frame sync via sequential grab()/retrieve() (v4.9) reduces delta to ~20ms.
+- **Stereo geometry (legacy)**: 30-45° angle spread, ~1.5m baseline, ~2m from performer
+- **3-camera multi-pair mode**: offline_processor picks best pair per frame by
+  reprojection error. CAM_C_INDEX currently -1.
+- **Cameras moved each session** — calibration done at the start of every capture.
+- **No hardware sync** — sequential grab()/retrieve() (v4.9) reduces inter-cam
+  delta to ~20ms.
 
 ## Architecture
 - `MelodicCapRTM/` — Python capture pipeline
@@ -66,7 +126,13 @@ motion data onto Rigify character rigs. For a short film.
 - Per-keypoint confidence stored in JSON (min of both camera scores) (v4.7)
 - Depsgraph flush: after torso+spine (before neck), after neck/head (before limbs)
 
-## Version History (Retargeter)
+## Version History (Retargeter, v3.x → v5.19)
+
+> **Reference only.** This is the patch history of the custom retargeter used
+> for the music video. Don't iterate further on this code — the short film
+> pipeline pivot is the priority. Kept here so anyone looking at the v5.x
+> branch can understand what each constant is for.
+
 
 ### v3.x — IK arms, worked well for arm POSITIONING
 - Arms used IK wrist targets — character hands went where mocap wrists were
