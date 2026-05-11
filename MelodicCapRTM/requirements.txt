@@ -1,0 +1,11 @@
+# MelodicCap RTM - Dependencies
+# For GPU acceleration (recommended with RTX 3060 Ti):
+#   pip install onnxruntime-gpu
+# For CPU only:
+#   pip install onnxruntime
+
+rtmlib>=0.0.12
+onnxruntime-gpu>=1.16.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+scipy>=1.11.0

@@ -40,33 +40,27 @@ class ScientificRefiner:
             lms_b = frame.get("raw_2d", {}).get("cam_b")
             hands_a = frame.get("hands_2d", {}).get("cam_a")
             hands_b = frame.get("hands_2d", {}).get("cam_b")
-            
+
             if lms_a and lms_b:
                 points_3d = self._triangulate_raw(lms_a, lms_b)
                 if points_3d:
-                    # Apply floor offset if calibrated
-                    for idx in points_3d:
-                        points_3d[idx] = self.engine.apply_floor_offset(points_3d[idx])
-                    frame["landmarks_3d"] = points_3d
-            
+                    # Floor offset is already applied in triangulation_engine
+                    # Write to unified "landmarks" key
+                    frame["landmarks"] = points_3d
+
             # Refine Hands (Finger-Fidelity)
             if hands_a and hands_b:
                 hands_3d = self._triangulate_hands_raw(hands_a, hands_b)
             elif hands_a:
-                # Single-Camera Fallback for Close-ups (Simple 2D->3D mapping)
                 hands_3d = self._estimate_hands_single(hands_a)
             elif hands_b:
                 hands_3d = self._estimate_hands_single(hands_b)
             else:
                 hands_3d = None
-                
+
             if hands_3d:
-                # Apply floor offset to hands too
-                for hand in hands_3d:
-                    for i in range(len(hand)):
-                        hand[i] = self.engine.apply_floor_offset(hand[i])
                 frame["hands_3d"] = hands_3d
-            
+
             refined_frames.append(frame)
             
         # 2. Apply Professional Butterworth Smoothing
@@ -157,16 +151,17 @@ class ScientificRefiner:
         # Use first valid frame to determine landmark count
         lms_keys = []
         for f in frames:
-            if f.get("landmarks_3d"):
-                lms_keys = list(f["landmarks_3d"].keys())
+            lms = f.get("landmarks", f.get("landmarks_3d"))
+            if lms:
+                lms_keys = list(lms.keys())
                 break
-        
+
         if not lms_keys: return frames
-        
+
         # Create data tensor
         data = np.zeros((n_frames, len(lms_keys), 3))
         for i, frame in enumerate(frames):
-            lms = frame.get("landmarks_3d", {})
+            lms = frame.get("landmarks", frame.get("landmarks_3d", {}))
             for j, key in enumerate(lms_keys):
                 if key in lms:
                     data[i, j, :] = lms[key]
@@ -184,9 +179,9 @@ class ScientificRefiner:
         
         # 4. Write back to frames
         for i, frame in enumerate(frames):
-            if "landmarks_3d" not in frame: frame["landmarks_3d"] = {}
+            if "landmarks" not in frame: frame["landmarks"] = {}
             for j, key in enumerate(lms_keys):
-                frame["landmarks_3d"][key] = filtered_data[i, j, :].tolist()
+                frame["landmarks"][key] = filtered_data[i, j, :].tolist()
                 
         return frames
 

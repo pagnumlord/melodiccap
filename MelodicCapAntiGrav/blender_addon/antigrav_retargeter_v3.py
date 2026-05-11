@@ -1,10 +1,10 @@
 bl_info = {
     "name": "AntiGrav V3 Retargeter",
     "author": "Antigravity AI",
-    "version": (3, 1),
+    "version": (3, 2),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > AntiGrav",
-    "description": "Scientific Mocap Retargeter for Rigify using Vector-to-Rotation math with Smart Pinning.",
+    "description": "Unified Mocap Retargeter for Rigify - IK/FK with correct mirroring and standardized format.",
     "category": "Animation",
 }
 
@@ -12,13 +12,163 @@ import bpy
 import json
 import os
 import math
-from mathutils import Vector, Quaternion, Matrix
+from mathutils import Vector, Quaternion, Matrix, Euler
 from bpy_extras.io_utils import ImportHelper
+
+# =============================================================================
+# UNIFIED DATA FORMAT HELPERS
+# =============================================================================
+
+def load_take(filepath):
+    """Load a take file and normalize to unified format.
+    Handles all historical formats:
+      - v8/Fresh: frames[].landmarks = {"0": [x,y,z], ...}
+      - AntiGrav: frames[].landmarks_3d = {"0": [x,y,z], ...}
+      - OldPipeline: frames[].landmarks_3d = [{index, x, y, z, vis}, ...]
+      - OldPipeline: frames[].landmarks_3d = {} (empty, but has raw_2d)
+    """
+    with open(filepath, 'r') as f:
+        data = json.load(f)
+
+    frames = data.get('frames', [])
+    normalized = []
+
+    for frame in frames:
+        # Try unified format first
+        lms = frame.get('landmarks')
+
+        # Fallback to landmarks_3d
+        if not lms:
+            lms = frame.get('landmarks_3d')
+
+        # Handle list-of-dicts format (oldest pipeline)
+        if isinstance(lms, list):
+            lms_dict = {}
+            for item in lms:
+                if isinstance(item, dict) and 'index' in item:
+                    lms_dict[str(item['index'])] = [item['x'], item['y'], item['z']]
+            lms = lms_dict
+
+        # Ensure string keys
+        if isinstance(lms, dict):
+            clean = {}
+            for k, v in lms.items():
+                clean[str(k)] = v
+            lms = clean
+        else:
+            lms = {}
+
+        normalized.append({
+            'timestamp': frame.get('timestamp', 0),
+            'landmarks': lms,
+            'hands_3d': frame.get('hands_3d', []),
+        })
+
+    calib = data.get('calibration', {})
+    return {
+        'frames': normalized,
+        'fps': data.get('fps', 30),
+        'floor_offset': calib.get('floor_z_offset', calib.get('floor_offset', 0.0)),
+    }
+
+
+def get_lm(landmarks, idx):
+    """Get landmark by index, returns Vector or None."""
+    key = str(idx)
+    if key in landmarks:
+        p = landmarks[key]
+        if isinstance(p, (list, tuple)) and len(p) >= 3:
+            return Vector((p[0], p[1], p[2]))
+    return None
+
+
+def get_hip_center(landmarks):
+    """Average of left and right hip."""
+    l = get_lm(landmarks, 23)
+    r = get_lm(landmarks, 24)
+    if l and r:
+        return (l + r) / 2
+    return None
+
+
+def mp_to_blender(v):
+    """Convert MelodicCap Blender-space vector with X-mirroring for facing-camera setup.
+    When performer faces camera: their LEFT appears on screen RIGHT.
+    MediaPipe LEFT landmarks (11,13,15,23,25,27) = Rigify RIGHT bones.
+    """
+    return Vector((-v.x, v.y, v.z))
+
+
+# =============================================================================
+# BONE MAPPINGS
+# =============================================================================
+
+# MediaPipe LEFT limbs map to Rigify RIGHT (performer faces camera)
+FK_MAP = {
+    'upper_arm_fk.R': (11, 13),   # person's left shoulder->elbow
+    'forearm_fk.R': (13, 15),     # person's left elbow->wrist
+    'thigh_fk.R': (23, 25),       # person's left hip->knee
+    'shin_fk.R': (25, 27),        # person's left knee->ankle
+    'upper_arm_fk.L': (12, 14),   # person's right shoulder->elbow
+    'forearm_fk.L': (14, 16),     # person's right elbow->wrist
+    'thigh_fk.L': (24, 26),       # person's right hip->knee
+    'shin_fk.L': (26, 28),        # person's right knee->ankle
+}
+
+IK_MAP = {
+    'hand_ik.R': 15,   # person's left wrist
+    'hand_ik.L': 16,   # person's right wrist
+    'foot_ik.R': 27,   # person's left ankle
+    'foot_ik.L': 28,   # person's right ankle
+}
+
+IK_FK_SWITCHES = {
+    'upper_arm_parent.L': 'IK_FK',
+    'upper_arm_parent.R': 'IK_FK',
+    'thigh_parent.L': 'IK_FK',
+    'thigh_parent.R': 'IK_FK',
+}
+
+# Virtual spine segments from MediaPipe landmarks
+SPINE_MAP = {
+    'spine_fk': ('hip_mid', 'spine_low'),
+    'spine_fk.001': ('spine_low', 'spine_mid'),
+    'spine_fk.002': ('spine_mid', 'neck_mid'),
+    'spine_fk.003': ('neck_mid', 'shoulder_mid'),
+}
+
+
+def compute_spine_virtuals(lms):
+    """Compute virtual spine landmarks from hip/shoulder midpoints."""
+    v11 = get_lm(lms, 11)
+    v12 = get_lm(lms, 12)
+    v23 = get_lm(lms, 23)
+    v24 = get_lm(lms, 24)
+    if not all([v11, v12, v23, v24]):
+        return lms
+
+    hip_mid = (v23 + v24) / 2
+    sh_mid = (v11 + v12) / 2
+    spine_mid = (hip_mid + sh_mid) / 2
+    spine_low = (hip_mid + spine_mid) / 2
+    neck_mid = (spine_mid + sh_mid) / 2
+
+    # Store as lists for consistency
+    lms['hip_mid'] = list(hip_mid)
+    lms['spine_low'] = list(spine_low)
+    lms['spine_mid'] = list(spine_mid)
+    lms['neck_mid'] = list(neck_mid)
+    lms['shoulder_mid'] = list(sh_mid)
+    return lms
+
+
+# =============================================================================
+# OPERATORS
+# =============================================================================
 
 class ANTIGRAV_OT_create_prop_empty(bpy.types.Operator):
     bl_idname = "antigrav.create_prop_empty"
     bl_label = "Create Prop Empty"
-    bl_description = "Creates a tracking empty at the selection for prop alignment"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -26,15 +176,13 @@ class ANTIGRAV_OT_create_prop_empty(bpy.types.Operator):
         if not rig or rig.type != 'ARMATURE':
             self.report({'ERROR'}, "Select the Armature first.")
             return {'CANCELLED'}
-        
-        # Create Empty
+
         bpy.ops.object.mode_set(mode='OBJECT')
         empty = bpy.data.objects.new("Prop_Anchor", None)
         empty.empty_display_type = 'CUBE'
         empty.empty_display_size = 0.1
         context.collection.objects.link(empty)
-        
-        # Parent to selection (usually a hand bone)
+
         active_bone = context.active_pose_bone
         if active_bone:
             empty.parent = rig
@@ -44,245 +192,336 @@ class ANTIGRAV_OT_create_prop_empty(bpy.types.Operator):
             self.report({'INFO'}, f"Prop Empty parented to {active_bone.name}")
         else:
             self.report({'WARNING'}, "No bone selected, created world-space empty.")
-            
+
         return {'FINISHED'}
 
+
 class ANTIGRAV_OT_sanitize_rig(bpy.types.Operator):
-    """Remove previous retargeting constraints (Copy Transforms/Location) from DEF bones"""
+    """Remove previous retargeting constraints from bones"""
     bl_idname = "antigrav.sanitize_rig"
     bl_label = "Sanitize Rig"
-    
+
     def execute(self, context):
         rig = context.active_object
         if not rig or rig.type != 'ARMATURE':
             self.report({'ERROR'}, "Select the Rigify Armature")
             return {'CANCELLED'}
-        
+
         count = 0
         for bone in rig.pose.bones:
             if bone.name.startswith("DEF-") or "_fk" in bone.name:
-                for con in bone.constraints:
+                for con in list(bone.constraints):
                     if con.type in {'COPY_TRANSFORMS', 'COPY_LOCATION', 'COPY_ROTATION'} and not con.name.startswith("RIGIFY"):
                         bone.constraints.remove(con)
                         count += 1
-        
-        self.report({'INFO'}, f"Cleaned {count} suspicious constraints.")
+
+        self.report({'INFO'}, f"Cleaned {count} constraints.")
         return {'FINISHED'}
 
-class ANTIGRAV_OT_align_poses(bpy.types.Operator):
-    """Align the character's rest pose based on the selected cast member"""
-    bl_idname = "antigrav.align_poses"
-    bl_label = "Align Poses"
+
+class ANTIGRAV_OT_set_ik(bpy.types.Operator):
+    bl_idname = "antigrav.set_ik"
+    bl_label = "Set IK Mode"
+    bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
         rig = context.active_object
-        preset = context.scene.antigrav_character_preset
-        
-        offsets = {
-            "upper_arm_fk.L": (0, 0, 0.785),
-            "upper_arm_fk.R": (0, 0, -0.785),
-        }
-        
-        for bone_name, rot in offsets.items():
-            bone = rig.pose.bones.get(bone_name)
-            if bone:
-                bone.rotation_mode = 'QUATERNION'
-                from mathutils import Euler
-                bone.rotation_quaternion = Euler(rot, 'XYZ').to_quaternion()
-        
-        self.report({'INFO'}, f"Aligned {preset} to T-Pose.")
+        if rig and rig.type == 'ARMATURE':
+            for bone, prop in IK_FK_SWITCHES.items():
+                if bone in rig.pose.bones and prop in rig.pose.bones[bone]:
+                    rig.pose.bones[bone][prop] = 0.0
+            self.report({'INFO'}, "IK mode set")
         return {'FINISHED'}
 
-class ANTIGRAV_OT_import_v2r(bpy.types.Operator, ImportHelper):
-    """Import scientific 3D JSON and apply pure rotation retargeting with Smart Pinning"""
-    bl_idname = "antigrav.import_v2r"
-    bl_label = "Import Scientific Mocap (.json)"
-    
+
+class ANTIGRAV_OT_set_fk(bpy.types.Operator):
+    bl_idname = "antigrav.set_fk"
+    bl_label = "Set FK Mode"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        rig = context.active_object
+        if rig and rig.type == 'ARMATURE':
+            for bone, prop in IK_FK_SWITCHES.items():
+                if bone in rig.pose.bones and prop in rig.pose.bones[bone]:
+                    rig.pose.bones[bone][prop] = 1.0
+            self.report({'INFO'}, "FK mode set")
+        return {'FINISHED'}
+
+
+class ANTIGRAV_OT_import_ik(bpy.types.Operator, ImportHelper):
+    """Import mocap using IK targets with root motion"""
+    bl_idname = "antigrav.import_ik"
+    bl_label = "Import IK (.json)"
+
     filename_ext = ".json"
     filter_glob: bpy.props.StringProperty(default="*.json", options={'HIDDEN'})
 
     def execute(self, context):
         rig = context.active_object
         if not rig or rig.type != 'ARMATURE':
-            self.report({'ERROR'}, "Select the Jax Rigify Armature")
+            self.report({'ERROR'}, "Select the Rigify Armature")
             return {'CANCELLED'}
 
-        with open(self.filepath, 'r') as f:
-            data = json.load(f)
-
-        frames = data.get('frames', [])
+        take = load_take(self.filepath)
+        frames = take['frames']
         if not frames:
-            self.report({'ERROR'}, "No frames found in JSON")
+            self.report({'ERROR'}, "No frames found")
             return {'CANCELLED'}
 
-        v2r_map = {
-            "upper_arm_fk.L": (11, 13),
-            "forearm_fk.L": (13, 15),
-            "upper_arm_fk.R": (12, 14),
-            "forearm_fk.R": (14, 16),
-            "thigh_fk.L": (23, 25),
-            "shin_fk.L": (25, 27),
-            "thigh_fk.R": (24, 26),
-            "shin_fk.R": (26, 28),
-            # Full Professional Spine (4 Segments)
-            "spine_fk": ("hip_mid", "spine_low"),
-            "spine_fk.001": ("spine_low", "spine_mid"),
-            "spine_fk.002": ("spine_mid", "neck_mid"),
-            "spine_fk.003": ("neck_mid", "shoulder_mid")
-        }
+        pose_bones = rig.pose.bones
+        world = rig.matrix_world
 
-        # Professional State: Track previous positions for velocity-based pinning
-        prev_pos = {".L": None, ".R": None}
-        pin_threshold = context.scene.antigrav_pin_threshold
+        # Set IK mode
+        for bone, prop in IK_FK_SWITCHES.items():
+            if bone in pose_bones and prop in pose_bones[bone]:
+                pose_bones[bone][prop] = 0.0
 
+        # Reference frame
+        ref_lms = frames[0]['landmarks']
+        ref_hip = get_hip_center(ref_lms)
+        if not ref_hip:
+            self.report({'ERROR'}, "No hip landmarks in first frame")
+            return {'CANCELLED'}
+
+        # Calculate scale from arm length
+        l_shoulder = get_lm(ref_lms, 11)
+        l_wrist = get_lm(ref_lms, 15)
+        scale = 1.0
+        if l_shoulder and l_wrist:
+            person_arm = (l_wrist - l_shoulder).length
+            char_arm = 0.52  # default Rigify arm length
+            if 'upper_arm_fk.L' in pose_bones and 'hand_fk.L' in pose_bones:
+                s = world @ pose_bones['upper_arm_fk.L'].bone.head_local
+                w = world @ pose_bones['hand_fk.L'].bone.head_local
+                char_arm = (w - s).length
+            if person_arm > 0.01:
+                scale = char_arm / person_arm
+        print(f"[AntiGrav] IK import - scale: {scale:.3f}")
+
+        # Reference limb positions relative to hip
+        ref_limb_rel = {}
+        for ik_bone, lm_idx in IK_MAP.items():
+            lm = get_lm(ref_lms, lm_idx)
+            if lm:
+                ref_limb_rel[ik_bone] = lm - ref_hip
+
+        # Create action
         bpy.ops.object.mode_set(mode='POSE')
-        for bone in rig.pose.bones:
-            if "IK_FK" in bone.keys():
-                # Professional Dual Mode: Use 0.5 to blend, or stay 1.0 for FK but still key IK targets
-                bone["IK_FK"] = 1.0 
+        if not rig.animation_data:
+            rig.animation_data_create()
+        action = bpy.data.actions.new(name="AntiGrav_IK")
+        rig.animation_data.action = action
 
-        for frame_data in frames:
-            timestamp = frame_data['timestamp']
-            f_idx = int(timestamp * 30)
+        pin_threshold = context.scene.antigrav_pin_threshold
+        prev_foot = {'.L': None, '.R': None}
+
+        for fidx, fdata in enumerate(frames):
+            f_idx = fidx + 1
             context.scene.frame_set(f_idx)
-            lms = frame_data['landmarks_3d']
-            
-            # ... (rest of the logic stays similar but we ensure IK targets are keyed properly)
-            
-            # CALCULATE VIRTUAL MIDPOINTS FOR SPINE (4 segments)
-            if "11" in lms and "12" in lms and "23" in lms and "24" in lms:
-                v11, v12 = Vector(lms["11"]), Vector(lms["12"])
-                v23, v24 = Vector(lms["23"]), Vector(lms["24"])
-                
-                hip_mid = (v23 + v24) / 2
-                sh_mid = (v11 + v12) / 2
-                spine_mid = (hip_mid + sh_mid) / 2
-                
-                # Intermediate segments for 4-bone spine
-                spine_low = (hip_mid + spine_mid) / 2
-                neck_mid = (spine_mid + sh_mid) / 2 
-                
-                lms["hip_mid"] = hip_mid
-                lms["spine_low"] = spine_low
-                lms["spine_mid"] = spine_mid
-                lms["neck_mid"] = neck_mid
-                lms["shoulder_mid"] = sh_mid
+            lms = fdata['landmarks']
 
-            # 1. Hips Translation (TORSO is the master parent)
-            hips = rig.pose.bones.get("torso")
-            if hips and "hip_mid" in lms:
-                target_pos = lms["hip_mid"]
-                # Torso is often world-aligned in rest pose; transform properly
-                hips.location = rig.matrix_world.inverted() @ target_pos
-                hips.keyframe_insert(data_path="location")
+            current_hip = get_hip_center(lms)
+            if not current_hip:
+                continue
 
-            # 2. V2R Limb & Spine Rotations (Scientific Axis Correction)
-            bone_axes = {
-                "spine_fk": Vector((0, 0, 1)),
-                "spine_fk.001": Vector((0, 0, 1)),
-                "spine_fk.002": Vector((0, 0, 1)),
-                "spine_fk.003": Vector((0, 0, 1)),
-                "neck": Vector((0, 0, 1)),
-                "head": Vector((0, 0, 1))
-            }
+            # Root motion
+            hip_delta = current_hip - ref_hip
+            scaled_delta = hip_delta * scale
 
-            for bone_name, (s, e) in v2r_map.items():
-                bone = rig.pose.bones.get(bone_name)
-                if bone and str(s) in lms and str(e) in lms:
-                    v_start = Vector(lms[str(s)])
-                    v_end = Vector(lms[str(e)])
-                    target_dir = (v_end - v_start).normalized()
-                    
-                    bone.rotation_mode = 'QUATERNION'
-                    target_dir_local = (rig.matrix_world.inverted().to_quaternion() @ target_dir)
-                    
-                    # Axis Correction: Rigify limbs point +Y, Spine/Head point +Z
-                    rest_axis = bone_axes.get(bone_name, Vector((0, 1, 0)))
-                    quat = rest_axis.rotation_difference(target_dir_local)
-                    bone.rotation_quaternion = quat
-                    bone.keyframe_insert(data_path="rotation_quaternion")
+            if 'torso' in pose_bones:
+                pose_bones['torso'].location = mp_to_blender(scaled_delta)
+                pose_bones['torso'].keyframe_insert(data_path="location", frame=f_idx)
 
-            # 3. Smart Foot/Hand Pinning & Z-Clamp
-            for side in [".L", ".R"]:
-                # FOOT IK
-                foot_ik = rig.pose.bones.get(f"foot_ik{side}")
-                if foot_ik:
-                    idx = 27 if side == ".L" else 28
-                    if str(idx) in lms:
-                        pos = Vector(lms[str(idx)])
-                        if pos.z < 0: pos.z = 0 # Ground Clamp
-                        
-                        if prev_pos.get(f"foot{side}") is not None:
-                            dist = (pos - prev_pos[f"foot{side}"]).length
-                            if dist < pin_threshold:
-                                pos = prev_pos[f"foot{side}"]
-                        
-                        prev_pos[f"foot{side}"] = pos.copy()
-                        foot_ik.location = rig.matrix_world.inverted() @ pos
-                        
-                        # FOOT ROTATION: Align to shin vector
-                        idx_start = 25 if side == ".L" else 26
-                        if str(idx_start) in lms:
-                            vec_shin = (Vector(lms[str(idx)]) - Vector(lms[str(idx_start)])).normalized()
-                            foot_ik.rotation_mode = 'QUATERNION'
-                            foot_ik.rotation_quaternion = Vector((0, 0, 1)).rotation_difference(rig.matrix_world.inverted().to_quaternion() @ vec_shin)
+            # IK targets
+            for ik_bone, lm_idx in IK_MAP.items():
+                if ik_bone not in pose_bones or ik_bone not in ref_limb_rel:
+                    continue
 
-                        foot_ik.keyframe_insert(data_path="location")
-                        foot_ik.keyframe_insert(data_path="rotation_quaternion")
+                lm = get_lm(lms, lm_idx)
+                if not lm:
+                    continue
 
-                # HAND IK (NEW: Support for sitting/touching surfaces)
-                hand_ik = rig.pose.bones.get(f"hand_ik{side}")
-                if hand_ik:
-                    idx = 15 if side == ".L" else 16
-                    if str(idx) in lms:
-                        pos = Vector(lms[str(idx)])
-                        
-                        # Hand pinning (helps with "Hand positions off" jitter)
-                        if prev_pos.get(f"hand{side}") is not None:
-                            dist = (pos - prev_pos[f"hand{side}"]).length
-                            if dist < pin_threshold:
-                                pos = prev_pos[f"hand{side}"]
-                        
-                        prev_pos[f"hand{side}"] = pos.copy()
-                        hand_ik.location = rig.matrix_world.inverted() @ pos
+                current_rel = lm - current_hip
+                ref_rel = ref_limb_rel[ik_bone]
+                limb_delta = (current_rel - ref_rel) * scale
 
-                        # HAND ROTATION: Align to forearm vector for better strumming/piano
-                        idx_start = 13 if side == ".L" else 14
-                        if str(idx_start) in lms:
-                            vec_arm = (Vector(lms[str(idx)]) - Vector(lms[str(idx_start)])).normalized()
-                            hand_ik.rotation_mode = 'QUATERNION'
-                            hand_ik.rotation_quaternion = Vector((0, 1, 0)).rotation_difference(rig.matrix_world.inverted().to_quaternion() @ vec_arm)
+                pos = mp_to_blender(limb_delta)
 
-                        hand_ik.keyframe_insert(data_path="location")
-                        hand_ik.keyframe_insert(data_path="rotation_quaternion")
+                # Foot pinning: if foot barely moved, keep it pinned
+                if 'foot' in ik_bone:
+                    side = '.L' if ik_bone.endswith('.L') else '.R'
+                    if prev_foot[side] is not None:
+                        if (pos - prev_foot[side]).length < pin_threshold:
+                            pos = prev_foot[side]
+                    prev_foot[side] = pos.copy()
 
-                # POLE TARGETS (Automatic Elbow/Knee Orientation)
-                p_side = "L" if side == ".L" else "R"
-                elbow_pole = rig.pose.bones.get(f"upper_arm_ik_target.{p_side}")
-                if elbow_pole:
-                    idx_wrist = 15 if side == ".L" else 16
-                    idx_elbow = 13 if side == ".L" else 14
-                    idx_sh = 11 if side == ".L" else 12
-                    if str(idx_wrist) in lms and str(idx_elbow) in lms and str(idx_sh) in lms:
-                        # Calculate pole position by projecting elbow away from the sh-wrist line
-                        v_sh = Vector(lms[str(idx_sh)])
-                        v_elbow = Vector(lms[str(idx_elbow)])
-                        v_wrist = Vector(lms[str(idx_wrist)])
-                        
-                        line = (v_wrist - v_sh).normalized()
-                        proj = v_sh + line * (v_elbow - v_sh).dot(line)
-                        pole_vec = (v_elbow - proj).normalized() * 0.5 # Offset backward
-                        elbow_pole.location = rig.matrix_world.inverted() @ (v_elbow + pole_vec)
-                        elbow_pole.keyframe_insert(data_path="location")
+                    # Ground clamp for feet
+                    world_pos = lm * scale
+                    if mp_to_blender(world_pos).z < 0:
+                        pos.z = max(pos.z, 0)
 
-            # 4. FINGER-FIDELITY (21 points per hand)
-            hands_3d = frame_data.get('hands_3d', [])
+                pose_bones[ik_bone].location = pos
+                pose_bones[ik_bone].keyframe_insert(data_path="location", frame=f_idx)
+
+        context.scene.frame_start = 1
+        context.scene.frame_end = len(frames)
+        self.report({'INFO'}, f"Imported {len(frames)} frames (IK)")
+        return {'FINISHED'}
+
+
+class ANTIGRAV_OT_import_fk(bpy.types.Operator, ImportHelper):
+    """Import mocap using FK bone rotations with spine"""
+    bl_idname = "antigrav.import_fk"
+    bl_label = "Import FK (.json)"
+
+    filename_ext = ".json"
+    filter_glob: bpy.props.StringProperty(default="*.json", options={'HIDDEN'})
+
+    def execute(self, context):
+        rig = context.active_object
+        if not rig or rig.type != 'ARMATURE':
+            self.report({'ERROR'}, "Select the Rigify Armature")
+            return {'CANCELLED'}
+
+        take = load_take(self.filepath)
+        frames = take['frames']
+        if not frames:
+            self.report({'ERROR'}, "No frames found")
+            return {'CANCELLED'}
+
+        pose_bones = rig.pose.bones
+        world = rig.matrix_world
+
+        # Set FK mode
+        for bone, prop in IK_FK_SWITCHES.items():
+            if bone in pose_bones and prop in pose_bones[bone]:
+                pose_bones[bone][prop] = 1.0
+
+        # Reference
+        ref_lms = frames[0]['landmarks']
+        ref_hip = get_hip_center(ref_lms)
+        if not ref_hip:
+            self.report({'ERROR'}, "No hip landmarks in first frame")
+            return {'CANCELLED'}
+
+        # Scale
+        l_shoulder = get_lm(ref_lms, 11)
+        l_wrist = get_lm(ref_lms, 15)
+        scale = 1.0
+        if l_shoulder and l_wrist:
+            person_arm = (l_wrist - l_shoulder).length
+            char_arm = 0.52
+            if 'upper_arm_fk.L' in pose_bones and 'hand_fk.L' in pose_bones:
+                s = world @ pose_bones['upper_arm_fk.L'].bone.head_local
+                w = world @ pose_bones['hand_fk.L'].bone.head_local
+                char_arm = (w - s).length
+            if person_arm > 0.01:
+                scale = char_arm / person_arm
+        print(f"[AntiGrav] FK import - scale: {scale:.3f}")
+
+        # Get rest directions for each FK bone
+        rest_dirs = {}
+        for fk_bone in list(FK_MAP.keys()) + list(SPINE_MAP.keys()):
+            if fk_bone in rig.data.bones:
+                bone = rig.data.bones[fk_bone]
+                head = world @ bone.head_local
+                tail = world @ bone.tail_local
+                rest_dirs[fk_bone] = (tail - head).normalized()
+
+        # Spine rest axes point +Z typically
+        spine_rest_axis = Vector((0, 0, 1))
+
+        # Create action
+        bpy.ops.object.mode_set(mode='POSE')
+        if not rig.animation_data:
+            rig.animation_data_create()
+        action = bpy.data.actions.new(name="AntiGrav_FK")
+        rig.animation_data.action = action
+
+        for pb in pose_bones:
+            pb.rotation_mode = 'QUATERNION'
+
+        for fidx, fdata in enumerate(frames):
+            f_idx = fidx + 1
+            context.scene.frame_set(f_idx)
+            lms = fdata['landmarks']
+
+            current_hip = get_hip_center(lms)
+            if not current_hip:
+                continue
+
+            # Compute spine virtuals
+            lms = compute_spine_virtuals(lms)
+
+            # Root motion (hip translation)
+            hip_delta = current_hip - ref_hip
+            scaled_delta = hip_delta * scale
+
+            if 'torso' in pose_bones:
+                pose_bones['torso'].location = mp_to_blender(scaled_delta)
+                pose_bones['torso'].keyframe_insert(data_path="location", frame=f_idx)
+
+            # Limb FK rotations
+            for fk_bone, (start_lm, end_lm) in FK_MAP.items():
+                if fk_bone not in pose_bones or fk_bone not in rest_dirs:
+                    continue
+
+                start = get_lm(lms, start_lm)
+                end = get_lm(lms, end_lm)
+                if not start or not end:
+                    continue
+
+                cur_dir = mp_to_blender((end - start).normalized()).normalized()
+                rest_dir = rest_dirs[fk_bone]
+
+                rotation = rest_dir.rotation_difference(cur_dir)
+
+                pb = pose_bones[fk_bone]
+                if pb.parent:
+                    parent_rot = pb.parent.matrix.to_quaternion()
+                    local_rot = parent_rot.inverted() @ rotation
+                else:
+                    arm_rot = world.to_quaternion()
+                    local_rot = arm_rot.inverted() @ rotation
+
+                pb.rotation_quaternion = local_rot
+                pb.keyframe_insert(data_path="rotation_quaternion", frame=f_idx)
+
+            # Spine FK rotations
+            for spine_bone, (s_key, e_key) in SPINE_MAP.items():
+                if spine_bone not in pose_bones:
+                    continue
+
+                s_val = lms.get(s_key)
+                e_val = lms.get(e_key)
+                if not s_val or not e_val:
+                    continue
+
+                s_vec = Vector(s_val) if isinstance(s_val, (list, tuple)) else s_val
+                e_vec = Vector(e_val) if isinstance(e_val, (list, tuple)) else e_val
+
+                cur_dir = mp_to_blender((e_vec - s_vec).normalized()).normalized()
+                rest_dir = rest_dirs.get(spine_bone, spine_rest_axis)
+
+                rotation = rest_dir.rotation_difference(cur_dir)
+
+                pb = pose_bones[spine_bone]
+                if pb.parent:
+                    parent_rot = pb.parent.matrix.to_quaternion()
+                    local_rot = parent_rot.inverted() @ rotation
+                else:
+                    arm_rot = world.to_quaternion()
+                    local_rot = arm_rot.inverted() @ rotation
+
+                pb.rotation_quaternion = local_rot
+                pb.keyframe_insert(data_path="rotation_quaternion", frame=f_idx)
+
+            # Finger FK (if hand data exists)
+            hands_3d = fdata.get('hands_3d', [])
             for h_idx, hand_lms in enumerate(hands_3d):
-                # Detect side by checking which wrist landmark (15 or 16) is closer to hand root (lm 0)
-                # Or use a simpler heuristic for now
-                h_side = ".L" if h_idx == 0 else ".R" 
-                
-                # Mapping MediaPipe Hand to Rigify Fingers
+                h_side = ".R" if h_idx == 0 else ".L"  # Mirrored: first hand is person's left
+
                 finger_map = {
                     "thumb": [1, 2, 3, 4],
                     "index": [5, 6, 7, 8],
@@ -290,29 +529,103 @@ class ANTIGRAV_OT_import_v2r(bpy.types.Operator, ImportHelper):
                     "ring": [13, 14, 15, 16],
                     "pinky": [17, 18, 19, 20]
                 }
-                
+
                 for f_name, mp_indices in finger_map.items():
                     for i, (s_idx, e_idx) in enumerate(zip(mp_indices[:-1], mp_indices[1:])):
-                        # Rigify bone name (e.g., f_index.01.L)
                         bone_name = f"f_{f_name}.0{i+1}{h_side}"
-                        if f_name == "thumb": bone_name = f"thumb.0{i+1}{h_side}"
-                        
+                        if f_name == "thumb":
+                            bone_name = f"thumb.0{i+1}{h_side}"
+
                         bone = rig.pose.bones.get(bone_name)
-                        if bone:
+                        if bone and s_idx < len(hand_lms) and e_idx < len(hand_lms):
                             v_start = Vector(hand_lms[s_idx])
                             v_end = Vector(hand_lms[e_idx])
-                            target_dir = (v_end - v_start).normalized()
-                            target_dir_local = (rig.matrix_world.inverted().to_quaternion() @ target_dir)
+                            target_dir = mp_to_blender((v_end - v_start).normalized()).normalized()
                             bone.rotation_mode = 'QUATERNION'
-                            # Fingers point +Y in Rigify
-                            bone.rotation_quaternion = Vector((0, 1, 0)).rotation_difference(target_dir_local)
-                            bone.keyframe_insert(data_path="rotation_quaternion")
+                            bone.rotation_quaternion = Vector((0, 1, 0)).rotation_difference(
+                                rig.matrix_world.inverted().to_quaternion() @ target_dir
+                            )
+                            bone.keyframe_insert(data_path="rotation_quaternion", frame=f_idx)
 
-        self.report({'INFO'}, f"Imported {len(frames)} frames with Smart Pinning.")
+        context.scene.frame_start = 1
+        context.scene.frame_end = len(frames)
+        self.report({'INFO'}, f"Imported {len(frames)} frames (FK + Spine)")
         return {'FINISHED'}
 
+
+class ANTIGRAV_OT_analyze(bpy.types.Operator, ImportHelper):
+    """Analyze a take file for data quality"""
+    bl_idname = "antigrav.analyze"
+    bl_label = "Analyze Take"
+    filename_ext = ".json"
+    filter_glob: bpy.props.StringProperty(default="*.json", options={'HIDDEN'})
+
+    def execute(self, context):
+        take = load_take(self.filepath)
+        frames = take['frames']
+
+        print("=" * 60)
+        print("TAKE ANALYSIS")
+        print("=" * 60)
+        print(f"Frames: {len(frames)}")
+        print(f"Floor offset: {take['floor_offset']:.3f}m")
+
+        # Check data quality
+        empty_frames = sum(1 for f in frames if not f['landmarks'])
+        print(f"Empty frames: {empty_frames}/{len(frames)}")
+
+        if frames and frames[0]['landmarks']:
+            lms = frames[0]['landmarks']
+            hip = get_hip_center(lms)
+            if hip:
+                print(f"Hip center: ({hip.x:.3f}, {hip.y:.3f}, {hip.z:.3f})")
+
+            # Check shoulder distance (should be ~0.35-0.45m)
+            sl = get_lm(lms, 11)
+            sr = get_lm(lms, 12)
+            if sl and sr:
+                sh_dist = (sl - sr).length
+                print(f"Shoulder distance: {sh_dist:.3f}m (expected ~0.4m)")
+                if sh_dist > 1.0:
+                    print("  WARNING: Distance too large - possible calibration issue!")
+                elif sh_dist < 0.1:
+                    print("  WARNING: Distance too small - possible scale issue!")
+
+            # Check foot Z (should be near 0 for standing)
+            fl = get_lm(lms, 27)
+            fr = get_lm(lms, 28)
+            if fl and fr:
+                avg_foot_z = (fl.z + fr.z) / 2
+                print(f"Avg foot Z: {avg_foot_z:.3f}m (expected ~0 for standing)")
+
+        self.report({'INFO'}, "Check console for analysis")
+        return {'FINISHED'}
+
+
+class ANTIGRAV_OT_clear(bpy.types.Operator):
+    bl_idname = "antigrav.clear"
+    bl_label = "Clear Animation"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        rig = context.active_object
+        if rig and rig.type == 'ARMATURE':
+            if rig.animation_data:
+                rig.animation_data.action = None
+            for pb in rig.pose.bones:
+                pb.location = Vector((0, 0, 0))
+                pb.rotation_quaternion = Quaternion((1, 0, 0, 0))
+                pb.rotation_euler = Euler((0, 0, 0))
+        self.report({'INFO'}, "Cleared animation")
+        return {'FINISHED'}
+
+
+# =============================================================================
+# PANEL
+# =============================================================================
+
 class ANTIGRAV_PT_main_panel(bpy.types.Panel):
-    bl_label = "AntiGrav V3"
+    bl_label = "AntiGrav V3.2"
     bl_idname = "ANTIGRAV_PT_main_panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
@@ -321,48 +634,64 @@ class ANTIGRAV_PT_main_panel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         col = layout.column(align=True)
+
         col.label(text="Step 1: Preparation")
         col.operator("antigrav.sanitize_rig", icon='BRUSH')
-        
+
         col.separator()
-        col.label(text="Step 2: Cast Member")
-        col.prop(bpy.context.scene, "antigrav_character_preset")
-        col.operator("antigrav.align_poses", icon='POSE_HLT')
-        
+        col.label(text="Step 2: Mode")
+        row = col.row(align=True)
+        row.operator("antigrav.set_ik", text="IK Mode")
+        row.operator("antigrav.set_fk", text="FK Mode")
+
         col.separator()
-        col.label(text="Step 3: Pro Properties")
-        col.prop(bpy.context.scene, "antigrav_pin_threshold", text="Pin Sensitivity")
-        
+        col.label(text="Step 3: Settings")
+        col.prop(bpy.context.scene, "antigrav_pin_threshold", text="Foot Pin Sensitivity")
+
         col.separator()
-        col.label(text="Step 4: Load Take")
-        col.operator("antigrav.import_v2r", icon='ANIM_DATA', text="Import Scientific JSON")
-        
+        col.label(text="Step 4: Import")
+        col.operator("antigrav.import_ik", icon='ANIM_DATA', text="Import IK")
+        col.operator("antigrav.import_fk", icon='ANIM_DATA', text="Import FK + Spine")
+
         col.separator()
-        col.label(text="Step 5: Production Tools")
-        col.operator("antigrav.create_prop_empty", icon='EMPTY_AXIS', text="Create Prop Anchor")
+        col.label(text="Step 5: Tools")
+        row = col.row(align=True)
+        row.operator("antigrav.analyze", text="Analyze Take")
+        row.operator("antigrav.clear", text="Clear")
+        col.operator("antigrav.create_prop_empty", icon='EMPTY_AXIS', text="Prop Anchor")
+
+
+# =============================================================================
+# REGISTRATION
+# =============================================================================
+
+classes = [
+    ANTIGRAV_OT_sanitize_rig,
+    ANTIGRAV_OT_set_ik,
+    ANTIGRAV_OT_set_fk,
+    ANTIGRAV_OT_import_ik,
+    ANTIGRAV_OT_import_fk,
+    ANTIGRAV_OT_analyze,
+    ANTIGRAV_OT_clear,
+    ANTIGRAV_OT_create_prop_empty,
+    ANTIGRAV_PT_main_panel,
+]
+
 
 def register():
-    bpy.utils.register_class(ANTIGRAV_OT_sanitize_rig)
-    bpy.utils.register_class(ANTIGRAV_OT_align_poses)
-    bpy.utils.register_class(ANTIGRAV_OT_import_v2r)
-    bpy.utils.register_class(ANTIGRAV_OT_create_prop_empty)
-    bpy.utils.register_class(ANTIGRAV_PT_main_panel)
-    bpy.types.Scene.antigrav_character_preset = bpy.props.EnumProperty(
-        items=[('JAX', 'Jax', ''), ('KIKO', 'Kiko', ''), ('KAI', 'Kai', ''), ('DR_WHITE', 'Dr. White', ''), ('HIRO', 'Hiro', ''), ('SHADOW', 'Shadow', '')],
-        name="Preset", default='JAX'
-    )
+    for cls in classes:
+        bpy.utils.register_class(cls)
     bpy.types.Scene.antigrav_pin_threshold = bpy.props.FloatProperty(
-        name="Pin Threshold", default=0.02, min=0.0, max=0.2, description="Higher = Stickier Feet"
+        name="Pin Threshold", default=0.02, min=0.0, max=0.2,
+        description="Foot velocity threshold for pinning (meters). Higher = stickier feet."
     )
 
+
 def unregister():
-    bpy.utils.unregister_class(ANTIGRAV_OT_sanitize_rig)
-    bpy.utils.unregister_class(ANTIGRAV_OT_align_poses)
-    bpy.utils.unregister_class(ANTIGRAV_OT_import_v2r)
-    bpy.utils.unregister_class(ANTIGRAV_OT_create_prop_empty)
-    bpy.utils.unregister_class(ANTIGRAV_PT_main_panel)
-    del bpy.types.Scene.antigrav_character_preset
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
     del bpy.types.Scene.antigrav_pin_threshold
+
 
 if __name__ == "__main__":
     register()

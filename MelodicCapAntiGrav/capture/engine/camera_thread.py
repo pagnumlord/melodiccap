@@ -4,9 +4,30 @@ import time
 import mediapipe as mp
 import numpy as np
 
+# ========================================================================
+# SINGLE SOURCE OF TRUTH: Board configuration
+# Must match your PHYSICAL printed board exactly!
+# ========================================================================
+BOARD_COLS = 4
+BOARD_ROWS = 3
+BOARD_SQUARE_M = 0.0635    # 63.5mm - measure your printed board!
+BOARD_MARKER_M = 0.0476    # 47.6mm
+BOARD_DICT = cv2.aruco.DICT_4X4_50
+
+
+def get_board_and_detector():
+    """Returns the canonical board and detector. Use this everywhere."""
+    dictionary = cv2.aruco.getPredefinedDictionary(BOARD_DICT)
+    board = cv2.aruco.CharucoBoard(
+        (BOARD_COLS, BOARD_ROWS), BOARD_SQUARE_M, BOARD_MARKER_M, dictionary
+    )
+    detector = cv2.aruco.CharucoDetector(board)
+    return board, detector
+
+
 class CameraThread(threading.Thread):
     def __init__(self, camera_id, label_widget, mp_pose=None):
-        super().__init__()
+        super().__init__(daemon=True)
         self.camera_id = camera_id
         self.label_widget = label_widget
         self.mp_pose = mp_pose
@@ -14,35 +35,35 @@ class CameraThread(threading.Thread):
         self.cap = None
         self.latest_frame = None
         self.landmarks = None
-        
-        # Initialize MediaPipe
+        self.frame_timestamp = 0  # For frame sync
+
+        # Initialize MediaPipe with lower thresholds for better tracking
         self.mp_drawing = mp.solutions.drawing_utils
         self.mp_pose = mp.solutions.pose
         self.mp_hands = mp.solutions.hands
-        
+
         self.pose = self.mp_pose.Pose(
             static_image_mode=False,
             model_complexity=1,
             enable_segmentation=False,
-            min_detection_confidence=0.5
+            min_detection_confidence=0.3,
+            min_tracking_confidence=0.3
         )
-        
+
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
             max_num_hands=2,
-            min_detection_confidence=0.5
+            min_detection_confidence=0.3
         )
-        
+
         # Calibration & Performance Optimization
         self.calibration_mode = False
         self.board_detected_section = None
         self.last_detection_time = 0
         self.detection_interval = 0.1 # 10 FPS for ChArUco is plenty
-        
-        # Initialize Board Detector
-        dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-        board = cv2.aruco.CharucoBoard((4, 3), 0.040, 0.030, dictionary)
-        self.charuco_detector = cv2.aruco.CharucoDetector(board)
+
+        # Use canonical board config
+        _, self.charuco_detector = get_board_and_detector()
 
     def run(self):
         # Try DirectShow first (standard for Windows capture)
@@ -76,6 +97,7 @@ class CameraThread(threading.Thread):
                 time.sleep(0.01)
                 continue
 
+            self.frame_timestamp = time.perf_counter()
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
             # Process MediaPipe
