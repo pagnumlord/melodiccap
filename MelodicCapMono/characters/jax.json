@@ -1,0 +1,32 @@
+{
+  "name": "Jax",
+  "armature": "JaxRigify",
+  "height_m": 1.87,
+  "_comment_about_offsets": "rot_offset_euler_deg is added AFTER the SMPL axis-angle is converted to a Blender quaternion. Use it to absorb mismatches between SMPL's joint frame and the Rigify bone's roll. Common values are 0 / +/- 90 / +/- 180. Edit these during Phase F calibration when you see a bone rotated wrong on a real take.",
+  "smpl_to_rig": {
+    "pelvis":         { "bone": "torso",         "rot_offset_euler_deg": [0, 0, 0] },
+    "left_hip":       { "bone": "thigh_fk.L",    "rot_offset_euler_deg": [0, 0, 0] },
+    "right_hip":      { "bone": "thigh_fk.R",    "rot_offset_euler_deg": [0, 0, 0] },
+    "spine1":         { "bone": "spine_fk.001",  "rot_offset_euler_deg": [0, 0, 0] },
+    "left_knee":      { "bone": "shin_fk.L",     "rot_offset_euler_deg": [0, 0, 0] },
+    "right_knee":     { "bone": "shin_fk.R",     "rot_offset_euler_deg": [0, 0, 0] },
+    "spine2":         { "bone": "spine_fk.002",  "rot_offset_euler_deg": [0, 0, 0] },
+    "left_ankle":     { "bone": "foot_fk.L",     "rot_offset_euler_deg": [0, 0, 0] },
+    "right_ankle":    { "bone": "foot_fk.R",     "rot_offset_euler_deg": [0, 0, 0] },
+    "spine3":         { "bone": "chest",         "rot_offset_euler_deg": [0, 0, 0] },
+    "neck":           { "bone": "neck",          "rot_offset_euler_deg": [0, 0, 0] },
+    "head":           { "bone": "head",          "rot_offset_euler_deg": [0, 0, 0] },
+    "left_shoulder":  { "bone": "upper_arm_fk.L","rot_offset_euler_deg": [0, 0, 0] },
+    "right_shoulder": { "bone": "upper_arm_fk.R","rot_offset_euler_deg": [0, 0, 0] },
+    "left_elbow":     { "bone": "forearm_fk.L",  "rot_offset_euler_deg": [0, 0, 0] },
+    "right_elbow":    { "bone": "forearm_fk.R",  "rot_offset_euler_deg": [0, 0, 0] },
+    "left_wrist":     { "bone": "hand_fk.L",     "rot_offset_euler_deg": [0, 0, 0] },
+    "right_wrist":    { "bone": "hand_fk.R",     "rot_offset_euler_deg": [0, 0, 0] }
+  },
+  "root_translation": "ignore",
+  "_comment_about_root": "Options: 'ignore' (best for Path A monocular — drift-prone; keyframe walk path by hand), 'follow' (use SMPL trans as-is), 'follow_xy' (XY only, hold Z at rest — useful for sit/stand transitions).",
+  "axis_conversion": {
+    "_comment": "SMPL convention is Y-up world. JaxRigify in Blender is Z-up. The addon applies this rotation to the root before per-bone rotations. If after fixture import Jax is lying on his face, change to [-90, 0, 0]; on his back, [90, 0, 0]; upside down, [180, 0, 0].",
+    "smpl_to_blender_euler_deg": [90, 0, 0]
+  }
+}

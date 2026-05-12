@@ -17,8 +17,69 @@ generalizes across characters.
   during the guitar grab).
 - **Short film: pivoting** the pipeline. The v3-v5 history below stays as reference
   but the pipeline going forward is being re-scoped, not iterated on.
-- **Repo**: private. Will be made public for outside collaborators ("new eyes")
-  before further architectural work.
+- **Repo**: PUBLIC at https://github.com/pagnumlord/melodiccap. PR #1 merged
+  (docs refresh). PR #2 open (LICENSE, CONTRIBUTING.md, fixed requirements.txt,
+  smoke test). PR #3 in progress (Phase C — shared SMPL retargeter infrastructure).
+- **Both Path A (monocular WHAM) and Path B (stereo EasyMocap) are being
+  built** — same Blender retargeter, same JSON schema, different input wrappers.
+  Per-shot routing decides which path each scene uses.
+
+## Short film: Melodic Justice
+
+Cyberpunk setting (Metaneapolis, 2076). Music is the magic system. Stress
+Relay handheld devices convert mental stress into power; the antagonist
+group (Black Sun, led by THE SHADOW) corrupts the same tech to drain
+people into "umbral" shells. The protagonist Jax fights back by joining a
+band (Melodic Justice) and ultimately wielding a guitar that transforms
+into a laser weapon synced to the beat. Tone: gritty cyberpunk + hopeful
+musician core. The script (read into context this session) is the source
+of truth for character / motion priorities below.
+
+### Characters (mocap priority order)
+
+| Rank | Character | Role | Mocap-relevant motion |
+|---|---|---|---|
+| 1 | **Jax** | Lead, every scene | Sitting, standing, walking, running, playing guitar, lying in bed, climbing, dodging, leaping, shooting "to the beat" |
+| 2 | **Kai** | Drummer (band), comic relief | Drumming, choreographed beats, tackling, fighting with drumsticks |
+| 3 | **Kiko** | Keytarist (band), leader | Playing keytar, swinging it as a weapon, expressive talking |
+| 4 | **Hiro** | Mentor, music shop owner | Standing/talking, late-game weapon-staff combat (in a sling after) |
+| 5 | **Dr. White** | Cybernetic CEO, ally/twist | Walking with red-orb cane, energy attacks, falling, formal posture |
+| 6 | **THE SHADOW** | Antagonist | Massive imposing stance, energy attacks, throwing debris — mostly VFX-heavy (dark mask), may not need full SMPL retarget |
+| 7 | **Young Jax** | Flashback only | Child proportions, separate rig — playing piano, struggling |
+| 8 | **Alex / Umbrals** | Faceless antagonist extras | Choreographed group attacks — likely one shared "umbral" config |
+
+Phase C–F target Jax only. Other characters become Phase G config
+additions (~30 min per character, no code changes — just per-bone offsets
+in JSON).
+
+### Motion budget (rough)
+
+- **~80% performance** — dialogue, instrument playing, walking, gestures,
+  reactions. **Path A (monocular WHAM)** handles all of this; fast
+  iteration, no calibration per session.
+- **~15% light action** — running, dodging the necklace, sit-up snap from
+  nightmare. **Path A** still fine.
+- **~5% heavy action with prop contact** — concert fight (Jax climbing
+  lighting rig, leaping with cane, shooting "to the beat" of Kai's drum
+  loop), Hiro vs Dr. White staff combat, THE SHADOW energy melee. **Path
+  B (stereo EasyMocap)** preferred for the climax sequence, with
+  hand-keyframing on top for prop contact.
+
+### Out-of-scope for the body-mocap pipeline (handled separately)
+
+- **Facial mocap** — separate pipeline. Many close-ups in the script
+  (Hiro's wisdom delivery, Jax's "Listen to the music" beats, THE SHADOW's
+  mask cracks). Candidate tools: Rhubarb Lip Sync for dialogue, a separate
+  face-tracking model if expressive needed.
+- **Fingers on instruments** — SMPL doesn't include fingers. Hand-keyframe
+  finger positions on guitar/keytar/drums. Maybe SMPL-X later if it
+  becomes a major need.
+- **Cybernetic effects** (Jax's pink mods, Dr. White's eye, Stress Relay
+  glows, dark tendrils, guitar transformation, hologram comms) — all VFX,
+  no mocap involvement.
+- **Multi-person scenes** (band practice, fight choreography) — current
+  pipeline is single-person. Capture each performer separately, composite
+  in Blender's NLA editor.
 
 ## Pipeline Direction (forward-looking)
 
