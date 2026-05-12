@@ -73,8 +73,15 @@ You probably shouldn't, unless you want to reproduce the music video. The
 short-film pipeline isn't built yet. Steps that work today:
 
 ```bash
-# Setup
+# Setup (always use a venv — system-wide installs are not supported)
+python -m venv .venv
+source .venv/bin/activate          # macOS / Linux
+.venv\Scripts\activate             # Windows
 pip install -r requirements.txt
+
+# Sanity check that the install works (uses committed sample takes; no
+# cameras, no GPU, no calibration needed)
+python scripts/smoke_test.py
 
 # Calibrate stereo cameras (every session — they move between sessions)
 python MelodicCapRTM/stereo_calibration.py
@@ -89,9 +96,10 @@ python MelodicCapRTM/offline_processor.py path/to/take_*_raw.json
 # (install MelodicCapRTM/blender_addon/melodiccap_rtm_addon.py in Blender 4.4)
 ```
 
-Read `CLAUDE.md` end-to-end before doing anything serious with the v5.19 path.
-It documents 19 versions of accumulated patches and what each one is working
-around.
+Read [`CLAUDE.md`](CLAUDE.md) end-to-end before doing anything serious with the
+v5.19 path. It documents 19 versions of accumulated patches and what each
+one is working around. New contributors should also read
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Hardware (legacy)
 
@@ -145,9 +153,10 @@ described above.
 
 ## License
 
-For "Melodic Justice" production. Free to use and modify for your own project.
+MIT — see [`LICENSE`](LICENSE).
 
 ---
 
-See `CLAUDE.md` for the full version history, known issues by category, and
-detailed troubleshooting tables.
+See [`CLAUDE.md`](CLAUDE.md) for the full version history, known issues by
+category, and detailed troubleshooting tables.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) if you want to send a PR.

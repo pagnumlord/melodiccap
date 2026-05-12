@@ -1,24 +1,24 @@
-# Motion Capture to Rigify System Requirements
-# Install with: pip install -r requirements.txt --break-system-packages
+# MelodicCap dependencies — v5.19 (stereo + RTMPose) pipeline.
+#
+# Recommended install via a virtual environment:
+#   python -m venv .venv
+#   source .venv/bin/activate         # macOS / Linux
+#   .venv\Scripts\activate            # Windows
+#   pip install -r requirements.txt
+#
+# Future-pipeline (MelodicCapMono/, monocular SMPL via WHAM) has its own
+# requirements.txt in that directory and is intentionally separate — those
+# dependencies are heavy and only needed by contributors working on the
+# pivot.
 
-# Core motion capture
+# 2D pose detection (RTMPose via rtmlib)
+rtmlib>=0.0.12
+onnxruntime-gpu>=1.16.0  # use onnxruntime (CPU) if no NVIDIA GPU
+
+# Stereo calibration, image I/O, geometry
 opencv-python>=4.8.0
-mediapipe>=0.10.0
+opencv-contrib-python>=4.8.0  # for cv2.aruco (ChArUco calibration)
+
+# Math + filtering
 numpy>=1.24.0
-
-# Optional: Enhanced functionality
-scipy>=1.11.0  # For signal smoothing and filtering
-matplotlib>=3.7.0  # For visualization and debugging
-
-# Optional: Advanced 3D reconstruction
-# opencv-contrib-python>=4.8.0  # For camera calibration
-
-# Optional: FreeMoCap (alternative system)
-# freemocap>=0.3.0  # Uncomment to use FreeMoCap instead
-
-# Blender addon requirements (no installation needed, uses Blender's Python)
-# - bpy (included with Blender)
-# - mathutils (included with Blender)
-
-# Note: Some systems require --break-system-packages flag:
-# pip install -r requirements.txt --break-system-packages
+scipy>=1.11.0  # signal filtering, optimization in skeleton_solver
