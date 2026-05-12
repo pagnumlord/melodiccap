@@ -1,0 +1,10 @@
+# MelodicCapMono — glue dependencies for Phase C tooling.
+#
+# Path A (WHAM) and Path B (EasyMocap) install their own heavy stacks
+# (torch + CUDA, model checkpoints) in their own conda environments. Those
+# are intentionally separate from this — Phase C only needs stdlib + numpy
+# for fixture/schema validation, and OpenCV for the Phase E calibration
+# converter (which lands later).
+
+numpy>=1.24.0
+opencv-python>=4.8.0  # Phase E needs cv2 for Rodrigues / matrix conversions
