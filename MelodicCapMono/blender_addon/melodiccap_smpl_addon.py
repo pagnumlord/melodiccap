@@ -157,14 +157,36 @@ def load_character_config(path):
     return cfg
 
 
-def resolve_default_character_config(pose_data, addon_dir):
-    """If the pose JSON has 'character' set, find characters/<name>.json."""
+def resolve_default_character_config(pose_data, pose_json_path, addon_dir):
+    """If the pose JSON has 'character' set, search for characters/<name>.json.
+
+    Search order (first existing wins):
+        1. <pose_json_dir>/../characters/<name>.json   — canonical repo layout
+           (e.g. MelodicCapMono/fixtures/rest.pose.json ->
+           MelodicCapMono/characters/jax.json)
+        2. <pose_json_dir>/characters/<name>.json      — alt layout
+        3. <pose_json_dir>/<name>.json                 — co-located
+        4. <addon_dir>/../characters/<name>.json       — only works when the
+           .py is run from the source tree. Blender's "Install Add-on" COPIES
+           the file to its addons dir, so this almost never resolves once
+           installed — kept as a last-resort fallback.
+    """
     name = pose_data.get("character")
     if not name:
         return None
-    candidate = os.path.join(addon_dir, "..", "characters", f"{name}.json")
-    candidate = os.path.normpath(candidate)
-    return candidate if os.path.exists(candidate) else None
+    pose_dir = os.path.dirname(os.path.abspath(pose_json_path)) if pose_json_path else None
+    candidates = []
+    if pose_dir:
+        candidates.append(os.path.join(pose_dir, "..", "characters", f"{name}.json"))
+        candidates.append(os.path.join(pose_dir, "characters", f"{name}.json"))
+        candidates.append(os.path.join(pose_dir, f"{name}.json"))
+    if addon_dir:
+        candidates.append(os.path.join(addon_dir, "..", "characters", f"{name}.json"))
+    for cand in candidates:
+        cand = os.path.normpath(cand)
+        if os.path.exists(cand):
+            return cand
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -327,14 +349,16 @@ class MELODICCAP_OT_import_smpl(bpy.types.Operator):
             return {"CANCELLED"}
 
         cfg_path = self.character_config or resolve_default_character_config(
-            pose_data, os.path.dirname(__file__)
+            pose_data, self.filepath, os.path.dirname(__file__)
         )
         if not cfg_path or not os.path.exists(cfg_path):
+            name = pose_data.get("character") or "<missing 'character' field>"
             self.report(
                 {"ERROR"},
-                "No character config specified or auto-resolved. Set the "
-                "Character config field, or set the 'character' field in "
-                "your pose JSON.",
+                f"Could not auto-resolve character config for '{name}'. "
+                f"Paste the full path to MelodicCapMono/characters/<name>.json "
+                f"into the Character config field. Searched relative to the "
+                f"pose JSON's directory and the addon directory.",
             )
             return {"CANCELLED"}
 
