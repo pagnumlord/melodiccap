@@ -6,15 +6,16 @@ Blender + hand-keyframing workflow at the end; massively cleaner middle.
 
 ## What's here today
 
-This is **Phase C**: the shared infrastructure. The Blender retargeter,
-character config, fixtures, and pose JSON schema are in place. The
-model-side wrappers (WHAM for Path A, EasyMocap for Path B) come in
-Phases D and E — see [the plan file](../) and `CLAUDE.md` for status.
+**Phase C** (shared infrastructure) and **Phase D** (Path A, WHAM
+wrapper) are in. Path B (EasyMocap, multi-camera SMPL fitting on the
+existing `MelodicCapRTM/_raw.json` takes) is the next phase — see
+`CLAUDE.md` for status.
 
-You can already use the Blender side to validate the retargeter on a
-T-pose fixture without installing any model. That's intentional —
-debugging the addon and debugging the model install should never be
-the same task.
+You can use the Blender side to validate the retargeter on a fixture
+**without installing any model**. That's intentional — debugging the
+addon and debugging the model install should never be the same task.
+Once that's working, Path A (`wham/`) takes a phone MP4 and produces
+a pose JSON ready for the same addon.
 
 ## Two paths, one schema
 
@@ -62,7 +63,10 @@ MelodicCapMono/
 │   └── wave.pose.json     <-  30 frames, left arm raise
 ├── blender_addon/         <- the new Blender 4.4 addon
 │   └── melodiccap_smpl_addon.py
-├── wham/                  <- Phase D (Path A) — not yet
+├── wham/                  <- Phase D (Path A): WHAM wrapper, video2pose CLI
+│   ├── README.md            (install + usage)
+│   ├── video2pose.py        (entry point: mp4 -> pose.json)
+│   └── wham_to_pose_json.py (pkl -> schema converter)
 ├── easymocap/             <- Phase E (Path B) — not yet
 └── scripts/               <- helper scripts (compare_poses.py in Phase F)
 ```
@@ -96,11 +100,37 @@ shape. Exits 0 on success.
 
 No Blender, no model installs needed for this check. Just stdlib.
 
+## Path A — WHAM (in this PR)
+
+See [wham/README.md](wham/README.md) for full install + usage. Quick version:
+
+```bash
+# One-time install (~1 hour):
+git clone https://github.com/yohanshin/WHAM.git
+conda env create -f WHAM/environment.yml
+conda activate wham
+cd WHAM && bash fetch_demo_data.sh
+export WHAM_DIR=/abs/path/to/WHAM   # or set WHAM_DIR=... on Windows
+
+# Per take (after recording <take>.mp4):
+python -m MelodicCapMono.wham.video2pose <take>.mp4 <take>.pose.json --character jax
+
+# Then File -> Import -> SMPL Pose JSON in Blender, pick <take>.pose.json.
+```
+
+Schema-only test (no WHAM install required):
+
+```bash
+python scripts/test_wham_converter_smoke.py
+```
+
+Builds synthetic WHAM-style pkl dicts in memory and verifies the
+converter handles every shape variant we expect (rotation matrices vs
+axis-angle, single vs multi-person, with/without `global_orient`,
+etc.). Useful as a regression test when WHAM's pkl layout drifts.
+
 ## Coming next
 
-- **Phase D**: `wham/` directory — wraps WHAM (CVPR 2024). User clones
-  WHAM separately into a conda env (~3GB checkpoints), our wrapper
-  shells out. Output: `pose.json` ready for the Blender addon.
 - **Phase E**: `easymocap/` directory — wraps EasyMocap (multi-view SMPL
   fitter). Reuses the existing `MelodicCapRTM/calibration/*.json` and
   `_raw.json` takes. No re-recording needed for testing.

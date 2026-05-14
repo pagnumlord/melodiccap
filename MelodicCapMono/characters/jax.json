@@ -26,7 +26,7 @@
   "root_translation": "ignore",
   "_comment_about_root": "Options: 'ignore' (best for Path A monocular — drift-prone; keyframe walk path by hand), 'follow' (use SMPL trans as-is), 'follow_xy' (XY only, hold Z at rest — useful for sit/stand transitions).",
   "axis_conversion": {
-    "_comment": "SMPL convention is Y-up world. JaxRigify in Blender is Z-up. The addon applies this rotation to the root before per-bone rotations. If after fixture import Jax is lying on his face, change to [-90, 0, 0]; on his back, [90, 0, 0]; upside down, [180, 0, 0].",
-    "smpl_to_blender_euler_deg": [90, 0, 0]
+    "_comment": "Whole-armature rotation applied to the rig OBJECT before per-bone rotations. JaxRigify is already built standing upright in Blender's Z-up world, so the rest pose (all-zero SMPL rotations) should land on Jax's existing T-pose — no whole-body rotation needed. SMPL/Blender axis differences are handled per-bone via rot_offset_euler_deg above. Keep this at [0, 0, 0] unless a future character needs the whole rig flipped (e.g. an asset imported from a Y-up DCC). If a real take comes in lying on its face, fix the per-bone offsets, NOT this value.",
+    "smpl_to_blender_euler_deg": [0, 0, 0]
   }
 }

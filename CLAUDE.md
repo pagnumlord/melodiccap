@@ -17,9 +17,12 @@ generalizes across characters.
   during the guitar grab).
 - **Short film: pivoting** the pipeline. The v3-v5 history below stays as reference
   but the pipeline going forward is being re-scoped, not iterated on.
-- **Repo**: PUBLIC at https://github.com/pagnumlord/melodiccap. PR #1 merged
-  (docs refresh). PR #2 open (LICENSE, CONTRIBUTING.md, fixed requirements.txt,
-  smoke test). PR #3 in progress (Phase C — shared SMPL retargeter infrastructure).
+- **Repo**: PUBLIC at https://github.com/pagnumlord/melodiccap. PR #1, #2, #4
+  merged (docs refresh, repo onboarding, Phase C SMPL infra). Branch
+  `claude/fix-mocap-retargeting-NGruo` open with three commits stacked: addon
+  character-config auto-resolve fix, jax.json axis_conversion zeroed
+  (rest fixture verified standing in JaxRigify A-pose), and Phase D — the
+  WHAM Path A wrapper (`MelodicCapMono/wham/`).
 - **Both Path A (monocular WHAM) and Path B (stereo EasyMocap) are being
   built** — same Blender retargeter, same JSON schema, different input wrappers.
   Per-shot routing decides which path each scene uses.
@@ -159,6 +162,37 @@ name overrides) is the cleanest way to support all six without code changes.
   - `trace_forearm.py` — Forensic diagnostic for forearm L/R length per
     pipeline stage; copies addon's smooth_frames + butterworth_filter so
     it runs without Blender
+- `MelodicCapMono/` — Forward-looking SMPL pipeline (Phases C, D landed)
+  - `blender_addon/melodiccap_smpl_addon.py` — Phase C addon. Imports a
+    `melodiccap_mono_v1` pose JSON, applies SMPL axis-angle rotations
+    per joint to a Rigify rig per `characters/<name>.json` mapping.
+    No anatomy reconstruction (vs. v5.12) because SMPL output is already
+    valid by construction. ~380 lines vs. v5.12's ~3000.
+  - `characters/jax.json` — JaxRigify mapping. 18 SMPL joints to Rigify
+    bones, per-bone `rot_offset_euler_deg` for axis calibration. Real
+    take calibration TBD (Phase F).
+  - `fixtures/{rest,wave}.pose.json` — Synthetic pose JSONs that drive
+    the addon without needing WHAM/EasyMocap installed. Verified frame
+    0 of rest = JaxRigify A-pose (the user's weight-painted rest).
+  - `wham/` — Phase D: Path A wrapper.
+    - `video2pose.py` — CLI orchestrator. `python -m
+      MelodicCapMono.wham.video2pose <mp4> <pose.json> --character jax`.
+      Invokes WHAM's demo.py via subprocess (must be in WHAM conda env),
+      reads the resulting pkl, hands it to `wham_to_pose_json.convert`.
+      Has `--inspect-pkl` to dump WHAM's pkl structure when its layout
+      drifts between releases.
+    - `wham_to_pose_json.py` — Pure-numpy converter from WHAM's pkl
+      shape to `melodiccap_mono_v1` schema. Accepts pose as
+      `(N,24,3,3)` matrices, `(N,24,3)` axis-angle, or `(N,72)` flat;
+      betas as `(10,)` or `(N,10)`; with/without `global_orient` and
+      `frame_ids`; single-person dict, `{person_id: ...}` dict, or list.
+    - `README.md` — install (~1hr WHAM env), run, troubleshooting.
+- `scripts/`
+  - `test_smpl_addon_smoke.py` — Phase C: validates pose JSON schema.
+    Runs in stdlib only.
+  - `test_wham_converter_smoke.py` — Phase D: 11 cases, builds
+    synthetic WHAM-style pkl dicts in memory and verifies the converter
+    handles every shape variant. Requires only numpy.
 
 ## Blender Addon - Current State (v5.12)
 - Proportional retargeting: measures mocap vs rig proportions from frame 0
