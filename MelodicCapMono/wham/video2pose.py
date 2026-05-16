@@ -176,6 +176,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="Keep WHAM's pkl output for debugging.")
     ap.add_argument("--inspect-pkl", type=Path, default=None,
                     help="Skip WHAM, just print the structure of an existing .pkl.")
+    ap.add_argument("--from-pkl", type=Path, default=None,
+                    help="Skip WHAM; convert an existing WHAM .pkl straight to "
+                         "pose JSON. Usage: --from-pkl <pkl> <output.json>")
     args = ap.parse_args(argv)
 
     if args.inspect_pkl is not None:
@@ -183,8 +186,31 @@ def main(argv: list[str] | None = None) -> int:
             sys.exit(f"ERROR: {args.inspect_pkl} does not exist.")
         return _inspect_pkl(args.inspect_pkl)
 
+    if args.from_pkl is not None:
+        if not args.from_pkl.exists():
+            sys.exit(f"ERROR: --from-pkl file not found: {args.from_pkl}")
+        out_json = args.output_json or args.video
+        if out_json is None:
+            ap.error("--from-pkl requires an output path: "
+                     "--from-pkl <pkl> <output.json>")
+        out_json.parent.mkdir(parents=True, exist_ok=True)
+        print(f"[video2pose] Reading WHAM output: {args.from_pkl}")
+        wham_data = _load_wham_pkl(args.from_pkl)
+        print(f"[video2pose] Converting to pose JSON: {out_json}")
+        pose = wham_to_pose_json.convert(
+            wham_data,
+            character=args.character,
+            fps_override=args.fps,
+            source_video=args.from_pkl.name,
+        )
+        with out_json.open("w") as f:
+            json.dump(pose, f, indent=2)
+        print(f"[video2pose] DONE. {len(pose['frames'])} frames -> {out_json}")
+        return 0
+
     if args.video is None or args.output_json is None:
-        ap.error("video and output_json are required (unless --inspect-pkl).")
+        ap.error("video and output_json are required "
+                 "(unless --inspect-pkl / --from-pkl).")
 
     if not args.video.exists():
         sys.exit(f"ERROR: input video not found: {args.video}")
