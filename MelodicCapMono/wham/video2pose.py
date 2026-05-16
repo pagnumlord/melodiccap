@@ -42,6 +42,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from . import wham_to_pose_json
 
@@ -105,10 +106,28 @@ def _run_wham(wham_dir: Path, video: Path, output_dir: Path) -> Path:
     return candidates[0]
 
 
+def _load_wham_pkl(pkl_path: Path) -> Any:
+    """Deserialize WHAM's output file.
+
+    WHAM's demo.py writes results with ``joblib.dump``. joblib wraps
+    numpy arrays in its own persistence format (and may compress), so a
+    plain ``pickle.load`` fails with
+    ``UnpicklingError: invalid load key``. ``joblib.load`` transparently
+    reads both joblib-format files and plain pickles, so prefer it; fall
+    back to ``pickle`` only if joblib can't be imported (it always can in
+    the WHAM env, since WHAM itself used joblib to write the file).
+    """
+    try:
+        import joblib
+    except ImportError:
+        with pkl_path.open("rb") as f:
+            return pickle.load(f)
+    return joblib.load(str(pkl_path))
+
+
 def _inspect_pkl(pkl_path: Path) -> int:
     """Print the structure of a WHAM pkl. Used to debug schema drift."""
-    with pkl_path.open("rb") as f:
-        data = pickle.load(f)
+    data = _load_wham_pkl(pkl_path)
 
     def describe(obj, depth=0, prefix=""):
         pad = "  " * depth
@@ -178,8 +197,7 @@ def main(argv: list[str] | None = None) -> int:
     pkl_path = _run_wham(wham_dir, args.video, intermediate_dir)
 
     print(f"[video2pose] Reading WHAM output: {pkl_path}")
-    with pkl_path.open("rb") as f:
-        wham_data = pickle.load(f)
+    wham_data = _load_wham_pkl(pkl_path)
 
     print(f"[video2pose] Converting to pose JSON: {args.output_json}")
     pose = wham_to_pose_json.convert(
