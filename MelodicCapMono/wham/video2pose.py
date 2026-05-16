@@ -77,10 +77,16 @@ def _run_wham(wham_dir: Path, video: Path, output_dir: Path) -> Path:
     Raises SystemExit if WHAM exits non-zero or produces no .pkl.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+    # WHAM's demo.py derives its output subfolder from
+    # `args.video.split('/')[-1]` -- Unix-only. On Windows an absolute
+    # path uses backslashes, so that split returns the whole path; WHAM
+    # then writes results next to the video instead of under
+    # --output_pth and our pkl search misses them. Passing both paths
+    # POSIX-style makes WHAM's split see just the filename, on every OS.
     cmd = [
         sys.executable, "demo.py",
-        "--video", str(video.resolve()),
-        "--output_pth", str(output_dir.resolve()),
+        "--video", video.resolve().as_posix(),
+        "--output_pth", output_dir.resolve().as_posix(),
         "--save_pkl",
     ]
     print(f"[video2pose] Running WHAM:\n  cwd: {wham_dir}\n  {' '.join(cmd)}\n")
