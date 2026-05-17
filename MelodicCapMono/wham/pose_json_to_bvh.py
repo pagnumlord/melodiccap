@@ -122,6 +122,18 @@ def _aa_to_matrix(aa):
     return np.eye(3) + math.sin(theta) * K + (1.0 - math.cos(theta)) * (K @ K)
 
 
+def _euler_deg_to_matrix(xd, yd, zd):
+    """Rz @ Ry @ Rx for a constant global correction (degrees)."""
+    x, y, z = math.radians(xd), math.radians(yd), math.radians(zd)
+    cx, sx = math.cos(x), math.sin(x)
+    cy, sy = math.cos(y), math.sin(y)
+    cz, sz = math.cos(z), math.sin(z)
+    Rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
+    Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
+    Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
+    return Rz @ Ry @ Rx
+
+
 def _matrix_to_euler_zxy_deg(R):
     """Decompose R into BVH 'Zrotation Xrotation Yrotation' Euler degrees.
 
@@ -189,15 +201,24 @@ def _write_hierarchy(lines, joint, parents, kids, offsets, depth):
     lines.append(f"{close_pad}}}")
 
 
-def convert(pose_data, *, root_motion="trans"):
+def convert(pose_data, *, root_motion="trans", global_rot_deg=(180.0, 0.0, 0.0)):
     """Return BVH text for a melodiccap_mono_v1 pose dict.
 
     root_motion: 'trans' writes smpl_trans into the root position
     channels; 'zero' pins the root at origin (in-place; monocular trans
     is drift-prone — pin it and keyframe the path on the target rig).
+
+    global_rot_deg: constant (X, Y, Z) degrees pre-multiplied onto the
+    ROOT joint only (and root translation). WHAM emits SMPL in a camera
+    frame whose up-axis doesn't match Blender's, so the imported
+    skeleton lands upside down; (180, 0, 0) flips it upright. Only the
+    root is touched — every other joint's rotation stays exactly as SMPL
+    defines it (relative to its parent), so the motion remains correct
+    by construction. If 180/X isn't perfect, try -90/X etc. via the CLI.
     """
     frames = pose_data["frames"]
     fps = float(pose_data.get("fps", 30.0))
+    R_global = _euler_deg_to_matrix(*global_rot_deg)
 
     parents = SMPL_PARENTS
     kids = _children(parents)
@@ -227,11 +248,16 @@ def convert(pose_data, *, root_motion="trans"):
         tx, ty, tz = fr.get("smpl_trans", [0.0, 0.0, 0.0])
         if root_motion == "zero":
             tx = ty = tz = 0.0
+        else:
+            tx, ty, tz = (R_global @ np.array([tx, ty, tz], dtype=np.float64))
         for j in order:
             aa = pose[j * 3:(j + 1) * 3]
             if j == 0 and "smpl_global_orient" in fr:
                 aa = fr["smpl_global_orient"]
-            z, x, y = _matrix_to_euler_zxy_deg(_aa_to_matrix(aa))
+            R = _aa_to_matrix(aa)
+            if j == 0:
+                R = R_global @ R
+            z, x, y = _matrix_to_euler_zxy_deg(R)
             if j == 0:
                 vals += [f"{tx:.6f}", f"{ty:.6f}", f"{tz:.6f}"]
             vals += [f"{z:.6f}", f"{x:.6f}", f"{y:.6f}"]
@@ -251,13 +277,19 @@ def main(argv=None):
                     default="trans",
                     help="'trans' (default) uses smpl_trans for the root; "
                          "'zero' pins the root in place.")
+    ap.add_argument("--global-rot", nargs=3, type=float,
+                    metavar=("X", "Y", "Z"), default=[180.0, 0.0, 0.0],
+                    help="Constant degrees pre-applied to the SMPL root to "
+                         "match Blender's up-axis (default 180 0 0 — flips "
+                         "WHAM's upside-down camera frame upright).")
     args = ap.parse_args(argv)
 
     if not args.input_json.exists():
         raise SystemExit(f"ERROR: input not found: {args.input_json}")
 
     data = _load_pose_json(args.input_json)
-    bvh = convert(data, root_motion=args.root_motion)
+    bvh = convert(data, root_motion=args.root_motion,
+                  global_rot_deg=tuple(args.global_rot))
     args.output_bvh.parent.mkdir(parents=True, exist_ok=True)
     with args.output_bvh.open("w") as f:
         f.write(bvh)
