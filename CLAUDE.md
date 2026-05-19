@@ -19,13 +19,18 @@ generalizes across characters.
   but the pipeline going forward is being re-scoped, not iterated on.
 - **Repo**: PUBLIC at https://github.com/pagnumlord/melodiccap. PR #1, #2, #4
   merged (docs refresh, repo onboarding, Phase C SMPL infra). Branch
-  `claude/fix-mocap-retargeting-NGruo` open with three commits stacked: addon
-  character-config auto-resolve fix, jax.json axis_conversion zeroed
-  (rest fixture verified standing in JaxRigify A-pose), and Phase D — the
-  WHAM Path A wrapper (`MelodicCapMono/wham/`).
-- **Both Path A (monocular WHAM) and Path B (stereo EasyMocap) are being
-  built** — same Blender retargeter, same JSON schema, different input wrappers.
-  Per-shot routing decides which path each scene uses.
+  `claude/fix-mocap-retargeting-NGruo` open: WHAM Path A is now **proven
+  end-to-end on a real take** (video → WHAM → melodiccap_mono_v1 JSON →
+  SMPL BVH → Rigify retarget → bake). Landed this branch: joblib pkl load,
+  `--from-pkl`, Windows POSIX path fix, the `pose_json_to_bvh` exporter and
+  up-axis root fix, the documented Rokoko recipe, and **Phase 1 automation**
+  (`MelodicCapMono/orchestrate/process_take.py` + `blender_addon/headless_retarget.py`
+  — one unattended command per take, config-driven per `characters/_schema.md`).
+  The Phase C direct-import addon is superseded (fixtures/smoke only).
+- **Path A (monocular WHAM) is the chosen production pipeline.** Path B
+  (stereo EasyMocap) is deferred to the rare climax shot needing
+  root-translation accuracy. The legacy v5.x stereo solver
+  (`MelodicCapRTM/`) is retired, not iterated.
 
 ## Short film: Melodic Justice
 

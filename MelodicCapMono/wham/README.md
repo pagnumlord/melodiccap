@@ -88,7 +88,32 @@ Output: `guitar.pose.json` (schema in `../SCHEMA.md`).
 > owns the rest-pose math. See "Retarget to Rigify" below. The addon
 > is kept only for the synthetic fixtures / schema smoke test.
 
-## Retarget to Rigify (BVH → Rokoko — proven)
+## Automated path (one command per take)
+
+Once a character is calibrated, the whole pipeline is one unattended
+command (it reuses everything below — nothing reinvented):
+
+```
+python -m MelodicCapMono.orchestrate.process_take guitar.mp4 \
+    --character jax --wham-python /path/to/envs/wham/bin/python \
+    --base-blend "C:/.../Characters.blend" \
+    --blender-exe "C:/.../Blender/blender.exe" --out guitar.blend
+```
+
+video → WHAM → BVH → headless constraint-bake on a **copy** of the
+master `.blend` (the master is never touched) → `guitar.blend` (rig +
+baked action) + `guitar.report.json`. Put machine paths in an untracked
+`characters/jax.local.json` (deep-merged) to drop the
+`--base-blend/--blender-exe` flags. Config contract: `characters/_schema.md`.
+The constraint-bake mechanism is adapted from the project's proven
+`oldscripts/mocap_to_rigify_complete.py` (WORLD-space copy constraints →
+`nla.bake(visual_keying=True)` → strip `MOCAP_*`).
+
+The manual Rokoko recipe below is now the **calibration / ground-truth
+reference**: run it once per new character to produce the known-good
+bake the automated path's `calibration` block is tuned against.
+
+## Retarget to Rigify (BVH → Rokoko — manual, calibration reference)
 
 1. **Pose JSON → BVH** on the canonical SMPL skeleton (correct by
    construction — SMPL pose params *are* that skeleton's local
