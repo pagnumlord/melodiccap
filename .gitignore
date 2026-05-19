@@ -2,3 +2,6 @@ __pycache__/
 MelodicCapRTM/takes/
 *_solved.json
 *_noskel.json
+# Per-character machine-local overrides (base_blend, blender_exe paths
+# etc.) — see MelodicCapMono/characters/_schema.md. Never commit.
+MelodicCapMono/characters/*.local.json
