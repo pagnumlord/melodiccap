@@ -59,11 +59,14 @@ def _load_character(name: str) -> dict:
             f"ERROR: no character config {cfg_path}. "
             f"Available: {sorted(p.stem for p in CHARACTERS_DIR.glob('*.json') if not p.stem.endswith('.local'))}"
         )
-    cfg = json.loads(cfg_path.read_text())
+    # utf-8-sig transparently strips a BOM if the file has one — Windows
+    # PowerShell's `Set-Content -Encoding utf8` writes a BOM that Python's
+    # default json.loads chokes on at char 0. With sig: BOM or no-BOM works.
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
     # Optional untracked personal override (machine paths etc.)
     local_path = CHARACTERS_DIR / f"{name}.local.json"
     if local_path.exists():
-        cfg = _deep_merge(cfg, json.loads(local_path.read_text()))
+        cfg = _deep_merge(cfg, json.loads(local_path.read_text(encoding="utf-8-sig")))
     return cfg
 
 

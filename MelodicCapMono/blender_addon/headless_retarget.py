@@ -41,7 +41,9 @@ def main():
     ap.add_argument("--fps", type=float, default=30.0)
     args = ap.parse_args(_argv_after_ddash())
 
-    cfg = json.loads(open(args.config).read())
+    # utf-8-sig: tolerate a BOM in case some upstream writer added one.
+    with open(args.config, encoding="utf-8-sig") as fh:
+        cfg = json.loads(fh.read())
     armature_name = cfg["armature"]
     base_blend = cfg.get("base_blend")
     bone_map = cfg.get("bone_map", {})
