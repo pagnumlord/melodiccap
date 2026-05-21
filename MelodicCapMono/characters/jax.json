@@ -7,7 +7,7 @@
   "_comment_paths": "base_blend (master .blend containing the armature) and blender_exe (Steam Blender binary) are machine-specific. Do NOT commit personal absolute paths to this public repo. Supply them via process_take CLI flags (--base-blend / --blender-exe), the MELODICCAP_BLENDER env var, or an untracked characters/jax.local.json that deep-merges over this file.",
   "bvh_export": { "root_motion": "zero", "global_rot_euler_deg": [180, 0, 0] },
   "ik_fk_one": ["upper_arm_parent.L", "upper_arm_parent.R", "thigh_parent.L", "thigh_parent.R"],
-  "_comment_bone_map": "Proven SMPL (BVH source joint) -> JaxRigify map for the automated FK-driven retarget. With ik_fk_one forcing IK_FK=1.0 on every limb, the FK rotation chain (hip->knee->ankle->foot_fk, shoulder->elbow->wrist->hand_fk) drives end-effector positions correctly -- no COPY_LOCATION IK targets needed (and adding them stretches the rig because the source pelvis sits at world origin while JaxRigify's pelvis is up at ~0.9m; Rigify's IK_Stretch then pulls the limb to reach the displaced IK target). The manual Rokoko recipe in wham/README.md adds *_foot/*_hand -> *_ik COPY_LOCATION entries on top of these 18, because Rokoko auto-scales/aligns the source and its IK targets land sanely; do NOT add them here.",
+  "_comment_bone_map": "Proven SMPL (BVH source joint) -> JaxRigify map for the headless Rokoko retarget. Drives bpy.ops.rsl.retarget_animation() via Rokoko's bone-list collection. Rokoko handles rest-pose alignment, auto-scaling, and IK target placement -- so this map mirrors the user's known-good manual Rokoko bone list exactly (22 pairs: 18 rotation + 4 IK end-effectors). The `type` field is documentation-only; Rokoko infers behavior from source/target bone names. Collars intentionally omitted.",
   "bone_map": {
     "pelvis":         { "bone": "torso" },
     "left_hip":       { "bone": "thigh_fk.L" },
@@ -16,8 +16,12 @@
     "right_knee":     { "bone": "shin_fk.R" },
     "left_ankle":     { "bone": "foot_fk.L" },
     "right_ankle":    { "bone": "foot_fk.R" },
+    "left_foot":      { "bone": "foot_ik.L", "type": "COPY_LOCATION" },
+    "right_foot":     { "bone": "foot_ik.R", "type": "COPY_LOCATION" },
     "left_wrist":     { "bone": "hand_fk.L" },
     "right_wrist":    { "bone": "hand_fk.R" },
+    "left_hand":      { "bone": "hand_ik.L", "type": "COPY_LOCATION" },
+    "right_hand":     { "bone": "hand_ik.R", "type": "COPY_LOCATION" },
     "spine1":         { "bone": "spine_fk.001" },
     "spine2":         { "bone": "spine_fk.002" },
     "spine3":         { "bone": "chest" },
@@ -29,14 +33,7 @@
     "right_elbow":    { "bone": "forearm_fk.R" }
   },
   "calibration": {},
-  "_comment_calibration": "Optional per-target-bone escape hatch, used ONLY if a real take shows a bone rotated wrong vs the ground-truth Rokoko bake. e.g. \"upper_arm_fk.L\": { \"invert\": [false, true, false] }. Default: none.",
-  "ik_follow_fk": {
-    "foot_ik.L": "foot_fk.L",
-    "foot_ik.R": "foot_fk.R",
-    "hand_ik.L": "hand_fk.L",
-    "hand_ik.R": "hand_fk.R"
-  },
-  "_comment_ik_follow_fk": "Pure visual / parity. Per frame, drives each IK target's head to its FK counterpart's tail (the end-effector world position). With ik_fk_one enforcing FK, the IK chain is dormant -- but its widget bones still display at rest, which reads as 'hands not moving' on a posed body. This block keys their location to follow the FK end-effector so the rig reads correctly and stays sane if a shot later switches IK_FK back to 0 for a specific limb.",
+  "_comment_calibration": "Optional per-target-bone escape hatch, reserved for future use (current Rokoko engine does not consume it). Default: none.",
   "_comment_about_offsets": "rot_offset_euler_deg is added AFTER the SMPL axis-angle is converted to a Blender quaternion. Use it to absorb mismatches between SMPL's joint frame and the Rigify bone's roll. Common values are 0 / +/- 90 / +/- 180. Edit these during Phase F calibration when you see a bone rotated wrong on a real take.",
   "smpl_to_rig": {
     "pelvis":         { "bone": "torso",         "rot_offset_euler_deg": [0, 0, 0] },

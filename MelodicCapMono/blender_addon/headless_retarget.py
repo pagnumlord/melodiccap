@@ -1,29 +1,24 @@
-"""Headless rest-relative retarget. Run INSIDE Blender:
+"""Headless Rokoko retarget. Run INSIDE Blender:
 
     blender --background --python headless_retarget.py -- \
         --config resolved.json --bvh take.bvh --out take.blend --fps 30
 
-For each frame, sets each mapped target pose-bone's LOCAL rotation via
-the standard Blender skeleton-to-skeleton retarget identity:
+The user's Blender has the Rokoko Studio Live plugin enabled (autoloads
+on file open -- visible in every run as "Loaded Rokoko Studio Live for
+Blender successfully!"). Rokoko exposes its retarget as standard bpy
+operators (`bpy.ops.rsl.retarget_animation`) and scene properties
+(`rsl_retargeting_*`). Their retarget engine handles rest-pose alignment,
+auto-scaling, and per-bone basis differences correctly -- exactly the
+class of artifacts the hand-rolled rest-relative approach kept
+producing on real takes.
 
-    target_local_rot = target_rest^-1 @ source_world
-                       @ source_rest^-1 @ target_rest
+Earlier WORLD/WORLD copy constraints, then a rest-relative matrix loop,
+each fixed one symptom and surfaced another. This path stops
+re-implementing skeleton-to-skeleton retarget math and instead drives
+the proven retargeter that the user's manual workflow already validated.
 
-(using each rig's own bone.matrix_local rest matrices). That is the same
-math Rokoko applies internally: transfer the source's pose delta from
-its own rest into the target's rest frame. It uses Blender's own
-rest matrices -- no axis-angle / Euler-order guessing. The previous
-WORLD/WORLD Copy-Rotation+bake approach forced JaxRigify into SMPL's
-T-pose world orientations and produced a stretched/hunched character on
-real takes; this fixes it.
-
-The source BVH skeleton is height-scaled to match the target rig before
-the per-frame loop, so `*_ik` location targets (foot_ik, hand_ik) land
-at the right world positions for IK chains.
-
-The master .blend is OPENED then SAVED-AS to --out -- the master is
-never mutated. Config is the per-character JSON written by process_take
-(armature, base_blend, ik_fk_one, bone_map, calibration).
+The master .blend is OPENED then SAVED-AS to --out -- never mutated.
+Config is the per-character JSON written by process_take.
 """
 
 from __future__ import annotations
@@ -32,7 +27,6 @@ import json
 import sys
 
 import bpy
-import mathutils
 
 
 def _argv_after_ddash():
@@ -42,14 +36,6 @@ def _argv_after_ddash():
 def _fail(msg: str):
     print(f"[headless_retarget] ERROR: {msg}", file=sys.stderr)
     sys.exit(1)
-
-
-def _bone_height(arm, head_bone, foot_bone):
-    """|head.z - foot.z| of two rest bones, in armature local space."""
-    bones = arm.data.bones
-    if head_bone not in bones or foot_bone not in bones:
-        return 0.0
-    return abs(bones[head_bone].head_local.z - bones[foot_bone].head_local.z)
 
 
 def main():
@@ -68,8 +54,6 @@ def main():
     base_blend = cfg.get("base_blend")
     bone_map = cfg.get("bone_map", {})
     ik_fk_one = cfg.get("ik_fk_one", [])
-    calibration = cfg.get("calibration", {})
-    ik_follow_fk = cfg.get("ik_follow_fk", {})
     if not base_blend:
         _fail("config has no base_blend")
 
@@ -83,9 +67,7 @@ def main():
     if target is None or target.type != "ARMATURE":
         _fail(f"armature object {armature_name!r} not found in {base_blend!r}")
 
-    # Import the BVH (defaults match the validated manual File>Import>BVH;
-    # the up-axis/facing fix is already baked into the BVH root by
-    # pose_json_to_bvh --global-rot).
+    # Import the BVH; defaults match the validated manual File>Import>BVH.
     before = set(bpy.data.objects.keys())
     try:
         bpy.ops.import_anim.bvh(
@@ -122,27 +104,38 @@ def main():
         else:
             print(f"[headless_retarget] WARN: {bname!r} has no IK_FK prop")
 
-    # Height-fit the source skeleton to the target rig so IK target world
-    # positions land correctly. SMPL mean-shape is ~1.6 m; JaxRigify is
-    # 1.87 m. Without this, foot_ik/hand_ik COPY_LOCATION targets sit at
-    # SMPL coords -> the leg IK over-extends and pulls the spine down.
-    src_pelvis = bone_map.get("pelvis", {}).get("bone")
-    src_h = _bone_height(src, "pelvis", "left_foot") or src.dimensions.z
-    tgt_foot = bone_map.get("left_ankle", {}).get("bone", "foot_fk.L")
-    tgt_h = _bone_height(target, src_pelvis or "torso", tgt_foot) \
-        or target.dimensions.z
-    scale = (tgt_h / src_h) if src_h > 0 else 1.0
-    src.scale = (scale, scale, scale)
-    bpy.context.view_layer.update()
-    print(f"[headless_retarget] scale fit: src_h={src_h:.3f} "
-          f"tgt_h={tgt_h:.3f} scale={scale:.4f}")
+    # --- Rokoko Studio Live: configure + retarget ---
+    scn = bpy.context.scene
+    if not hasattr(scn, "rsl_retargeting_bone_list"):
+        _fail(
+            "Rokoko Studio Live addon properties not present "
+            "(scn.rsl_retargeting_bone_list missing). Enable the plugin "
+            "in this Blender, or open the master .blend interactively "
+            "once so its preferences persist."
+        )
+    scn.rsl_retargeting_armature_source = src
+    scn.rsl_retargeting_armature_target = target
+    if hasattr(scn, "rsl_retargeting_auto_scaling"):
+        scn.rsl_retargeting_auto_scaling = True
+    if hasattr(scn, "rsl_retargeting_use_pose"):
+        try:
+            scn.rsl_retargeting_use_pose = "REST"
+        except Exception:  # noqa: BLE001
+            # Some Rokoko builds use a different enum value name
+            pass
 
-    # Sort pairs by retarget type.
-    rot_pairs = []  # (src_bone, tgt_bone)
-    loc_pairs = []
+    # Populate the Rokoko bone list from cfg.bone_map (clear anything stale
+    # left over from a previous interactive session in this .blend).
+    bone_list = scn.rsl_retargeting_bone_list
+    try:
+        bone_list.clear()
+    except Exception:  # noqa: BLE001
+        while len(bone_list):
+            bone_list.remove(0)
+
+    pairs_added = 0
     for src_bone, spec in bone_map.items():
         tgt_name = spec["bone"]
-        ctype = spec.get("type", "COPY_ROTATION")
         if src_bone not in src.pose.bones:
             print(f"[headless_retarget] WARN: source bone {src_bone!r} "
                   f"absent in BVH — skipped")
@@ -151,95 +144,28 @@ def main():
             print(f"[headless_retarget] WARN: target bone {tgt_name!r} "
                   f"absent on {armature_name} — skipped")
             continue
-        if ctype == "COPY_LOCATION":
-            loc_pairs.append((src_bone, tgt_name))
-        else:
-            rot_pairs.append((src_bone, tgt_name))
+        item = bone_list.add()
+        item.bone_name_source = src_bone
+        item.bone_name_target = tgt_name
+        pairs_added += 1
 
-    if not rot_pairs and not loc_pairs:
-        _fail("no bone pairs resolved — check bone_map vs the rig bone names")
+    if pairs_added == 0:
+        _fail("no bone pairs added to the Rokoko list — check bone_map "
+              "vs the source BVH bones and target rig bones")
 
-    # Cosmetic: drive IK target widgets to follow their FK counterparts'
-    # end-effectors. With FK enforced via ik_fk_one, the IK chain is
-    # dormant; this just keeps the widget bones visually attached so the
-    # rig reads correctly (and stays sane if a shot later switches a
-    # limb back to IK).
-    ik_follow_pairs = []
-    for ik_name, fk_name in ik_follow_fk.items():
-        if ik_name in target.pose.bones and fk_name in target.pose.bones:
-            ik_follow_pairs.append((ik_name, fk_name))
-        else:
-            print(f"[headless_retarget] WARN: ik_follow_fk "
-                  f"{ik_name!r}->{fk_name!r} skipped (bone missing)")
+    print(f"[headless_retarget] Rokoko: source={src.name!r} "
+          f"target={target.name!r} pairs={pairs_added} "
+          f"auto_scale=True use_pose=REST")
 
-    # Pre-compute rest rotation matrices (don't change per frame).
-    src_rest_R = {n: src.data.bones[n].matrix_local.to_3x3()
-                  for n, _ in rot_pairs}
-    tgt_rest_R = {n: target.data.bones[n].matrix_local.to_3x3()
-                  for _, n in rot_pairs}
-    src_rest_R_inv = {n: m.inverted() for n, m in src_rest_R.items()}
-    tgt_rest_R_inv = {n: m.inverted() for n, m in tgt_rest_R.items()}
-
-    # Force rotation_mode QUATERNION on rotation targets so keyframing
-    # picks the right channel; same for location targets' rotation_mode
-    # (harmless for them).
-    for _, n in rot_pairs:
-        target.pose.bones[n].rotation_mode = "QUATERNION"
-    for _, n in loc_pairs:
-        target.pose.bones[n].rotation_mode = "QUATERNION"
-
-    # Per-frame retarget loop -- the actual work.
-    scn = bpy.context.scene
-    target_inv_world = target.matrix_world.inverted()
-    rot_keys = 0
-    loc_keys = 0
-    for f in range(fstart, fend + 1):
-        scn.frame_set(f)
-        bpy.context.view_layer.update()
-        for src_name, tgt_name in rot_pairs:
-            src_pb = src.pose.bones[src_name]
-            tgt_pb = target.pose.bones[tgt_name]
-            src_R = src_pb.matrix.to_3x3()
-            local_R = (tgt_rest_R_inv[tgt_name] @ src_R
-                       @ src_rest_R_inv[src_name] @ tgt_rest_R[tgt_name])
-            cal = calibration.get(tgt_name, {})
-            inv = cal.get("invert")
-            if inv and len(inv) == 3:
-                # axis-toggle calibration: flip components of the local
-                # quaternion's vector part on selected axes.
-                q = local_R.to_quaternion()
-                qx = -q.x if inv[0] else q.x
-                qy = -q.y if inv[1] else q.y
-                qz = -q.z if inv[2] else q.z
-                tgt_pb.rotation_quaternion = mathutils.Quaternion(
-                    (q.w, qx, qy, qz))
-            else:
-                tgt_pb.rotation_quaternion = local_R.to_quaternion()
-            tgt_pb.keyframe_insert("rotation_quaternion", frame=f)
-            rot_keys += 1
-        for src_name, tgt_name in loc_pairs:
-            src_pb = src.pose.bones[src_name]
-            tgt_pb = target.pose.bones[tgt_name]
-            # world head of source bone, expressed in target armature space:
-            src_world_head = src.matrix_world @ src_pb.head
-            desired_arm = target_inv_world @ src_world_head
-            # Build pose-bone matrix = rest rotation + desired translation,
-            # so location channel encodes the offset cleanly.
-            m = target.data.bones[tgt_name].matrix_local.copy()
-            m.translation = desired_arm
-            tgt_pb.matrix = m
-            tgt_pb.keyframe_insert("location", frame=f)
-            loc_keys += 1
-        for ik_name, fk_name in ik_follow_pairs:
-            ik_pb = target.pose.bones[ik_name]
-            fk_pb = target.pose.bones[fk_name]
-            # FK end-effector = FK bone's tail in world; place IK target there.
-            desired_arm = target_inv_world @ (target.matrix_world @ fk_pb.tail)
-            m = target.data.bones[ik_name].matrix_local.copy()
-            m.translation = desired_arm
-            ik_pb.matrix = m
-            ik_pb.keyframe_insert("location", frame=f)
-            loc_keys += 1
+    try:
+        bpy.ops.rsl.retarget_animation()
+    except Exception as e:  # noqa: BLE001
+        _fail(
+            f"bpy.ops.rsl.retarget_animation() failed: {e}\n"
+            f"If this is a headless-context error, the workaround is to "
+            f"wrap the call in a context override; raise an issue with "
+            f"the exact traceback above."
+        )
 
     # Drop the BVH source so the per-take .blend is just rig + baked action.
     bpy.data.objects.remove(src, do_unlink=True)
@@ -251,12 +177,9 @@ def main():
     scn.frame_start, scn.frame_end = fstart, fend
 
     bpy.ops.wm.save_as_mainfile(filepath=args.out)
-    print(f"[headless_retarget] OK frames={fstart}-{fend} "
-          f"rot_pairs={len(rot_pairs)} loc_pairs={len(loc_pairs)} "
-          f"ik_follow={len(ik_follow_pairs)} "
-          f"keys={rot_keys + loc_keys} "
+    print(f"[headless_retarget] OK frames={fstart}-{fend} pairs={pairs_added} "
           f"fps={scn.render.fps}/{scn.render.fps_base:.4f} "
-          f"out={args.out}")
+          f"out={args.out} (engine=rokoko)")
 
 
 if __name__ == "__main__":

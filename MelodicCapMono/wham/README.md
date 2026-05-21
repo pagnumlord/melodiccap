@@ -100,18 +100,19 @@ python -m MelodicCapMono.orchestrate.process_take guitar.mp4 \
     --blender-exe "C:/.../Blender/blender.exe" --out guitar.blend
 ```
 
-video → WHAM → BVH → headless **rest-relative retarget** on a **copy**
-of the master `.blend` (the master is never touched) → `guitar.blend`
-(rig + baked action) + `guitar.report.json`. Put machine paths in an
-untracked `characters/jax.local.json` (deep-merged) to drop the
+video → WHAM → BVH → **headless Rokoko retarget** on a **copy** of the
+master `.blend` (the master is never touched) → `guitar.blend` (rig +
+baked action) + `guitar.report.json`. Put machine paths in an untracked
+`characters/jax.local.json` (deep-merged) to drop the
 `--base-blend/--blender-exe` flags. Config contract: `characters/_schema.md`.
-For each frame the headless script computes
-`target_local = target_rest⁻¹ @ source_world @ source_rest⁻¹ @ target_rest`
-using Blender's own bone rest matrices (the same identity Rokoko uses
-internally) and height-scales the source skeleton to the target rig so
-IK end-effector positions land correctly. Plain WORLD/WORLD copy
-constraints can't do this — they force the target into the source's
-rest orientations and stretch the rig on a real take.
+The headless script calls `bpy.ops.rsl.retarget_animation()` from the
+Rokoko Studio Live plugin (auto-loaded in the user's Blender), driven
+by the proven bone list in `characters/<name>.json`'s `bone_map`. Hand-
+rolled approaches (WORLD/WORLD copy constraints, then a rest-relative
+matrix loop) each fixed one symptom and surfaced another on real takes;
+Rokoko's retarget engine already handles rest-pose alignment, auto-
+scaling, and per-bone basis differences — that's what makes the manual
+workflow work, and that's what the headless run now invokes directly.
 
 The manual Rokoko recipe below is now the **calibration / ground-truth
 reference**: run it once per new character to produce the known-good
