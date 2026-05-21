@@ -18,7 +18,7 @@ convention and are ignored by loaders.
 | `bvh_export.root_motion` | `"zero"` \| `"trans"` | Passed to `pose_json_to_bvh`. `zero` pins the root (monocular trans drifts — keyframe the path by hand). |
 | `bvh_export.global_rot_euler_deg` | `[x,y,z]` | Root orientation fix for WHAM's camera frame (default `[180,0,0]` = upright after Blender's BVH import). |
 | `ik_fk_one` | `[bone,...]` | Rigify limb-settings bones whose `IK_FK` custom property is forced to `1.0` (full FK) so the `*_fk` retarget is followed. Default: the four `*_parent` bones. |
-| `bone_map` | `{src: {bone, type?}}` | SMPL/BVH source joint → Rigify control bone. `type` defaults to `COPY_ROTATION`; use `COPY_LOCATION` for IK end-effectors (`*_foot→foot_ik`, `*_hand→hand_ik`). WORLD/WORLD copy constraints + `nla.bake(visual_keying=True)` resolve the rest-frame difference. |
+| `bone_map` | `{src: {bone, type?}}` | SMPL/BVH source joint → Rigify control bone. `type` defaults to `COPY_ROTATION`. The automated path is FK-driven (`ik_fk_one` forces every limb to FK), so the rotation chain alone positions end-effectors correctly — **do not add `COPY_LOCATION` IK targets here.** They stretch the rig because the SMPL source's pelvis sits at world origin while the Rigify pelvis is up at ~0.9 m; Rigify's `IK_Stretch` then extends the limb to reach the displaced IK target. The manual Rokoko recipe in `wham/README.md` does map `*_foot/*_hand → *_ik` because Rokoko auto-scales/aligns the source — that's a separate workflow. |
 | `calibration` | `{target_bone: {invert:[bx,by,bz]}}` | Optional escape hatch, used **only** if a real take shows a bone rotated wrong vs the ground-truth Rokoko bake. Default `{}`. |
 
 ## Local override (machine paths, untracked)
