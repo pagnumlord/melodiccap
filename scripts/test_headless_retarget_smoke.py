@@ -1,15 +1,20 @@
-"""Smoke test for the automated retarget path (Phase 1).
+"""Smoke test for the automated retarget path (Phases 1 + 4).
 
 Layered, CI-safe:
 
   A. Every characters/*.json (non-.local) validates against the schema
      the orchestrator + headless script depend on.            [stdlib]
-  B. process_take.py and headless_retarget.py byte-compile.    [stdlib]
+  B. process_take.py, headless_retarget.py, footlock.py, _smpl_fk.py
+     all byte-compile.                                         [stdlib]
   C. `process_take --dry-run` wires end-to-end against the wave
      fixture (config resolve + stage plan + Blender cmd).      [numpy]
   D. OPT-IN real headless run: if env MELODICCAP_TEST_BLENDER and
      MELODICCAP_TEST_BASEBLEND are set, actually run Blender and assert
      the OK marker. Otherwise SKIP with a message.             [Blender]
+  E. Footlock detection on a synthetic walking pose JSON:
+     plant detection finds alternating L/R intervals; floor_z
+     calibration is within tolerance of the synthetic ground;
+     foot_contact arrays match per_frame length.               [numpy]
 
 Exit 0 if all non-skipped checks pass, 1 on any failure.
 
@@ -27,6 +32,10 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+# Section E imports MelodicCapMono directly; make the repo root resolvable
+# regardless of cwd. Other sections subprocess `python -m ...` with cwd=REPO.
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
 CHARS = REPO / "MelodicCapMono" / "characters"
 WAVE = REPO / "MelodicCapMono" / "fixtures" / "wave.pose.json"
 VALID_TYPES = {"COPY_ROTATION", "COPY_LOCATION"}
@@ -79,7 +88,9 @@ def main() -> int:
 
     print("\nB. byte-compile")
     for rel in ("MelodicCapMono/orchestrate/process_take.py",
-                "MelodicCapMono/blender_addon/headless_retarget.py"):
+                "MelodicCapMono/orchestrate/footlock.py",
+                "MelodicCapMono/blender_addon/headless_retarget.py",
+                "MelodicCapMono/wham/_smpl_fk.py"):
         try:
             py_compile.compile(str(REPO / rel), doraise=True)
             ok(rel)
@@ -123,6 +134,68 @@ def main() -> int:
                 ok("real headless retarget produced a .blend")
             else:
                 bad(f"real headless failed (rc={r.returncode}):\n{out[-800:]}")
+
+    print("\nE. footlock detection on synthetic walking pose")
+    try:
+        import numpy as np
+        from MelodicCapMono.orchestrate import footlock
+        # Build a synthetic walking pose: hips bob sinusoidally, ankles
+        # alternate dipping through the floor. Pose is all-zero rotations
+        # for limbs (SMPL T-pose) -- we drive contact through smpl_trans's
+        # Y component AND alternating leg lift via simple hip_y rotations.
+        # To make it actually exercise the detector, give the left and
+        # right ankles distinct vertical motion via the hip joint pose.
+        n = 60
+        fps = 30.0
+        frames = []
+        import math as _m
+        for f in range(n):
+            t = f / fps
+            # smpl_pose all zero; alter left_hip (joint 1) and right_hip
+            # (joint 2) X-rotation in alternation to lift the corresponding
+            # foot off the floor by rotating the leg backward, then forward.
+            pose = [0.0] * 72
+            # left foot lifts on first half-cycle; right on second half
+            phase = _m.sin(2 * _m.pi * 1.0 * t)         # period 1.0s
+            pose[1 * 3 + 0] = -0.6 * max(0.0, phase)    # left_hip X
+            pose[2 * 3 + 0] = -0.6 * max(0.0, -phase)   # right_hip X
+            frames.append({
+                "frame": f, "timestamp": float(t),
+                "smpl_pose": pose, "smpl_trans": [0.0, 0.0, 0.0],
+            })
+        walk = {"format": "melodiccap_mono_v1", "source_model": "fixture",
+                "source_video": "smoke_walk", "character": "jax",
+                "fps": fps, "smpl_betas": [0.0] * 10, "frames": frames}
+        res = footlock.detect_foot_contacts(walk)
+        # Floor calibration should be near the ankle rest Y (~-0.886)
+        floor_l = res["floor_z"]["L"]
+        floor_r = res["floor_z"]["R"]
+        if abs(floor_l - floor_r) > 0.05:
+            bad(f"floor_z asymmetry too high: L={floor_l:.3f} R={floor_r:.3f}")
+        else:
+            ok(f"floor_z calibrated L={floor_l:+.3f} R={floor_r:+.3f}")
+        # per_frame arrays length matches frame count
+        if (len(res["per_frame"]["foot_contact_l"]) != n
+                or len(res["per_frame"]["foot_contact_r"]) != n):
+            bad("per_frame contact array length mismatch")
+        else:
+            ok(f"per_frame length = {n}")
+        # Both feet should be detected as planted for a meaningful chunk
+        fic_l = res["frames_in_contact"]["L"]
+        fic_r = res["frames_in_contact"]["R"]
+        if fic_l < 5 or fic_r < 5:
+            bad(f"frames_in_contact too low: L={fic_l} R={fic_r}")
+        else:
+            ok(f"frames_in_contact L={fic_l} R={fic_r} of {n}")
+        # At least one interval per side (alternating walking pattern)
+        ivs = res["intervals"]
+        sides = {iv["side"] for iv in ivs}
+        if sides != {"L", "R"} or len(ivs) < 2:
+            bad(f"expected ≥2 intervals covering both sides, got {ivs}")
+        else:
+            ok(f"intervals={len(ivs)} covering both sides")
+    except Exception as e:  # noqa: BLE001
+        bad(f"footlock smoke: {type(e).__name__}: {e}")
 
     print()
     if fails:

@@ -34,6 +34,20 @@
   },
   "calibration": {},
   "_comment_calibration": "Optional per-target-bone escape hatch, reserved for future use (current Rokoko engine does not consume it). Default: none.",
+  "_comment_foot_contact": "Phase 4 foot-contact + IK lock post-pass. Detects plant frames from SMPL ankle Z + XY velocity (data-relative floor calibrated from the first `calibration_frames` of the take, median). Headless retarget then keys foot_ik.{L,R} location/rotation toward the planted Rokoko-baked snapshot during each interval (with smoothstep blend on entry and exit), and ramps thigh_parent.{L,R} IK_FK from 1.0 (FK during swing) to 0.0 (IK during plant). Defaults are the v5.x music-video constants. Set enabled=false (or pass --no-foot-contact) to bypass and reproduce today's behavior bit-for-bit.",
+  "foot_contact": {
+    "enabled":                true,
+    "floor_z":                null,
+    "ankle_z_threshold_m":    0.08,
+    "ankle_vel_threshold_mps": 0.15,
+    "calibration_frames":     20,
+    "pin_blend_frames":       6,
+    "unpin_blend_frames":     8,
+    "pin_slide_rate":         0.15,
+    "hip_drift_unpin_m":      0.12,
+    "foot_ik_bones":          { "L": "foot_ik.L", "R": "foot_ik.R" },
+    "thigh_parent_bones":     { "L": "thigh_parent.L", "R": "thigh_parent.R" }
+  },
   "_comment_about_offsets": "rot_offset_euler_deg is added AFTER the SMPL axis-angle is converted to a Blender quaternion. Use it to absorb mismatches between SMPL's joint frame and the Rigify bone's roll. Common values are 0 / +/- 90 / +/- 180. Edit these during Phase F calibration when you see a bone rotated wrong on a real take.",
   "smpl_to_rig": {
     "pelvis":         { "bone": "torso",         "rot_offset_euler_deg": [0, 0, 0] },

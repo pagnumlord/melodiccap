@@ -118,6 +118,9 @@ def main(argv=None) -> int:
                     help="Blender binary (overrides config / $MELODICCAP_BLENDER).")
     ap.add_argument("--keep-intermediate", action="store_true",
                     help="Keep the intermediate .pose.json and .bvh.")
+    ap.add_argument("--no-foot-contact", action="store_true",
+                    help="Skip Stage 3.5 (foot-contact detection + IK lock). "
+                         "Reproduces today's behavior bit-for-bit.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Print the planned stages without executing.")
     args = ap.parse_args(argv)
@@ -182,6 +185,41 @@ def main(argv=None) -> int:
                                "fps": src_fps, "root_motion": root_motion,
                                "global_rot": list(global_rot)}
 
+    # --- Stage 3.5: foot-contact detection (in-process, pure numpy) ---
+    # Adds Phase 4's contact-aware IK lock layer on top of the rotation
+    # retarget. Bypassed when foot_contact.enabled is false or
+    # --no-foot-contact is set; output is identical to today's pipeline.
+    foot_contact_cfg = cfg.get("foot_contact", {})
+    footlock_enabled = (foot_contact_cfg.get("enabled", False)
+                        and not args.no_foot_contact)
+    footlock_path = None
+    if footlock_enabled:
+        from MelodicCapMono.orchestrate import footlock
+        footlock_path = (work / f"{stem}.footlock.json").resolve()
+        if args.dry_run:
+            print(f"[process_take] footlock: -> {footlock_path}")
+            report["stages"]["foot_contact"] = {
+                "sidecar": str(footlock_path), "dry_run": True}
+        else:
+            fl = footlock.write_footlock_sidecar(data, footlock_path,
+                                                 config=cfg)
+            report["stages"]["foot_contact"] = {
+                "sidecar": str(footlock_path),
+                "floor_z": fl["floor_z"],
+                "frames_in_contact": fl["frames_in_contact"],
+                "intervals": fl["intervals"],
+            }
+            asym = abs(fl["floor_z"]["L"] - fl["floor_z"]["R"])
+            print(f"[process_take] footlock: {len(fl['intervals'])} intervals, "
+                  f"in_contact L={fl['frames_in_contact']['L']} "
+                  f"R={fl['frames_in_contact']['R']}/{n_frames}, "
+                  f"floor_z asym={asym:.3f} m -> {footlock_path}")
+            if asym > 0.05:
+                print(f"[process_take] WARN: floor_z asymmetry > 5 cm "
+                      f"({asym:.3f}) — calibration may be biased.")
+    else:
+        report["stages"]["foot_contact"] = {"skipped": True}
+
     # --- Stage 4: headless retarget (master .blend never mutated) ---
     base_blend = cfg.get("base_blend")
     blender_exe = cfg.get("blender_exe")
@@ -199,6 +237,8 @@ def main(argv=None) -> int:
     cmd = [blender_exe, "--background", "--python", str(HEADLESS_SCRIPT), "--",
            "--config", str(resolved_cfg), "--bvh", str(bvh_path),
            "--out", str(out_blend), "--fps", str(src_fps)]
+    if footlock_path is not None:
+        cmd += ["--footlock", str(footlock_path)]
     rc = _run(cmd, cwd=str(REPO_ROOT), dry=args.dry_run)
     if rc != 0 and not args.dry_run:
         sys.exit(f"Headless retarget failed (exit {rc}). See Blender stderr.")
@@ -210,6 +250,8 @@ def main(argv=None) -> int:
         if not args.keep_intermediate:
             for p in (bvh_path, resolved_cfg):
                 p.unlink(missing_ok=True)
+            if footlock_path is not None:
+                footlock_path.unlink(missing_ok=True)
             if args.from_pose_json is None:
                 pose_json.unlink(missing_ok=True)
         report_path = out_blend.with_suffix(".report.json")

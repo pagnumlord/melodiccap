@@ -27,6 +27,7 @@ import json
 import sys
 
 import bpy
+import mathutils
 
 
 def _argv_after_ddash():
@@ -38,6 +39,133 @@ def _fail(msg: str):
     sys.exit(1)
 
 
+def _apply_ik_lock_pass(target, footlock_data, foot_cfg, fstart, fend):
+    """Post-Rokoko narrow override: blend foot_ik.{L,R} location/rotation
+    toward planted snapshots (captured at each interval's frame_in from
+    Rokoko's own bake -- v1 decision #1, conservative). Ramp
+    thigh_parent.{L,R} IK_FK from 1.0 (FK during swing) to 0.0 (IK during
+    plant). The rotation chain (thigh_fk/shin_fk/foot_fk) Rokoko produced
+    is left untouched -- this pass is narrow by design.
+
+    Industry canon (UnderPressure arXiv 2208.04598, Unreal IK Rig
+    contact tracks, Cascadeur foot polish): rotation retarget first,
+    then a contact-aware IK override on plant frames. WHAM is
+    trajectory-based and does not predict ankle rotation reliably;
+    this is the missing second half of the pipeline.
+    """
+    per_frame = footlock_data["per_frame"]
+    contact = {
+        "L": per_frame["foot_contact_l"],
+        "R": per_frame["foot_contact_r"],
+    }
+    n_contact = len(contact["L"])
+    intervals_by_side = {"L": [], "R": []}
+    for iv in footlock_data["intervals"]:
+        intervals_by_side[iv["side"]].append(
+            (int(iv["frame_in"]), int(iv["frame_out"])))
+
+    ik_bones = foot_cfg.get(
+        "foot_ik_bones", {"L": "foot_ik.L", "R": "foot_ik.R"})
+    thigh_bones = foot_cfg.get(
+        "thigh_parent_bones",
+        {"L": "thigh_parent.L", "R": "thigh_parent.R"})
+    hip_drift_thresh = float(foot_cfg.get("hip_drift_unpin_m", 0.12))
+    pin_slide_rate = float(foot_cfg.get("pin_slide_rate", 0.15))
+
+    scn = bpy.context.scene
+    pelvis_pb = (target.pose.bones.get("torso")
+                 or target.pose.bones.get("pelvis"))
+
+    # Pre-key IK_FK = 1.0 at fstart so FK governs the rig outside any
+    # plant interval. (Rokoko writes a static IK_FK=1.0 with no keys; once
+    # we add per-frame IK_FK keys we need an anchor at fstart.)
+    for side in ("L", "R"):
+        thigh_name = thigh_bones.get(side)
+        thigh_pb = (target.pose.bones.get(thigh_name)
+                    if thigh_name else None)
+        if thigh_pb is not None and "IK_FK" in thigh_pb:
+            scn.frame_set(fstart)
+            bpy.context.view_layer.update()
+            thigh_pb["IK_FK"] = 1.0
+            thigh_pb.keyframe_insert('["IK_FK"]', frame=fstart)
+
+    lock_total = 0
+    for side in ("L", "R"):
+        ik_name = ik_bones.get(side)
+        thigh_name = thigh_bones.get(side)
+        ik_pb = target.pose.bones.get(ik_name) if ik_name else None
+        thigh_pb = (target.pose.bones.get(thigh_name)
+                    if thigh_name else None)
+        if ik_pb is None:
+            print(f"[headless_retarget] WARN: IK lock side {side} skipped "
+                  f"(missing bone {ik_name!r})")
+            continue
+        ik_pb.rotation_mode = "QUATERNION"
+
+        ivs = intervals_by_side[side]
+        for iv_in, iv_out in ivs:
+            # Snapshot Rokoko's foot_ik world pose at iv_in.
+            scn.frame_set(iv_in)
+            bpy.context.view_layer.update()
+            world0 = target.matrix_world @ ik_pb.matrix
+            snap_loc = mathutils.Vector(world0.translation)
+            snap_quat = world0.to_quaternion()
+            snap_hip_xy = None
+            if pelvis_pb is not None:
+                snap_hip_xy = (
+                    target.matrix_world @ pelvis_pb.head).xy.copy()
+
+            lock_loc = snap_loc.copy()
+
+            for f in range(iv_in, min(iv_out + 1, n_contact)):
+                c = float(contact[side][f])
+                if c <= 0.0:
+                    continue
+                scn.frame_set(f)
+                bpy.context.view_layer.update()
+                rokoko_world = target.matrix_world @ ik_pb.matrix
+                rokoko_loc = rokoko_world.translation
+                rokoko_quat = rokoko_world.to_quaternion()
+
+                # Walking-aware slide: if hip drifted past threshold,
+                # nudge the locked XY toward Rokoko's current foot XY.
+                if (snap_hip_xy is not None
+                        and pelvis_pb is not None):
+                    cur_hip_xy = (
+                        target.matrix_world @ pelvis_pb.head).xy
+                    if (cur_hip_xy - snap_hip_xy).length > hip_drift_thresh:
+                        slide = (rokoko_loc.xy - lock_loc.xy) * pin_slide_rate
+                        lock_loc.x += slide.x
+                        lock_loc.y += slide.y
+                        snap_hip_xy = cur_hip_xy.copy()
+
+                target_loc = rokoko_loc.lerp(lock_loc, c)
+                target_quat = rokoko_quat.slerp(snap_quat, c)
+                target_world_mat = mathutils.Matrix.LocRotScale(
+                    target_loc, target_quat, None)
+                ik_pb.matrix = (
+                    target.matrix_world.inverted() @ target_world_mat)
+                ik_pb.keyframe_insert("location", frame=f)
+                ik_pb.keyframe_insert("rotation_quaternion", frame=f)
+                lock_total += 1
+
+                if thigh_pb is not None and "IK_FK" in thigh_pb:
+                    thigh_pb["IK_FK"] = float(1.0 - c)
+                    thigh_pb.keyframe_insert('["IK_FK"]', frame=f)
+
+            # Force IK_FK back to 1.0 one frame past the interval so FK
+            # cleanly resumes on swing.
+            if thigh_pb is not None and "IK_FK" in thigh_pb:
+                f_after = iv_out + 1
+                if fstart <= f_after <= fend:
+                    scn.frame_set(f_after)
+                    bpy.context.view_layer.update()
+                    thigh_pb["IK_FK"] = 1.0
+                    thigh_pb.keyframe_insert('["IK_FK"]', frame=f_after)
+
+    return lock_total
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser(prog="headless_retarget")
@@ -45,6 +173,9 @@ def main():
     ap.add_argument("--bvh", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--fps", type=float, default=30.0)
+    ap.add_argument("--footlock", default=None,
+                    help="Optional foot-contact sidecar JSON. If provided, "
+                         "a narrow IK-lock pass runs after Rokoko's bake.")
     args = ap.parse_args(_argv_after_ddash())
 
     # utf-8-sig: tolerate a BOM in case some upstream writer added one.
@@ -167,6 +298,22 @@ def main():
             f"the exact traceback above."
         )
 
+    # --- Phase 4: contact-aware IK lock (narrow override over Rokoko's bake) ---
+    lock_keys = 0
+    if args.footlock:
+        try:
+            with open(args.footlock, encoding="utf-8-sig") as fh:
+                fl_data = json.loads(fh.read())
+            foot_cfg = cfg.get("foot_contact", {})
+            lock_keys = _apply_ik_lock_pass(
+                target, fl_data, foot_cfg, fstart, fend)
+            print(f"[headless_retarget] IK lock: {lock_keys} foot_ik keys "
+                  f"over {len(fl_data['intervals'])} plant intervals")
+        except Exception as e:  # noqa: BLE001
+            print(f"[headless_retarget] WARN: IK lock pass failed: {e}",
+                  file=sys.stderr)
+            # Non-fatal -- Rokoko's bake still ships even without the lock.
+
     # Drop the BVH source so the per-take .blend is just rig + baked action.
     bpy.data.objects.remove(src, do_unlink=True)
 
@@ -178,6 +325,7 @@ def main():
 
     bpy.ops.wm.save_as_mainfile(filepath=args.out)
     print(f"[headless_retarget] OK frames={fstart}-{fend} pairs={pairs_added} "
+          f"ik_lock_keys={lock_keys} "
           f"fps={scn.render.fps}/{scn.render.fps_base:.4f} "
           f"out={args.out} (engine=rokoko)")
 

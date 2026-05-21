@@ -38,52 +38,15 @@ from pathlib import Path
 
 import numpy as np
 
-
-# SMPL 24-joint kinematic tree. Index i's parent is SMPL_PARENTS[i]
-# (-1 = root). Order matches smpl_pose: joint i's axis-angle is
-# smpl_pose[i*3:(i+1)*3].
-SMPL_JOINT_NAMES = (
-    "pelvis", "left_hip", "right_hip", "spine1", "left_knee", "right_knee",
-    "spine2", "left_ankle", "right_ankle", "spine3", "left_foot",
-    "right_foot", "neck", "left_collar", "right_collar", "head",
-    "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
-    "left_wrist", "right_wrist", "left_hand", "right_hand",
-)
-SMPL_PARENTS = (
-    -1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14,
-    16, 17, 18, 19, 20, 21,
+# SMPL primitives are shared with orchestrate/footlock.py via this module.
+from ._smpl_fk import (
+    SMPL_JOINT_NAMES,
+    SMPL_PARENTS,
+    SMPL_REST_JOINTS,
+    aa_to_matrix as _aa_to_matrix,
+    euler_deg_to_matrix as _euler_deg_to_matrix,
 )
 
-# SMPL neutral mean-shape rest joints, meters, SMPL frame (+X = subject
-# left, +Y = up, +Z = forward). T-pose: spine along +Y, arms along X,
-# legs along -Y. Approximate; only relative offsets and topology matter
-# for a retarget source (lengths get re-proportioned to the target rig).
-SMPL_REST_JOINTS = np.array([
-    [ 0.0000,  0.0000,  0.0000],  # 0  pelvis
-    [ 0.0586, -0.0820,  0.0140],  # 1  left_hip
-    [-0.0589, -0.0827,  0.0135],  # 2  right_hip
-    [ 0.0044,  0.1244, -0.0383],  # 3  spine1
-    [ 0.1058, -0.4927,  0.0085],  # 4  left_knee
-    [-0.1064, -0.4936,  0.0061],  # 5  right_knee
-    [ 0.0047,  0.2728, -0.0383],  # 6  spine2
-    [ 0.0855, -0.8865, -0.0265],  # 7  left_ankle
-    [-0.0861, -0.8893, -0.0234],  # 8  right_ankle
-    [ 0.0061,  0.3268, -0.0163],  # 9  spine3
-    [ 0.1233, -0.9430,  0.1158],  # 10 left_foot
-    [-0.1199, -0.9445,  0.1141],  # 11 right_foot
-    [ 0.0028,  0.5375, -0.0410],  # 12 neck
-    [ 0.0792,  0.4549, -0.0228],  # 13 left_collar
-    [-0.0760,  0.4565, -0.0232],  # 14 right_collar
-    [ 0.0070,  0.6336,  0.0146],  # 15 head
-    [ 0.1827,  0.4602, -0.0375],  # 16 left_shoulder
-    [-0.1771,  0.4567, -0.0407],  # 17 right_shoulder
-    [ 0.4576,  0.4509, -0.0501],  # 18 left_elbow
-    [-0.4561,  0.4495, -0.0490],  # 19 right_elbow
-    [ 0.7138,  0.4536, -0.0526],  # 20 left_wrist
-    [-0.7158,  0.4521, -0.0517],  # 21 right_wrist
-    [ 0.8062,  0.4555, -0.0568],  # 22 left_hand
-    [-0.8089,  0.4541, -0.0560],  # 23 right_hand
-], dtype=np.float64)
 
 EXPECTED_FORMAT = "melodiccap_mono_v1"
 
@@ -109,29 +72,6 @@ def _dfs_order(parents):
 
     visit(0)
     return order
-
-
-def _aa_to_matrix(aa):
-    """Axis-angle (3,) radians -> (3,3) rotation matrix (Rodrigues)."""
-    x, y, z = float(aa[0]), float(aa[1]), float(aa[2])
-    theta = math.sqrt(x * x + y * y + z * z)
-    if theta < 1e-12:
-        return np.eye(3)
-    kx, ky, kz = x / theta, y / theta, z / theta
-    K = np.array([[0.0, -kz, ky], [kz, 0.0, -kx], [-ky, kx, 0.0]])
-    return np.eye(3) + math.sin(theta) * K + (1.0 - math.cos(theta)) * (K @ K)
-
-
-def _euler_deg_to_matrix(xd, yd, zd):
-    """Rz @ Ry @ Rx for a constant global correction (degrees)."""
-    x, y, z = math.radians(xd), math.radians(yd), math.radians(zd)
-    cx, sx = math.cos(x), math.sin(x)
-    cy, sy = math.cos(y), math.sin(y)
-    cz, sz = math.cos(z), math.sin(z)
-    Rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
-    Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
-    Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
-    return Rz @ Ry @ Rx
 
 
 def _matrix_to_euler_zxy_deg(R):
