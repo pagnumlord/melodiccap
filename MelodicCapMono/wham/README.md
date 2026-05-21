@@ -100,14 +100,18 @@ python -m MelodicCapMono.orchestrate.process_take guitar.mp4 \
     --blender-exe "C:/.../Blender/blender.exe" --out guitar.blend
 ```
 
-video → WHAM → BVH → headless constraint-bake on a **copy** of the
-master `.blend` (the master is never touched) → `guitar.blend` (rig +
-baked action) + `guitar.report.json`. Put machine paths in an untracked
-`characters/jax.local.json` (deep-merged) to drop the
+video → WHAM → BVH → headless **rest-relative retarget** on a **copy**
+of the master `.blend` (the master is never touched) → `guitar.blend`
+(rig + baked action) + `guitar.report.json`. Put machine paths in an
+untracked `characters/jax.local.json` (deep-merged) to drop the
 `--base-blend/--blender-exe` flags. Config contract: `characters/_schema.md`.
-The constraint-bake mechanism is adapted from the project's proven
-`oldscripts/mocap_to_rigify_complete.py` (WORLD-space copy constraints →
-`nla.bake(visual_keying=True)` → strip `MOCAP_*`).
+For each frame the headless script computes
+`target_local = target_rest⁻¹ @ source_world @ source_rest⁻¹ @ target_rest`
+using Blender's own bone rest matrices (the same identity Rokoko uses
+internally) and height-scales the source skeleton to the target rig so
+IK end-effector positions land correctly. Plain WORLD/WORLD copy
+constraints can't do this — they force the target into the source's
+rest orientations and stretch the rig on a real take.
 
 The manual Rokoko recipe below is now the **calibration / ground-truth
 reference**: run it once per new character to produce the known-good

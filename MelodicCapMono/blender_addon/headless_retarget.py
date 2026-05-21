@@ -1,18 +1,29 @@
-"""Headless constraint-bake retarget. Run INSIDE Blender:
+"""Headless rest-relative retarget. Run INSIDE Blender:
 
     blender --background --python headless_retarget.py -- \
         --config resolved.json --bvh take.bvh --out take.blend --fps 30
 
-Adapts the proven RigifyRetargeter from
-oldscripts/mocap_to_rigify_complete.py (WORLD-space COPY_ROTATION /
-COPY_LOCATION -> bpy.ops.nla.bake(visual_keying=True) -> strip MOCAP_*).
-WORLD/WORLD copy constraints make Blender's own solver resolve the
-SMPL-vs-Rigify rest-frame difference per frame — the exact thing the
-Phase C local-axis-angle addon got wrong. No bespoke rotation math here.
+For each frame, sets each mapped target pose-bone's LOCAL rotation via
+the standard Blender skeleton-to-skeleton retarget identity:
 
-The master .blend is OPENED then SAVED-AS to --out, so it is never
-mutated. Config is the fully-resolved per-character JSON written by
-process_take (armature, base_blend, ik_fk_one, bone_map, calibration).
+    target_local_rot = target_rest^-1 @ source_world
+                       @ source_rest^-1 @ target_rest
+
+(using each rig's own bone.matrix_local rest matrices). That is the same
+math Rokoko applies internally: transfer the source's pose delta from
+its own rest into the target's rest frame. It uses Blender's own
+rest matrices -- no axis-angle / Euler-order guessing. The previous
+WORLD/WORLD Copy-Rotation+bake approach forced JaxRigify into SMPL's
+T-pose world orientations and produced a stretched/hunched character on
+real takes; this fixes it.
+
+The source BVH skeleton is height-scaled to match the target rig before
+the per-frame loop, so `*_ik` location targets (foot_ik, hand_ik) land
+at the right world positions for IK chains.
+
+The master .blend is OPENED then SAVED-AS to --out -- the master is
+never mutated. Config is the per-character JSON written by process_take
+(armature, base_blend, ik_fk_one, bone_map, calibration).
 """
 
 from __future__ import annotations
@@ -21,6 +32,7 @@ import json
 import sys
 
 import bpy
+import mathutils
 
 
 def _argv_after_ddash():
@@ -30,6 +42,14 @@ def _argv_after_ddash():
 def _fail(msg: str):
     print(f"[headless_retarget] ERROR: {msg}", file=sys.stderr)
     sys.exit(1)
+
+
+def _bone_height(arm, head_bone, foot_bone):
+    """|head.z - foot.z| of two rest bones, in armature local space."""
+    bones = arm.data.bones
+    if head_bone not in bones or foot_bone not in bones:
+        return 0.0
+    return abs(bones[head_bone].head_local.z - bones[foot_bone].head_local.z)
 
 
 def main():
@@ -101,9 +121,24 @@ def main():
         else:
             print(f"[headless_retarget] WARN: {bname!r} has no IK_FK prop")
 
-    # Add WORLD-space copy constraints (the proven mechanism).
-    added = 0
-    constrained = []
+    # Height-fit the source skeleton to the target rig so IK target world
+    # positions land correctly. SMPL mean-shape is ~1.6 m; JaxRigify is
+    # 1.87 m. Without this, foot_ik/hand_ik COPY_LOCATION targets sit at
+    # SMPL coords -> the leg IK over-extends and pulls the spine down.
+    src_pelvis = bone_map.get("pelvis", {}).get("bone")
+    src_h = _bone_height(src, "pelvis", "left_foot") or src.dimensions.z
+    tgt_foot = bone_map.get("left_ankle", {}).get("bone", "foot_fk.L")
+    tgt_h = _bone_height(target, src_pelvis or "torso", tgt_foot) \
+        or target.dimensions.z
+    scale = (tgt_h / src_h) if src_h > 0 else 1.0
+    src.scale = (scale, scale, scale)
+    bpy.context.view_layer.update()
+    print(f"[headless_retarget] scale fit: src_h={src_h:.3f} "
+          f"tgt_h={tgt_h:.3f} scale={scale:.4f}")
+
+    # Sort pairs by retarget type.
+    rot_pairs = []  # (src_bone, tgt_bone)
+    loc_pairs = []
     for src_bone, spec in bone_map.items():
         tgt_name = spec["bone"]
         ctype = spec.get("type", "COPY_ROTATION")
@@ -111,57 +146,81 @@ def main():
             print(f"[headless_retarget] WARN: source bone {src_bone!r} "
                   f"absent in BVH — skipped")
             continue
-        tgt = target.pose.bones.get(tgt_name)
-        if tgt is None:
+        if tgt_name not in target.pose.bones:
             print(f"[headless_retarget] WARN: target bone {tgt_name!r} "
                   f"absent on {armature_name} — skipped")
             continue
-        for c in list(tgt.constraints):
-            if c.name.startswith("MOCAP_"):
-                tgt.constraints.remove(c)
-        con = tgt.constraints.new(ctype)
-        con.name = f"MOCAP_{src_bone}"
-        con.target = src
-        con.subtarget = src_bone
-        con.target_space = "WORLD"
-        con.owner_space = "WORLD"
-        con.influence = 1.0
-        if ctype == "COPY_ROTATION":
-            inv = calibration.get(tgt_name, {}).get("invert")
+        if ctype == "COPY_LOCATION":
+            loc_pairs.append((src_bone, tgt_name))
+        else:
+            rot_pairs.append((src_bone, tgt_name))
+
+    if not rot_pairs and not loc_pairs:
+        _fail("no bone pairs resolved — check bone_map vs the rig bone names")
+
+    # Pre-compute rest rotation matrices (don't change per frame).
+    src_rest_R = {n: src.data.bones[n].matrix_local.to_3x3()
+                  for n, _ in rot_pairs}
+    tgt_rest_R = {n: target.data.bones[n].matrix_local.to_3x3()
+                  for _, n in rot_pairs}
+    src_rest_R_inv = {n: m.inverted() for n, m in src_rest_R.items()}
+    tgt_rest_R_inv = {n: m.inverted() for n, m in tgt_rest_R.items()}
+
+    # Force rotation_mode QUATERNION on rotation targets so keyframing
+    # picks the right channel; same for location targets' rotation_mode
+    # (harmless for them).
+    for _, n in rot_pairs:
+        target.pose.bones[n].rotation_mode = "QUATERNION"
+    for _, n in loc_pairs:
+        target.pose.bones[n].rotation_mode = "QUATERNION"
+
+    # Per-frame retarget loop -- the actual work.
+    scn = bpy.context.scene
+    target_inv_world = target.matrix_world.inverted()
+    rot_keys = 0
+    loc_keys = 0
+    for f in range(fstart, fend + 1):
+        scn.frame_set(f)
+        bpy.context.view_layer.update()
+        for src_name, tgt_name in rot_pairs:
+            src_pb = src.pose.bones[src_name]
+            tgt_pb = target.pose.bones[tgt_name]
+            src_R = src_pb.matrix.to_3x3()
+            local_R = (tgt_rest_R_inv[tgt_name] @ src_R
+                       @ src_rest_R_inv[src_name] @ tgt_rest_R[tgt_name])
+            cal = calibration.get(tgt_name, {})
+            inv = cal.get("invert")
             if inv and len(inv) == 3:
-                con.invert_x, con.invert_y, con.invert_z = (
-                    bool(inv[0]), bool(inv[1]), bool(inv[2]))
-        added += 1
-        constrained.append(tgt_name)
-
-    if added == 0:
-        _fail("no constraints added — check bone_map vs the rig bone names")
-
-    # Bake the constrained bones to keyframes (visual keying resolves the
-    # constraints in world space), then strip the constraints.
-    bpy.context.view_layer.objects.active = target
-    target.select_set(True)
-    bpy.ops.object.mode_set(mode="POSE")
-    bpy.ops.pose.select_all(action="DESELECT")
-    for pb in target.pose.bones:
-        if any(c.name.startswith("MOCAP_") for c in pb.constraints):
-            pb.bone.select = True
-    bpy.ops.nla.bake(
-        frame_start=fstart, frame_end=fend, only_selected=True,
-        visual_keying=True, clear_constraints=False,
-        use_current_action=True, bake_types={"POSE"},
-    )
-    for pb in target.pose.bones:
-        for c in list(pb.constraints):
-            if c.name.startswith("MOCAP_"):
-                pb.constraints.remove(c)
-    bpy.ops.object.mode_set(mode="OBJECT")
+                # axis-toggle calibration: flip components of the local
+                # quaternion's vector part on selected axes.
+                q = local_R.to_quaternion()
+                qx = -q.x if inv[0] else q.x
+                qy = -q.y if inv[1] else q.y
+                qz = -q.z if inv[2] else q.z
+                tgt_pb.rotation_quaternion = mathutils.Quaternion(
+                    (q.w, qx, qy, qz))
+            else:
+                tgt_pb.rotation_quaternion = local_R.to_quaternion()
+            tgt_pb.keyframe_insert("rotation_quaternion", frame=f)
+            rot_keys += 1
+        for src_name, tgt_name in loc_pairs:
+            src_pb = src.pose.bones[src_name]
+            tgt_pb = target.pose.bones[tgt_name]
+            # world head of source bone, expressed in target armature space:
+            src_world_head = src.matrix_world @ src_pb.head
+            desired_arm = target_inv_world @ src_world_head
+            # Build pose-bone matrix = rest rotation + desired translation,
+            # so location channel encodes the offset cleanly.
+            m = target.data.bones[tgt_name].matrix_local.copy()
+            m.translation = desired_arm
+            tgt_pb.matrix = m
+            tgt_pb.keyframe_insert("location", frame=f)
+            loc_keys += 1
 
     # Drop the BVH source so the per-take .blend is just rig + baked action.
     bpy.data.objects.remove(src, do_unlink=True)
 
     # Scene FPS to match source (fractional via fps_base, mirrors the addon).
-    scn = bpy.context.scene
     fps = float(args.fps) if args.fps > 0 else 30.0
     scn.render.fps = max(1, round(fps))
     scn.render.fps_base = scn.render.fps / fps
@@ -169,7 +228,9 @@ def main():
 
     bpy.ops.wm.save_as_mainfile(filepath=args.out)
     print(f"[headless_retarget] OK frames={fstart}-{fend} "
-          f"bones={added} fps={scn.render.fps}/{scn.render.fps_base:.4f} "
+          f"rot_pairs={len(rot_pairs)} loc_pairs={len(loc_pairs)} "
+          f"keys={rot_keys + loc_keys} "
+          f"fps={scn.render.fps}/{scn.render.fps_base:.4f} "
           f"out={args.out}")
 
 
