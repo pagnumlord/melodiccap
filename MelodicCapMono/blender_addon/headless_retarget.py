@@ -69,6 +69,7 @@ def main():
     bone_map = cfg.get("bone_map", {})
     ik_fk_one = cfg.get("ik_fk_one", [])
     calibration = cfg.get("calibration", {})
+    ik_follow_fk = cfg.get("ik_follow_fk", {})
     if not base_blend:
         _fail("config has no base_blend")
 
@@ -158,6 +159,19 @@ def main():
     if not rot_pairs and not loc_pairs:
         _fail("no bone pairs resolved — check bone_map vs the rig bone names")
 
+    # Cosmetic: drive IK target widgets to follow their FK counterparts'
+    # end-effectors. With FK enforced via ik_fk_one, the IK chain is
+    # dormant; this just keeps the widget bones visually attached so the
+    # rig reads correctly (and stays sane if a shot later switches a
+    # limb back to IK).
+    ik_follow_pairs = []
+    for ik_name, fk_name in ik_follow_fk.items():
+        if ik_name in target.pose.bones and fk_name in target.pose.bones:
+            ik_follow_pairs.append((ik_name, fk_name))
+        else:
+            print(f"[headless_retarget] WARN: ik_follow_fk "
+                  f"{ik_name!r}->{fk_name!r} skipped (bone missing)")
+
     # Pre-compute rest rotation matrices (don't change per frame).
     src_rest_R = {n: src.data.bones[n].matrix_local.to_3x3()
                   for n, _ in rot_pairs}
@@ -216,6 +230,16 @@ def main():
             tgt_pb.matrix = m
             tgt_pb.keyframe_insert("location", frame=f)
             loc_keys += 1
+        for ik_name, fk_name in ik_follow_pairs:
+            ik_pb = target.pose.bones[ik_name]
+            fk_pb = target.pose.bones[fk_name]
+            # FK end-effector = FK bone's tail in world; place IK target there.
+            desired_arm = target_inv_world @ (target.matrix_world @ fk_pb.tail)
+            m = target.data.bones[ik_name].matrix_local.copy()
+            m.translation = desired_arm
+            ik_pb.matrix = m
+            ik_pb.keyframe_insert("location", frame=f)
+            loc_keys += 1
 
     # Drop the BVH source so the per-take .blend is just rig + baked action.
     bpy.data.objects.remove(src, do_unlink=True)
@@ -229,6 +253,7 @@ def main():
     bpy.ops.wm.save_as_mainfile(filepath=args.out)
     print(f"[headless_retarget] OK frames={fstart}-{fend} "
           f"rot_pairs={len(rot_pairs)} loc_pairs={len(loc_pairs)} "
+          f"ik_follow={len(ik_follow_pairs)} "
           f"keys={rot_keys + loc_keys} "
           f"fps={scn.render.fps}/{scn.render.fps_base:.4f} "
           f"out={args.out}")

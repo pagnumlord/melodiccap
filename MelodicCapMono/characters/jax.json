@@ -30,6 +30,13 @@
   },
   "calibration": {},
   "_comment_calibration": "Optional per-target-bone escape hatch, used ONLY if a real take shows a bone rotated wrong vs the ground-truth Rokoko bake. e.g. \"upper_arm_fk.L\": { \"invert\": [false, true, false] }. Default: none.",
+  "ik_follow_fk": {
+    "foot_ik.L": "foot_fk.L",
+    "foot_ik.R": "foot_fk.R",
+    "hand_ik.L": "hand_fk.L",
+    "hand_ik.R": "hand_fk.R"
+  },
+  "_comment_ik_follow_fk": "Pure visual / parity. Per frame, drives each IK target's head to its FK counterpart's tail (the end-effector world position). With ik_fk_one enforcing FK, the IK chain is dormant -- but its widget bones still display at rest, which reads as 'hands not moving' on a posed body. This block keys their location to follow the FK end-effector so the rig reads correctly and stays sane if a shot later switches IK_FK back to 0 for a specific limb.",
   "_comment_about_offsets": "rot_offset_euler_deg is added AFTER the SMPL axis-angle is converted to a Blender quaternion. Use it to absorb mismatches between SMPL's joint frame and the Rigify bone's roll. Common values are 0 / +/- 90 / +/- 180. Edit these during Phase F calibration when you see a bone rotated wrong on a real take.",
   "smpl_to_rig": {
     "pelvis":         { "bone": "torso",         "rot_offset_euler_deg": [0, 0, 0] },

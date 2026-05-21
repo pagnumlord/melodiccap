@@ -20,6 +20,7 @@ convention and are ignored by loaders.
 | `ik_fk_one` | `[bone,...]` | Rigify limb-settings bones whose `IK_FK` custom property is forced to `1.0` (full FK) so the `*_fk` retarget is followed. Default: the four `*_parent` bones. |
 | `bone_map` | `{src: {bone, type?}}` | SMPL/BVH source joint → Rigify control bone. `type` defaults to `COPY_ROTATION`. The automated path is FK-driven (`ik_fk_one` forces every limb to FK), so the rotation chain alone positions end-effectors correctly — **do not add `COPY_LOCATION` IK targets here.** They stretch the rig because the SMPL source's pelvis sits at world origin while the Rigify pelvis is up at ~0.9 m; Rigify's `IK_Stretch` then extends the limb to reach the displaced IK target. The manual Rokoko recipe in `wham/README.md` does map `*_foot/*_hand → *_ik` because Rokoko auto-scales/aligns the source — that's a separate workflow. |
 | `calibration` | `{target_bone: {invert:[bx,by,bz]}}` | Optional escape hatch, used **only** if a real take shows a bone rotated wrong vs the ground-truth Rokoko bake. Default `{}`. |
+| `ik_follow_fk` | `{ik_bone: fk_bone}` | Per frame, drives each IK target bone's head to the FK counterpart's tail (the end-effector world position). Cosmetic — with `ik_fk_one` enforcing FK, the IK chain is dormant, but without this the IK widget bones stay at A-pose rest and read as "hands not moving" on a posed body. Keeps the rig sane if a shot later switches a limb back to IK. |
 
 ## Local override (machine paths, untracked)
 
