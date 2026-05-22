@@ -1,20 +1,19 @@
-"""Smoke test for the automated retarget path (Phases 1 + 4).
+"""Smoke test for the automated retarget path (Phases 1 + 4 + Phase 3 batch).
 
 Layered, CI-safe:
 
   A. Every characters/*.json (non-.local) validates against the schema
      the orchestrator + headless script depend on.            [stdlib]
-  B. process_take.py, headless_retarget.py, footlock.py, _smpl_fk.py
-     all byte-compile.                                         [stdlib]
+  B. process_take.py, footlock.py, batch.py, headless_retarget.py,
+     and _smpl_fk.py all byte-compile.                         [stdlib]
   C. `process_take --dry-run` wires end-to-end against the wave
      fixture (config resolve + stage plan + Blender cmd).      [numpy]
   D. OPT-IN real headless run: if env MELODICCAP_TEST_BLENDER and
      MELODICCAP_TEST_BASEBLEND are set, actually run Blender and assert
      the OK marker. Otherwise SKIP with a message.             [Blender]
-  E. Footlock detection on a synthetic walking pose JSON:
-     plant detection finds alternating L/R intervals; floor_z
-     calibration is within tolerance of the synthetic ground;
-     foot_contact arrays match per_frame length.               [numpy]
+  E. Footlock detection on a synthetic walking pose JSON.       [numpy]
+  F. batch.py --dry-run on a 2-row synthetic manifest; verify the
+     batch_report.json totals.                                  [stdlib]
 
 Exit 0 if all non-skipped checks pass, 1 on any failure.
 
@@ -89,6 +88,7 @@ def main() -> int:
     print("\nB. byte-compile")
     for rel in ("MelodicCapMono/orchestrate/process_take.py",
                 "MelodicCapMono/orchestrate/footlock.py",
+                "MelodicCapMono/orchestrate/batch.py",
                 "MelodicCapMono/blender_addon/headless_retarget.py",
                 "MelodicCapMono/wham/_smpl_fk.py"):
         try:
@@ -196,6 +196,40 @@ def main() -> int:
             ok(f"intervals={len(ivs)} covering both sides")
     except Exception as e:  # noqa: BLE001
         bad(f"footlock smoke: {type(e).__name__}: {e}")
+
+    print("\nF. batch.py --dry-run on synthetic 2-row manifest")
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            td_p = Path(td)
+            manifest = td_p / "test.csv"
+            manifest.write_text(
+                "video,from_pose_json,character,fps,out_name\n"
+                f",{WAVE},jax,30,wave_a\n"
+                f",{WAVE},jax,,wave_b\n",
+                encoding="utf-8",
+            )
+            cmd = [sys.executable, "-m",
+                   "MelodicCapMono.orchestrate.batch", str(manifest),
+                   "--dry-run", "--base-blend", "X.blend",
+                   "--blender-exe", "blender"]
+            r = subprocess.run(cmd, cwd=str(REPO),
+                               capture_output=True, text=True)
+            out = r.stdout + r.stderr
+            report = td_p / "batch_report.json"
+            if r.returncode != 0 or "[batch] DONE" not in out:
+                bad(f"batch dry-run failed (rc={r.returncode}):\n"
+                    f"{out[-600:]}")
+            elif not report.exists():
+                bad("batch dry-run produced no batch_report.json")
+            else:
+                rep = json.loads(report.read_text())
+                if rep["total"] == 2 and rep["dry_run"] == 2 and rep["fail"] == 0:
+                    ok(f"batch dry-run: total={rep['total']} dry={rep['dry_run']} fail={rep['fail']}")
+                else:
+                    bad(f"batch report unexpected: total={rep['total']} "
+                        f"dry={rep['dry_run']} fail={rep['fail']}")
+    except Exception as e:  # noqa: BLE001
+        bad(f"batch dry-run smoke: {type(e).__name__}: {e}")
 
     print()
     if fails:
