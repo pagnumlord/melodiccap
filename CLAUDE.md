@@ -31,6 +31,12 @@ generalizes across characters.
   (stereo EasyMocap) is deferred to the rare climax shot needing
   root-translation accuracy. The legacy v5.x stereo solver
   (`MelodicCapRTM/`) is retired, not iterated.
+- **Production planning** lives in
+  [`docs/production_plan.md`](docs/production_plan.md) — character
+  rigging priority (Kai/Kiko next after Jax), shoot ordering by
+  cluster, scene-type pipeline routing, NLA composite workflow for
+  multi-person scenes. Derived from the script; no screenplay text in
+  the repo. Update when the script changes.
 
 ## Short film: Melodic Justice
 
