@@ -77,9 +77,111 @@ python -m MelodicCapMono.wham.video2pose \
     guitar.mp4 guitar.pose.json --character jax
 ```
 
-Output: `guitar.pose.json` — same schema the Blender addon already
-imports. Open Blender → File → Import → SMPL Pose JSON → pick the
-JSON. Character config auto-resolves from the `--character jax` flag.
+Output: `guitar.pose.json` (schema in `../SCHEMA.md`).
+
+> **Which retarget path:** the Phase C direct addon import
+> (`../blender_addon/`) applies SMPL joint rotations straight onto
+> Rigify FK bones. That is too naive — every Rigify control bone has
+> its own rest orientation, so a real take folds (head between the
+> knees) and **no `axis_conversion` value fixes it**. The proven path
+> is **BVH → a skeleton-to-skeleton retargeter (Rokoko, free)**, which
+> owns the rest-pose math. See "Retarget to Rigify" below. The addon
+> is kept only for the synthetic fixtures / schema smoke test.
+
+## Automated path (one command per take)
+
+Once a character is calibrated, the whole pipeline is one unattended
+command (it reuses everything below — nothing reinvented):
+
+```
+python -m MelodicCapMono.orchestrate.process_take guitar.mp4 \
+    --character jax --wham-python /path/to/envs/wham/bin/python \
+    --base-blend "C:/.../Characters.blend" \
+    --blender-exe "C:/.../Blender/blender.exe" --out guitar.blend
+```
+
+video → WHAM → BVH → **headless Rokoko retarget** on a **copy** of the
+master `.blend` (the master is never touched) → `guitar.blend` (rig +
+baked action) + `guitar.report.json`. Put machine paths in an untracked
+`characters/jax.local.json` (deep-merged) to drop the
+`--base-blend/--blender-exe` flags. Config contract: `characters/_schema.md`.
+The headless script calls `bpy.ops.rsl.retarget_animation()` from the
+Rokoko Studio Live plugin (auto-loaded in the user's Blender), driven
+by the proven bone list in `characters/<name>.json`'s `bone_map`. Hand-
+rolled approaches (WORLD/WORLD copy constraints, then a rest-relative
+matrix loop) each fixed one symptom and surfaced another on real takes;
+Rokoko's retarget engine already handles rest-pose alignment, auto-
+scaling, and per-bone basis differences — that's what makes the manual
+workflow work, and that's what the headless run now invokes directly.
+
+The manual Rokoko recipe below is now the **calibration / ground-truth
+reference**: run it once per new character to produce the known-good
+bake the automated path's `calibration` block is tuned against.
+
+## Retarget to Rigify (BVH → Rokoko — manual, calibration reference)
+
+1. **Pose JSON → BVH** on the canonical SMPL skeleton (correct by
+   construction — SMPL pose params *are* that skeleton's local
+   rotations, so there is no rest-frame mismatch):
+
+   ```
+   python -m MelodicCapMono.wham.pose_json_to_bvh \
+       guitar.pose.json guitar.bvh --root-motion zero
+   ```
+
+   `--root-motion zero` pins the root (monocular trans drifts —
+   keyframe the path by hand). Default `--global-rot 180 0 0` flips
+   WHAM's camera frame so the skeleton stands upright after Blender's
+   BVH import. If a take still comes in upside down / facing wrong, the
+   only knob is `--global-rot X Y Z` (try `180 180 0` or `180 0 180`).
+
+2. **Import** into Blender: File ▸ Import ▸ Motion Capture (.bvh).
+   This is the motion *source* — a bare armature, no mesh, expected.
+
+3. **Clean the target**: select JaxRigify, Dope Sheet ▸ Action Editor
+   ▸ unlink any stale action.
+
+4. **Set all four limbs to FK — required.** The retarget keys the
+   `*_fk` bones; a Rigify limb only follows them when its `IK_FK = 1.0`.
+   Pose Mode → Properties ▸ Bone ▸ Custom Properties on
+   `upper_arm_parent.L`, `upper_arm_parent.R`, `thigh_parent.L`,
+   `thigh_parent.R` → set `IK_FK = 1.0` (a static rig setting, not
+   keyframed). If the embedded `rig_ui.py` is missing (version drift),
+   set the property directly here — no panel needed.
+
+5. **Rokoko panel** (free plugin) ▸ Retargeting: Source = the BVH
+   armature, Target = JaxRigify, Build Bone List, set targets to this
+   **proven map**, Auto Scale on, Retarget, then Pose ▸ Bake Action,
+   and **save the bone list as a Custom Naming Scheme preset** —
+   reusable for every future take and every character:
+
+   | SMPL source | JaxRigify target |
+   |---|---|
+   | pelvis | torso |
+   | left_hip / right_hip | thigh_fk.L / thigh_fk.R |
+   | left_knee / right_knee | shin_fk.L / shin_fk.R |
+   | left_ankle / right_ankle | foot_fk.L / foot_fk.R |
+   | left_foot / right_foot | foot_ik.L / foot_ik.R |
+   | left_wrist / right_wrist | hand_fk.L / hand_fk.R |
+   | left_hand / right_hand | hand_ik.L / hand_ik.R |
+   | spine1 / spine2 / spine3 | spine_fk.001 / spine_fk.002 / chest |
+   | neck / head | neck / head |
+   | left_shoulder / right_shoulder | upper_arm_fk.L / upper_arm_fk.R |
+   | left_elbow / right_elbow | forearm_fk.L / forearm_fk.R |
+   | left_collar / right_collar | (leave empty) |
+
+   Mapping `*_ankle/*_wrist` → the **FK** bones *and* the near-static
+   SMPL `*_foot/*_hand` tip joints → the **IK** controls is what makes
+   hands/feet actually move on a Rigify rig. FK alone leaves them
+   frozen, because the rig still reads the (un-keyed) IK targets for
+   end-effector placement. Never retarget onto `DEF-` bones.
+
+6. **Polish pass (hand work — not pipeline):** the body + limb motion
+   is the deliverable. On top of the baked action you keyframe the
+   root's path across the scene (a few keys — the mocap is in-place by
+   design) and do a foot-contact / IK-lock pass to kill sliding. This
+   is exactly how the v5.19 music video shipped: a mocap base layer
+   with hand-keyframed gaps.
 
 ## Recording the input video
 
@@ -109,8 +211,9 @@ For best results:
 | `WHAM exited with code 1` and "CUDA out of memory" in log | GPU too small for video resolution | Re-encode video to 720p, or shorter clip |
 | `WHAM exited 0 but produced no .pkl` | No person detected | Check person is in frame the whole take; brighter lighting |
 | `WHAM 'pose' has unexpected shape` from converter | WHAM pkl format drifted between versions | Run `python -m MelodicCapMono.wham.video2pose --inspect-pkl <file>.pkl` to see the actual structure, then update `wham_to_pose_json.py` with the new keys / shapes |
-| Imports into Blender but the rig faces sideways / lies down | SMPL → Rigify per-bone axis mismatch on a specific joint | Edit `characters/jax.json` `rot_offset_euler_deg` for that joint. See the addon's first-import calibration notes |
-| Rig drifts across the floor over a long take | Monocular root translation drift (expected) | Set `"root_translation": "ignore"` in `characters/jax.json` and keyframe the walk path by hand |
+| BVH skeleton imports upside down / facing backward | WHAM's camera frame ≠ Blender up-axis | `pose_json_to_bvh --global-rot X Y Z` (default `180 0 0`; try `180 180 0` or `180 0 180`) |
+| Retargeted hands/feet frozen while the body moves | That limb is still IK, or only the FK bones were mapped | Set `IK_FK = 1.0` on all four `*_parent` bones; also map SMPL `*_foot→foot_ik` and `*_hand→hand_ik` alongside `*_ankle→foot_fk` / `*_wrist→hand_fk` |
+| Rig drifts / slides over a long take | Monocular root drift + no foot ground-lock (both expected) | Export with `--root-motion zero`; keyframe the path and a foot-lock pass by hand on the baked action |
 
 ## Inspecting a pkl without running WHAM
 

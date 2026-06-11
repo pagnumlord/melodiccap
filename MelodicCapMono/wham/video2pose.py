@@ -42,6 +42,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from . import wham_to_pose_json
 
@@ -76,10 +77,16 @@ def _run_wham(wham_dir: Path, video: Path, output_dir: Path) -> Path:
     Raises SystemExit if WHAM exits non-zero or produces no .pkl.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+    # WHAM's demo.py derives its output subfolder from
+    # `args.video.split('/')[-1]` -- Unix-only. On Windows an absolute
+    # path uses backslashes, so that split returns the whole path; WHAM
+    # then writes results next to the video instead of under
+    # --output_pth and our pkl search misses them. Passing both paths
+    # POSIX-style makes WHAM's split see just the filename, on every OS.
     cmd = [
         sys.executable, "demo.py",
-        "--video", str(video.resolve()),
-        "--output_pth", str(output_dir.resolve()),
+        "--video", video.resolve().as_posix(),
+        "--output_pth", output_dir.resolve().as_posix(),
         "--save_pkl",
     ]
     print(f"[video2pose] Running WHAM:\n  cwd: {wham_dir}\n  {' '.join(cmd)}\n")
@@ -105,10 +112,28 @@ def _run_wham(wham_dir: Path, video: Path, output_dir: Path) -> Path:
     return candidates[0]
 
 
+def _load_wham_pkl(pkl_path: Path) -> Any:
+    """Deserialize WHAM's output file.
+
+    WHAM's demo.py writes results with ``joblib.dump``. joblib wraps
+    numpy arrays in its own persistence format (and may compress), so a
+    plain ``pickle.load`` fails with
+    ``UnpicklingError: invalid load key``. ``joblib.load`` transparently
+    reads both joblib-format files and plain pickles, so prefer it; fall
+    back to ``pickle`` only if joblib can't be imported (it always can in
+    the WHAM env, since WHAM itself used joblib to write the file).
+    """
+    try:
+        import joblib
+    except ImportError:
+        with pkl_path.open("rb") as f:
+            return pickle.load(f)
+    return joblib.load(str(pkl_path))
+
+
 def _inspect_pkl(pkl_path: Path) -> int:
     """Print the structure of a WHAM pkl. Used to debug schema drift."""
-    with pkl_path.open("rb") as f:
-        data = pickle.load(f)
+    data = _load_wham_pkl(pkl_path)
 
     def describe(obj, depth=0, prefix=""):
         pad = "  " * depth
@@ -157,6 +182,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="Keep WHAM's pkl output for debugging.")
     ap.add_argument("--inspect-pkl", type=Path, default=None,
                     help="Skip WHAM, just print the structure of an existing .pkl.")
+    ap.add_argument("--from-pkl", type=Path, default=None,
+                    help="Skip WHAM; convert an existing WHAM .pkl straight to "
+                         "pose JSON. Usage: --from-pkl <pkl> <output.json>")
     args = ap.parse_args(argv)
 
     if args.inspect_pkl is not None:
@@ -164,8 +192,31 @@ def main(argv: list[str] | None = None) -> int:
             sys.exit(f"ERROR: {args.inspect_pkl} does not exist.")
         return _inspect_pkl(args.inspect_pkl)
 
+    if args.from_pkl is not None:
+        if not args.from_pkl.exists():
+            sys.exit(f"ERROR: --from-pkl file not found: {args.from_pkl}")
+        out_json = args.output_json or args.video
+        if out_json is None:
+            ap.error("--from-pkl requires an output path: "
+                     "--from-pkl <pkl> <output.json>")
+        out_json.parent.mkdir(parents=True, exist_ok=True)
+        print(f"[video2pose] Reading WHAM output: {args.from_pkl}")
+        wham_data = _load_wham_pkl(args.from_pkl)
+        print(f"[video2pose] Converting to pose JSON: {out_json}")
+        pose = wham_to_pose_json.convert(
+            wham_data,
+            character=args.character,
+            fps_override=args.fps,
+            source_video=args.from_pkl.name,
+        )
+        with out_json.open("w") as f:
+            json.dump(pose, f, indent=2)
+        print(f"[video2pose] DONE. {len(pose['frames'])} frames -> {out_json}")
+        return 0
+
     if args.video is None or args.output_json is None:
-        ap.error("video and output_json are required (unless --inspect-pkl).")
+        ap.error("video and output_json are required "
+                 "(unless --inspect-pkl / --from-pkl).")
 
     if not args.video.exists():
         sys.exit(f"ERROR: input video not found: {args.video}")
@@ -178,8 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     pkl_path = _run_wham(wham_dir, args.video, intermediate_dir)
 
     print(f"[video2pose] Reading WHAM output: {pkl_path}")
-    with pkl_path.open("rb") as f:
-        wham_data = pickle.load(f)
+    wham_data = _load_wham_pkl(pkl_path)
 
     print(f"[video2pose] Converting to pose JSON: {args.output_json}")
     pose = wham_to_pose_json.convert(
