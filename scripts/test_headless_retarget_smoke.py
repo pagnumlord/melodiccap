@@ -59,8 +59,11 @@ def check_config(p: Path):
     be = c["bvh_export"]
     if be.get("root_motion") not in VALID_ROOT:
         bad(f"{p.name}: bvh_export.root_motion must be one of {VALID_ROOT}")
-    if len(be.get("global_rot_euler_deg", [])) != 3:
-        bad(f"{p.name}: bvh_export.global_rot_euler_deg must be [x,y,z]")
+    grot = be.get("global_rot_euler_deg", "auto")
+    if grot not in ("auto", None) and (not isinstance(grot, list)
+                                       or len(grot) != 3):
+        bad(f"{p.name}: bvh_export.global_rot_euler_deg must be 'auto' "
+            f"or [x,y,z]")
     if not isinstance(c["ik_fk_one"], list) or not c["ik_fk_one"]:
         bad(f"{p.name}: ik_fk_one must be a non-empty list")
     if not c["bone_map"]:

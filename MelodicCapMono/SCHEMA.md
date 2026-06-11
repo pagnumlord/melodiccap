@@ -9,13 +9,15 @@ that consumes this schema works with both paths.
 
 ```json
 {
-  "format":         "melodiccap_mono_v1",
-  "source_model":   "wham" | "easymocap" | "fixture",
-  "source_video":   "<filename or identifier>",
-  "character":      "<character name, optional>",
-  "fps":            <float>,
-  "smpl_betas":     [<10 floats>],
-  "frames":         [<frame objects, see below>]
+  "format":           "melodiccap_mono_v1",
+  "source_model":     "wham" | "easymocap" | "fixture",
+  "source_video":     "<filename or identifier>",
+  "character":        "<character name, optional>",
+  "fps":              <float>,
+  "smpl_betas":       [<10 floats>],
+  "frames":           [<frame objects, see below>],
+  "coordinate_frame": "y_up_world",   // optional, additive (May 2026)
+  "frame_provenance": { ... }          // optional, additive (May 2026)
 }
 ```
 
@@ -30,6 +32,8 @@ that consumes this schema works with both paths.
 | `fps` | yes | float | Source video / take FPS. Blender scene FPS is set to round(fps). |
 | `smpl_betas` | yes | array[10 floats] | SMPL body shape parameters, constant across the take. |
 | `frames` | yes | array[frame] | One frame object per source frame. See below. |
+| `coordinate_frame` | no | string | **Additive (May 2026).** `"y_up_world"` = the take is gravity-aligned, +Y up (converter preferred WHAM's world keys and/or auto-leveled the mean body-up axis). Consumers (`pose_json_to_bvh`, `footlock`) resolve their root correction from this tag via `_smpl_fk.resolve_global_rot_deg`: tagged JSONs get none, untagged legacy JSONs get the historical `(180, 0, 0)` camera-frame flip. |
+| `frame_provenance` | no | object | **Additive (May 2026).** Diagnostic record of how the frame data was produced: `source_keys` (`"pose_world/trans_world"` or `"pose/trans"`), `leveled` (bool), `level_correction_deg` (float — how far the mean up-axis was rotated to +Y; ~0 for world keys, ~180−tilt for camera fallback), `recentered_xz` (bool — frame-0 horizontal translation moved to origin). |
 
 ## Frame object
 
@@ -49,7 +53,7 @@ that consumes this schema works with both paths.
 | `timestamp` | yes | float | Seconds from take start. Diagnostic. |
 | `smpl_pose` | yes | array[72 floats] | 24 SMPL joints × 3-component axis-angle, **flat**. Index `i*3:(i+1)*3` is joint `i`'s rotation in radians, axis-angle convention (axis × magnitude = angle). |
 | `smpl_trans` | yes | array[3 floats] | Root translation in meters, world space. Applied per character config's `root_translation` policy. |
-| `smpl_global_orient` | no | array[3 floats] | Root rotation axis-angle. If absent, the rotation is encoded into `smpl_pose[0:3]` (pelvis). |
+| `smpl_global_orient` | no | array[3 floats] | Root rotation axis-angle. If absent, the rotation is encoded into `smpl_pose[0:3]` (pelvis). The WHAM converter now always folds the root into `smpl_pose[0:3]` (one authoritative root channel); this field appears only in legacy JSONs. |
 
 ## SMPL joint order (24 joints)
 

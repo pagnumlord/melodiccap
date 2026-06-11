@@ -185,7 +185,25 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--from-pkl", type=Path, default=None,
                     help="Skip WHAM; convert an existing WHAM .pkl straight to "
                          "pose JSON. Usage: --from-pkl <pkl> <output.json>")
+    ap.add_argument("--prefer-camera", action="store_true",
+                    help="Use WHAM's camera-frame 'pose'/'trans' even when "
+                         "gravity-aligned 'pose_world'/'trans_world' exist. "
+                         "Default prefers world keys (camera keys inherit "
+                         "the physical camera tilt).")
+    ap.add_argument("--no-level", action="store_true",
+                    help="Skip auto-leveling (rotating the take so its mean "
+                         "body-up axis is +Y). Use for takes that are "
+                         "intentionally non-upright on average (lying down).")
+    ap.add_argument("--no-recenter", action="store_true",
+                    help="Keep WHAM's absolute root XZ translation instead "
+                         "of recentering frame 0 at the origin.")
     args = ap.parse_args(argv)
+
+    convert_kwargs = dict(
+        prefer_world=not args.prefer_camera,
+        level=not args.no_level,
+        recenter=not args.no_recenter,
+    )
 
     if args.inspect_pkl is not None:
         if not args.inspect_pkl.exists():
@@ -208,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
             character=args.character,
             fps_override=args.fps,
             source_video=args.from_pkl.name,
+            **convert_kwargs,
         )
         with out_json.open("w") as f:
             json.dump(pose, f, indent=2)
@@ -237,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
         character=args.character,
         fps_override=args.fps,
         source_video=args.video.name,
+        **convert_kwargs,
     )
     with args.output_json.open("w") as f:
         json.dump(pose, f, indent=2)

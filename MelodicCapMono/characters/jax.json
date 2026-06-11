@@ -5,7 +5,8 @@
   "base_blend": null,
   "blender_exe": null,
   "_comment_paths": "base_blend (master .blend containing the armature) and blender_exe (Steam Blender binary) are machine-specific. Do NOT commit personal absolute paths to this public repo. Supply them via process_take CLI flags (--base-blend / --blender-exe), the MELODICCAP_BLENDER env var, or an untracked characters/jax.local.json that deep-merges over this file.",
-  "bvh_export": { "root_motion": "zero", "global_rot_euler_deg": [180, 0, 0] },
+  "bvh_export": { "root_motion": "zero", "global_rot_euler_deg": "auto" },
+  "_comment_bvh_export": "global_rot_euler_deg 'auto' resolves from the pose JSON's coordinate_frame tag: gravity-aligned y_up_world JSONs (current converter output) get no correction, legacy camera-frame JSONs get the historical [180, 0, 0] upright flip. Set an explicit [x, y, z] to override. root_motion 'zero' pins the root (keyframe the walk path by hand); switch to 'trans' per-take for travelling takes so the foot-contact IK lock works WITH the walk instead of against a pinned root.",
   "ik_fk_one": ["upper_arm_parent.L", "upper_arm_parent.R", "thigh_parent.L", "thigh_parent.R"],
   "_comment_bone_map": "Proven SMPL (BVH source joint) -> JaxRigify map for the headless Rokoko retarget. Drives bpy.ops.rsl.retarget_animation() via Rokoko's bone-list collection. Rokoko handles rest-pose alignment, auto-scaling, and IK target placement -- so this map mirrors the user's known-good manual Rokoko bone list exactly (22 pairs: 18 rotation + 4 IK end-effectors). The `type` field is documentation-only; Rokoko infers behavior from source/target bone names. Collars intentionally omitted.",
   "bone_map": {

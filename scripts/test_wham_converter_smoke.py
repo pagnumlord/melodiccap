@@ -231,18 +231,17 @@ def main() -> int:
         make_person(10, betas_layout="per_frame"),
     ))
 
-    # 6. global_orient as matrices
+    # 6. global_orient as matrices (now folded into smpl_pose[0:3] —
+    #    the converter emits exactly one root channel)
     results.append(case(
-        "global_orient matrices",
+        "global_orient matrices (folded into pose root)",
         make_person(10, include_global_orient="matrix"),
-        expect_global=True,
     ))
 
-    # 7. global_orient as axis-angle
+    # 7. global_orient as axis-angle (folded as above)
     results.append(case(
-        "global_orient axis-angle",
+        "global_orient axis-angle (folded into pose root)",
         make_person(10, include_global_orient="axis_angle"),
-        expect_global=True,
     ))
 
     # 8. No frame_ids -> converter falls back to range(N)
@@ -276,6 +275,104 @@ def main() -> int:
     else:
         print(f"  FAIL  max error {err:.2e} too large")
         results.append(False)
+
+    # ------------------------------------------------------------------
+    # World-frame preference + gravity leveling (the backward-lean fix)
+    # ------------------------------------------------------------------
+
+    def _root_up(pose_json, frame=0):
+        """Body-up unit vector from a converted frame's root rotation."""
+        aa = np.asarray(pose_json["frames"][frame]["smpl_pose"][0:3])
+        return _axis_angle_to_matrix(aa) @ np.array([0.0, 1.0, 0.0])
+
+    def _tilted_person(n, tilt_deg, with_world=False):
+        """Camera-frame person whose root is Rx(180 - tilt): an upright
+        body seen by a camera pitched `tilt` degrees off level."""
+        p = make_person(n, pose_layout="flat")
+        pose = p["pose"].reshape(n, SMPL_JOINTS, 3)
+        pose[:, 0] = [math.radians(180.0 - tilt_deg), 0.0, 0.0]
+        p["pose"] = pose.reshape(n, SMPL_JOINTS * 3)
+        if with_world:
+            wpose = pose.copy()
+            wpose[:, 0] = 0.0  # world keys: level, +Y up
+            p["pose_world"] = wpose.reshape(n, SMPL_JOINTS * 3)
+            p["trans_world"] = np.tile([0.0, 0.9, 0.0], (n, 1))
+        return p
+
+    # 12. pose_world preferred over tilted camera pose
+    print("\nCase: prefers pose_world/trans_world over camera keys")
+    pose = wham_to_pose_json.convert(
+        _tilted_person(10, 20.0, with_world=True),
+        character="jax", fps_override=None, source_video="synthetic.mp4")
+    prov = pose.get("frame_provenance", {})
+    up = _root_up(pose)
+    ok = (prov.get("source_keys") == "pose_world/trans_world"
+          and pose.get("coordinate_frame") == "y_up_world"
+          and abs(up[1] - 1.0) < 1e-6
+          and not validate_schema(pose))
+    print(f"  {'PASS' if ok else 'FAIL'}  keys={prov.get('source_keys')} "
+          f"up_y={up[1]:+.6f} frame={pose.get('coordinate_frame')}")
+    results.append(ok)
+
+    # 13. Camera-only + 20-deg tilted camera: leveling makes it upright
+    print("\nCase: camera-frame fallback auto-levels a tilted camera")
+    pose = wham_to_pose_json.convert(
+        _tilted_person(10, 20.0, with_world=False),
+        character="jax", fps_override=None, source_video="synthetic.mp4")
+    prov = pose.get("frame_provenance", {})
+    up = _root_up(pose)
+    corr = prov.get("level_correction_deg") or 0.0
+    ok = (prov.get("source_keys") == "pose/trans"
+          and pose.get("coordinate_frame") == "y_up_world"
+          and abs(up[1] - 1.0) < 1e-6
+          and abs(corr - 160.0) < 1.0
+          and not validate_schema(pose))
+    print(f"  {'PASS' if ok else 'FAIL'}  correction={corr:.1f} deg "
+          f"(expect ~160) up_y={up[1]:+.6f}")
+    results.append(ok)
+
+    # 14. --no-level on camera keys: legacy output, no y_up_world tag,
+    #     resolver falls back to the historical 180-deg flip
+    print("\nCase: level=False keeps legacy camera frame + 180 flip resolve")
+    pose = wham_to_pose_json.convert(
+        _tilted_person(10, 20.0, with_world=False),
+        character="jax", fps_override=None, source_video="synthetic.mp4",
+        level=False)
+    from MelodicCapMono.wham._smpl_fk import resolve_global_rot_deg
+    ok = ("coordinate_frame" not in pose
+          and pose["frame_provenance"]["leveled"] is False
+          and resolve_global_rot_deg(pose) == (180.0, 0.0, 0.0)
+          and resolve_global_rot_deg({"coordinate_frame": "y_up_world"})
+              == (0.0, 0.0, 0.0)
+          and resolve_global_rot_deg(pose, (90.0, 0.0, 0.0))
+              == (90.0, 0.0, 0.0)
+          and not validate_schema(pose))
+    print(f"  {'PASS' if ok else 'FAIL'}")
+    results.append(ok)
+
+    # 15. Recenter: frame-0 XZ at origin, height preserved
+    print("\nCase: recenter zeroes frame-0 XZ, keeps Y")
+    p = _tilted_person(10, 0.0, with_world=True)
+    p["trans_world"] = p["trans_world"] + np.array([3.0, 0.0, -2.0])
+    pose = wham_to_pose_json.convert(
+        p, character="jax", fps_override=None, source_video="synthetic.mp4")
+    t0 = pose["frames"][0]["smpl_trans"]
+    ok = (abs(t0[0]) < 1e-9 and abs(t0[2]) < 1e-9
+          and abs(t0[1] - 0.9) < 1e-6)
+    print(f"  {'PASS' if ok else 'FAIL'}  t0={t0}")
+    results.append(ok)
+
+    # 16. world-only person record (no camera 'pose' at all)
+    print("\nCase: person record with only pose_world keys")
+    p = _tilted_person(10, 20.0, with_world=True)
+    del p["pose"]
+    del p["trans"]
+    pose = wham_to_pose_json.convert(
+        p, character="jax", fps_override=None, source_video="synthetic.mp4")
+    ok = (pose["frame_provenance"]["source_keys"] == "pose_world/trans_world"
+          and not validate_schema(pose))
+    print(f"  {'PASS' if ok else 'FAIL'}")
+    results.append(ok)
 
     print()
     if all(results):

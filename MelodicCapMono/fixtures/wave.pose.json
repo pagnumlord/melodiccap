@@ -1,5 +1,6 @@
 {
   "format": "melodiccap_mono_v1",
+  "coordinate_frame": "y_up_world",
   "source_model": "fixture",
   "source_video": "synthetic_left_wave",
   "character": "jax",

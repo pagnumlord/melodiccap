@@ -165,25 +165,46 @@ def main(argv=None) -> int:
 
     # --- Stage 3: BVH (in-process, pure numpy) ---
     from MelodicCapMono.wham import pose_json_to_bvh
+    from MelodicCapMono.wham._smpl_fk import (
+        euler_deg_to_matrix, resolve_global_rot_deg)
     bvh_cfg = cfg.get("bvh_export", {})
     root_motion = bvh_cfg.get("root_motion", "zero")
-    global_rot = tuple(bvh_cfg.get("global_rot_euler_deg", [180.0, 0.0, 0.0]))
+    # "auto" (default) resolves from the pose JSON's coordinate_frame
+    # tag: no correction for gravity-aligned converter output, the
+    # legacy (180, 0, 0) flip for old camera-frame JSONs. An explicit
+    # [x, y, z] in the config still overrides.
+    global_rot_cfg = bvh_cfg.get("global_rot_euler_deg", "auto")
+    global_rot = (None if global_rot_cfg in ("auto", None)
+                  else tuple(global_rot_cfg))
+    trans_span_m = None
     if args.dry_run:
         print(f"[process_take] BVH: convert {pose_json} -> {bvh_path} "
-              f"(root_motion={root_motion}, global_rot={global_rot})")
+              f"(root_motion={root_motion}, global_rot={global_rot_cfg})")
         src_fps = args.fps or 30.0
         n_frames = "?"
     else:
+        import numpy as np
         data = pose_json_to_bvh._load_pose_json(pose_json)
+        resolved_rot = resolve_global_rot_deg(data, global_rot)
         bvh_text = pose_json_to_bvh.convert(
             data, root_motion=root_motion, global_rot_deg=global_rot)
         bvh_path.write_text(bvh_text)
         src_fps = args.fps or float(data.get("fps", 30.0))
         n_frames = len(data["frames"])
-        print(f"[process_take] BVH: {n_frames} frames -> {bvh_path}")
+        # Horizontal root-path span (in the upright frame): how far the
+        # performer actually travelled. Drives the pinned-root warning.
+        R = euler_deg_to_matrix(*resolved_rot)
+        t = np.array([fr.get("smpl_trans", [0.0, 0.0, 0.0])
+                      for fr in data["frames"]], dtype=np.float64) @ R.T
+        trans_span_m = float(np.hypot(t[:, 0].max() - t[:, 0].min(),
+                                      t[:, 2].max() - t[:, 2].min()))
+        print(f"[process_take] BVH: {n_frames} frames -> {bvh_path} "
+              f"(global_rot={list(resolved_rot)}, "
+              f"root path span {trans_span_m:.2f} m)")
     report["stages"]["bvh"] = {"bvh": str(bvh_path), "frames": n_frames,
                                "fps": src_fps, "root_motion": root_motion,
-                               "global_rot": list(global_rot)}
+                               "global_rot": global_rot_cfg,
+                               "trans_span_m": trans_span_m}
 
     # --- Stage 3.5: foot-contact detection (in-process, pure numpy) ---
     # Adds Phase 4's contact-aware IK lock layer on top of the rotation
@@ -217,6 +238,18 @@ def main(argv=None) -> int:
             if asym > 0.05:
                 print(f"[process_take] WARN: floor_z asymmetry > 5 cm "
                       f"({asym:.3f}) — calibration may be biased.")
+            # Contact intervals are detected in world space (root
+            # translation included), but root_motion="zero" pins the
+            # rig's root — on a travelling take the planted foot MUST
+            # slide under a pinned root, so the IK lock would fight the
+            # walk instead of fixing skate.
+            if (root_motion == "zero" and trans_span_m is not None
+                    and trans_span_m > 0.5):
+                print(f"[process_take] WARN: take travels "
+                      f"{trans_span_m:.2f} m but root_motion='zero' pins "
+                      f"the root. Foot-lock will fight the walk. Set "
+                      f"bvh_export.root_motion='trans' for travelling "
+                      f"takes, or pass --no-foot-contact.")
     else:
         report["stages"]["foot_contact"] = {"skipped": True}
 

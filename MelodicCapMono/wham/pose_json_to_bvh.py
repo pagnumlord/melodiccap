@@ -45,6 +45,7 @@ from ._smpl_fk import (
     SMPL_REST_JOINTS,
     aa_to_matrix as _aa_to_matrix,
     euler_deg_to_matrix as _euler_deg_to_matrix,
+    resolve_global_rot_deg,
 )
 
 
@@ -141,7 +142,7 @@ def _write_hierarchy(lines, joint, parents, kids, offsets, depth):
     lines.append(f"{close_pad}}}")
 
 
-def convert(pose_data, *, root_motion="trans", global_rot_deg=(180.0, 0.0, 0.0)):
+def convert(pose_data, *, root_motion="trans", global_rot_deg=None):
     """Return BVH text for a melodiccap_mono_v1 pose dict.
 
     root_motion: 'trans' writes smpl_trans into the root position
@@ -149,15 +150,18 @@ def convert(pose_data, *, root_motion="trans", global_rot_deg=(180.0, 0.0, 0.0))
     is drift-prone — pin it and keyframe the path on the target rig).
 
     global_rot_deg: constant (X, Y, Z) degrees pre-multiplied onto the
-    ROOT joint only (and root translation). WHAM emits SMPL in a camera
-    frame whose up-axis doesn't match Blender's, so the imported
-    skeleton lands upside down; (180, 0, 0) flips it upright. Only the
-    root is touched — every other joint's rotation stays exactly as SMPL
+    ROOT joint only (and root translation). None (default) resolves
+    automatically from the JSON's coordinate_frame tag: gravity-aligned
+    "y_up_world" JSONs (current converter output) need no correction;
+    legacy camera-frame JSONs get the historical (180, 0, 0) upright
+    flip. Pass an explicit triple to override. Only the root is
+    touched — every other joint's rotation stays exactly as SMPL
     defines it (relative to its parent), so the motion remains correct
-    by construction. If 180/X isn't perfect, try -90/X etc. via the CLI.
+    by construction.
     """
     frames = pose_data["frames"]
     fps = float(pose_data.get("fps", 30.0))
+    global_rot_deg = resolve_global_rot_deg(pose_data, global_rot_deg)
     R_global = _euler_deg_to_matrix(*global_rot_deg)
 
     parents = SMPL_PARENTS
@@ -218,10 +222,11 @@ def main(argv=None):
                     help="'trans' (default) uses smpl_trans for the root; "
                          "'zero' pins the root in place.")
     ap.add_argument("--global-rot", nargs=3, type=float,
-                    metavar=("X", "Y", "Z"), default=[180.0, 0.0, 0.0],
+                    metavar=("X", "Y", "Z"), default=None,
                     help="Constant degrees pre-applied to the SMPL root to "
-                         "match Blender's up-axis (default 180 0 0 — flips "
-                         "WHAM's upside-down camera frame upright).")
+                         "match Blender's up-axis. Default: auto — no "
+                         "correction for gravity-aligned (y_up_world) JSONs, "
+                         "(180, 0, 0) for legacy camera-frame JSONs.")
     args = ap.parse_args(argv)
 
     if not args.input_json.exists():
@@ -229,7 +234,8 @@ def main(argv=None):
 
     data = _load_pose_json(args.input_json)
     bvh = convert(data, root_motion=args.root_motion,
-                  global_rot_deg=tuple(args.global_rot))
+                  global_rot_deg=(tuple(args.global_rot)
+                                  if args.global_rot is not None else None))
     args.output_bvh.parent.mkdir(parents=True, exist_ok=True)
     with args.output_bvh.open("w") as f:
         f.write(bvh)

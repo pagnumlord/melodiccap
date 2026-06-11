@@ -31,6 +31,22 @@ generalizes across characters.
   (stereo EasyMocap) is deferred to the rare climax shot needing
   root-translation accuracy. The legacy v5.x stereo solver
   (`MelodicCapRTM/`) is retired, not iterated.
+- **World-frame fix (June 2026)**: `wham_to_pose_json` now prefers WHAM's
+  gravity-aligned `pose_world`/`trans_world` keys and auto-levels the
+  take's mean body-up axis to +Y (`coordinate_frame: "y_up_world"` tag,
+  `frame_provenance` record). This kills the constant backward/forward
+  lean that camera-frame keys baked in from tripod tilt — the artifact
+  was identical through every retarget engine because it lived in the
+  source data. Consumers resolve their root correction from the tag
+  (`_smpl_fk.resolve_global_rot_deg`): tagged JSONs need none, legacy
+  JSONs keep the historical (180,0,0) flip — which `footlock.py` had
+  been wrongly skipping (its FK assumed +Y-up on Y-down camera data, so
+  a lifted foot read as *near the floor*). Pose JSONs generated before
+  this fix should be regenerated (`video2pose --from-pkl` if the pkl
+  was kept, else re-run WHAM). `process_take` also warns when a take
+  travels >0.5 m with `root_motion: "zero"` + foot-lock enabled (plant
+  detection is world-space; a pinned root makes the IK lock fight the
+  walk — switch that take to `root_motion: "trans"`).
 - **Production planning** lives in
   [`docs/production_plan.md`](docs/production_plan.md) — character
   rigging priority (Kai/Kiko next after Jax), shoot ordering by

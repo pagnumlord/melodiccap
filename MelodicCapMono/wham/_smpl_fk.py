@@ -64,6 +64,27 @@ SMPL_REST_JOINTS = np.array([
 # ankle height along this axis when detecting plants.
 HEIGHT_AXIS = 1
 
+# coordinate_frame value written by converters whose output is already
+# gravity-aligned, +Y up (world keys preferred + auto-leveling).
+FRAME_Y_UP_WORLD = "y_up_world"
+
+
+def resolve_global_rot_deg(pose_data, override=None):
+    """Single source of truth for the root-frame upright correction.
+
+    `override` (an explicit numeric (x, y, z) from CLI or character
+    config) always wins. Otherwise: pose JSONs tagged
+    coordinate_frame == "y_up_world" are already gravity-aligned and
+    need no correction; legacy JSONs (WHAM camera frame, +Y down) get
+    the historical (180, 0, 0) upright flip that pose_json_to_bvh has
+    always applied — and that footlock previously (wrongly) skipped.
+    """
+    if override is not None:
+        return tuple(float(v) for v in override)
+    if pose_data.get("coordinate_frame") == FRAME_Y_UP_WORLD:
+        return (0.0, 0.0, 0.0)
+    return (180.0, 0.0, 0.0)
+
 
 def aa_to_matrix(aa) -> np.ndarray:
     """Axis-angle (3,) radians -> (3,3) rotation matrix (Rodrigues)."""

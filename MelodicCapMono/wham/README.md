@@ -130,10 +130,11 @@ bake the automated path's `calibration` block is tuned against.
    ```
 
    `--root-motion zero` pins the root (monocular trans drifts —
-   keyframe the path by hand). Default `--global-rot 180 0 0` flips
-   WHAM's camera frame so the skeleton stands upright after Blender's
-   BVH import. If a take still comes in upside down / facing wrong, the
-   only knob is `--global-rot X Y Z` (try `180 180 0` or `180 0 180`).
+   keyframe the path by hand). `--global-rot` defaults to **auto**:
+   gravity-aligned (`coordinate_frame: "y_up_world"`) JSONs need no
+   correction; legacy camera-frame JSONs get the historical `180 0 0`
+   upright flip. If a take still comes in upside down / facing wrong,
+   override with `--global-rot X Y Z` (try `180 180 0` or `180 0 180`).
 
 2. **Import** into Blender: File ▸ Import ▸ Motion Capture (.bvh).
    This is the motion *source* — a bare armature, no mesh, expected.
@@ -211,7 +212,9 @@ For best results:
 | `WHAM exited with code 1` and "CUDA out of memory" in log | GPU too small for video resolution | Re-encode video to 720p, or shorter clip |
 | `WHAM exited 0 but produced no .pkl` | No person detected | Check person is in frame the whole take; brighter lighting |
 | `WHAM 'pose' has unexpected shape` from converter | WHAM pkl format drifted between versions | Run `python -m MelodicCapMono.wham.video2pose --inspect-pkl <file>.pkl` to see the actual structure, then update `wham_to_pose_json.py` with the new keys / shapes |
-| BVH skeleton imports upside down / facing backward | WHAM's camera frame ≠ Blender up-axis | `pose_json_to_bvh --global-rot X Y Z` (default `180 0 0`; try `180 180 0` or `180 0 180`) |
+| **Character leans backward/forward constantly** (same lean in every retarget engine) | Pose JSON predates world-frame support: it carries WHAM's **camera-frame** pose, so the physical tripod tilt is baked into every frame | Regenerate the pose JSON (re-run `video2pose`, or `--from-pkl` if you kept the pkl with `--keep-intermediate`). The converter now prefers WHAM's gravity-aligned `pose_world`/`trans_world` keys and auto-levels the take's mean up-axis to +Y, writing `coordinate_frame: "y_up_world"` |
+| Leveling warning `rotated the take by NN deg` on an intentionally non-upright take (lying down, ground fight) | Auto-level assumes the take's *average* body-up is vertical | Re-run `video2pose` with `--no-level` and set the orientation manually via `--global-rot` at the BVH step |
+| BVH skeleton imports upside down / facing backward | Legacy camera-frame JSON ≠ Blender up-axis | Default is now `--global-rot` **auto**: `y_up_world` JSONs get no correction, legacy JSONs get `180 0 0`. Override explicitly (`180 180 0`, `180 0 180`) only if a take still faces wrong |
 | Retargeted hands/feet frozen while the body moves | That limb is still IK, or only the FK bones were mapped | Set `IK_FK = 1.0` on all four `*_parent` bones; also map SMPL `*_foot→foot_ik` and `*_hand→hand_ik` alongside `*_ankle→foot_fk` / `*_wrist→hand_fk` |
 | Rig drifts / slides over a long take | Monocular root drift + no foot ground-lock (both expected) | Export with `--root-motion zero`; keyframe the path and a foot-lock pass by hand on the baked action |
 

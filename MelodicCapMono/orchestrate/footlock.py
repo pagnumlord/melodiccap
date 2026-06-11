@@ -36,6 +36,7 @@ from MelodicCapMono.wham._smpl_fk import (
     HEIGHT_AXIS,
     SMPL_JOINT_NAMES,
     forward_kinematics,
+    resolve_global_rot_deg,
 )
 
 
@@ -104,8 +105,14 @@ def detect_foot_contacts(pose_data, *, config=None):
                     "foot_contact_l": [], "foot_contact_r": []},
                 "config_used": cfg}
 
-    # Per-frame world joint positions (SMPL canonical frame, +Y up).
-    joints = forward_kinematics(pose_data, global_rot_deg=(0.0, 0.0, 0.0))
+    # Per-frame world joint positions, gravity-aligned +Y up. The root
+    # correction resolves from the JSON's coordinate_frame tag: zero for
+    # leveled converter output, the legacy 180-degree X flip for old
+    # camera-frame JSONs (whose raw +Y points DOWN — without the flip,
+    # a lifted foot reads as *closer* to the floor and the near-floor
+    # test passes during swings).
+    joints = forward_kinematics(
+        pose_data, global_rot_deg=resolve_global_rot_deg(pose_data))
     h = HEIGHT_AXIS  # 1 — Y is the up axis in SMPL canonical
 
     ankle_l = joints[:, J_LEFT_ANKLE]
